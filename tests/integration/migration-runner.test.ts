@@ -415,6 +415,65 @@ CREATE TABLE concurrent_migration_probe (id integer PRIMARY KEY);`,
   );
 
   it(
+    'applies pre_roll migrations before the deferred universal-scope post_roll migration',
+    async () => {
+      const scratch = await createScratchDb();
+      try {
+        await legacy040WithBaseline(scratch);
+
+        const preRoll = await runMigrate(scratch, {
+          mode: 'apply',
+          phase: 'pre_roll',
+          yes: false,
+          json: false,
+        });
+        expect(preRoll.exitCode).toBe(0);
+        expect(appliedLogFilenames(preRoll.logs)).toEqual(
+          (await migrationFilenames()).filter(
+            (filename) => migrationPrefix(filename) >= 41 && migrationPrefix(filename) < 48,
+          ),
+        );
+
+        const preRollStatus = await runMigrate(scratch, {
+          mode: 'status',
+          phase: 'pre_roll',
+          yes: false,
+          json: true,
+        });
+        expect(preRollStatus.exitCode).toBe(0);
+        expect(JSON.parse(preRollStatus.logs[0]!)).toMatchObject({
+          phase: 'pre_roll',
+          state: 'in_sync',
+          pending: [],
+          deferred_pending: [
+            '048_universal_api_key_scope.sql',
+            '049_backfill_builder_owner_memberships.sql',
+          ],
+        });
+
+        const postRoll = await runMigrate(scratch, {
+          mode: 'apply',
+          phase: 'post_roll',
+          yes: false,
+          json: false,
+        });
+        expect(postRoll.exitCode).toBe(0);
+        expect(appliedLogFilenames(postRoll.logs)).toEqual([
+          '048_universal_api_key_scope.sql',
+          '049_backfill_builder_owner_memberships.sql',
+        ]);
+
+        await assertCompleteLedger(scratch, (filename) =>
+          migrationPrefix(filename) <= 40 ? 'baseline' : 'db:migrate',
+        );
+      } finally {
+        await scratch.drop();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
     'reports status through the real CLI for in-sync and pending scratch databases',
     async () => {
       const inSync = await createScratchDb();

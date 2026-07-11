@@ -67,7 +67,7 @@ FROM deps AS migrations
 # Step 6 migration runner. The Next.js standalone image intentionally omits
 # db/ and pnpm; this target keeps the migration assets and package runner.
 COPY db/ ./db/
-COPY scripts/apply-postgres-migration.ts scripts/apply-postgres-migration-env.ts scripts/db-migrate.ts scripts/db-migrate-core.ts scripts/db-migrate-env.ts ./scripts/
+COPY scripts/apply-postgres-migration.ts scripts/apply-postgres-migration-env.ts scripts/db-migrate.ts scripts/db-migrate-core.ts scripts/db-migrate-env.ts scripts/verify-physical-schema-contract.ts ./scripts/
 COPY scripts/check-external-egress.ts ./scripts/
 COPY src/lib/external-egress.ts src/lib/external-egress-config.ts src/lib/external-egress-core.ts src/lib/safe-error-metadata.ts ./src/lib/
 COPY tsconfig.json ./

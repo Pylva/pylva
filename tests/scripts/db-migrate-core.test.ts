@@ -1,9 +1,51 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  defaultMigrationPhaseMetadata,
+  parseMigrationPhaseMetadata,
   prepareOnlineMigration,
+  resolveMigrationPhases,
   type MigrateSqlClient,
   type MigrateTx,
 } from '../../scripts/db-migrate-core.js';
+
+describe('migration phase metadata', () => {
+  it('defaults migrations to pre_roll and applies explicit post_roll overrides', () => {
+    const metadata = parseMigrationPhaseMetadata({
+      default: 'pre_roll',
+      overrides: { '048_universal_api_key_scope.sql': 'post_roll' },
+    });
+    const phases = resolveMigrationPhases(
+      ['041_rename_api_key_scopes.sql', '048_universal_api_key_scope.sql'],
+      metadata,
+    );
+
+    expect(phases.get('041_rename_api_key_scopes.sql')).toBe('pre_roll');
+    expect(phases.get('048_universal_api_key_scope.sql')).toBe('post_roll');
+    expect(defaultMigrationPhaseMetadata()).toEqual({ default: 'pre_roll', overrides: {} });
+  });
+
+  it('rejects invalid phases and stale override filenames', () => {
+    expect(() => parseMigrationPhaseMetadata({ default: 'before_roll', overrides: {} })).toThrow(
+      /default must be one of/,
+    );
+    expect(() =>
+      parseMigrationPhaseMetadata({
+        default: 'pre_roll',
+        overrides: { '048_universal_api_key_scope.sql': 'after_roll' },
+      }),
+    ).toThrow(/override for 048_universal_api_key_scope\.sql must be one of/);
+
+    expect(() =>
+      resolveMigrationPhases(
+        ['041_rename_api_key_scopes.sql'],
+        parseMigrationPhaseMetadata({
+          default: 'pre_roll',
+          overrides: { '048_universal_api_key_scope.sql': 'post_roll' },
+        }),
+      ),
+    ).toThrow(/override references migration missing from disk/);
+  });
+});
 
 describe('prepareOnlineMigration', () => {
   it('does nothing for migrations without an online preparation', async () => {

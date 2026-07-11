@@ -31,11 +31,22 @@ export interface MigrationFile {
   filename: string;
   checksum: string;
   content: string;
+  phase?: MigrationPhase;
 }
 
 export interface LedgerRow {
   filename: string;
   checksum: string;
+}
+
+export const MIGRATION_PHASES = ['pre_roll', 'post_roll'] as const;
+export type MigrationPhase = (typeof MIGRATION_PHASES)[number];
+
+export const DEFAULT_MIGRATION_PHASE: MigrationPhase = 'pre_roll';
+
+export interface MigrationPhaseMetadata {
+  default: MigrationPhase;
+  overrides: Readonly<Record<string, MigrationPhase>>;
 }
 
 export type MigrationState = 'in_sync' | 'pending' | 'drift' | 'untracked';
@@ -63,6 +74,93 @@ const MIGRATION_ADVISORY_LOCK_ARGS = [1887001718, 1835624306];
 const UNIVERSAL_API_KEY_SCOPE_MIGRATION = '048_universal_api_key_scope.sql';
 const UNIVERSAL_API_KEY_BACKFILL_BATCH_SIZE = 1_000;
 const ONLINE_DDL_LOCK_TIMEOUT = '1s';
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function isMigrationPhase(value: unknown): value is MigrationPhase {
+  return typeof value === 'string' && MIGRATION_PHASES.includes(value as MigrationPhase);
+}
+
+function phaseMetadataError(message: string): Error {
+  return new Error(`Invalid migration phase metadata: ${message}`);
+}
+
+/**
+ * Parse the checked-in db/migration-phases.json shape without tying callers to
+ * filesystem access. This is also used by assembled-source deployment checks.
+ */
+export function parseMigrationPhaseMetadata(value: unknown): MigrationPhaseMetadata {
+  if (!isRecord(value)) {
+    throw phaseMetadataError('expected an object');
+  }
+
+  if (!isMigrationPhase(value['default'])) {
+    throw phaseMetadataError(`default must be one of ${MIGRATION_PHASES.join(', ')}`);
+  }
+  if (!isRecord(value['overrides'])) {
+    throw phaseMetadataError('overrides must be an object');
+  }
+
+  const overrides: Record<string, MigrationPhase> = {};
+  for (const [filename, phase] of Object.entries(value['overrides'])) {
+    if (!isMigrationPhase(phase)) {
+      throw phaseMetadataError(
+        `override for ${filename} must be one of ${MIGRATION_PHASES.join(', ')}`,
+      );
+    }
+    overrides[filename] = phase;
+  }
+
+  return { default: value['default'], overrides };
+}
+
+export function defaultMigrationPhaseMetadata(): MigrationPhaseMetadata {
+  return { default: DEFAULT_MIGRATION_PHASE, overrides: {} };
+}
+
+/**
+ * Resolve every migration's phase and fail closed on stale override names.
+ * Keeping this pure lets deployment assembly validate its merged SQL tree.
+ */
+export function resolveMigrationPhases(
+  filenames: readonly string[],
+  metadata: MigrationPhaseMetadata,
+): Map<string, MigrationPhase> {
+  const knownFilenames = new Set(filenames);
+  for (const filename of Object.keys(metadata.overrides)) {
+    if (!knownFilenames.has(filename)) {
+      throw phaseMetadataError(`override references migration missing from disk: ${filename}`);
+    }
+  }
+
+  return new Map(
+    filenames.map((filename) => [filename, metadata.overrides[filename] ?? metadata.default]),
+  );
+}
+
+export async function readMigrationPhaseMetadata(
+  migrationsDir: string,
+): Promise<MigrationPhaseMetadata> {
+  const metadataPath = path.resolve(migrationsDir, '..', 'migration-phases.json');
+  try {
+    const content = await fs.readFile(metadataPath, 'utf8');
+    return parseMigrationPhaseMetadata(JSON.parse(content) as unknown);
+  } catch (error) {
+    const code =
+      typeof error === 'object' && error !== null && 'code' in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+    if (code === 'ENOENT') {
+      return defaultMigrationPhaseMetadata();
+    }
+    if (error instanceof SyntaxError) {
+      throw phaseMetadataError(`could not parse ${metadataPath}: ${error.message}`);
+    }
+    throw error;
+  }
+}
 
 function reservableClient(sql: MigrateSqlClient): ReservableMigrateSqlClient | null {
   const candidate = sql as MigrateSqlClient & { reserve?: unknown };
@@ -208,13 +306,116 @@ export async function listMigrationFiles(migrationsDir: string): Promise<Migrati
     .filter((entry) => entry.isFile() && entry.name.endsWith('.sql'))
     .map((entry) => entry.name)
     .sort();
+  const phaseByFilename = resolveMigrationPhases(
+    filenames,
+    await readMigrationPhaseMetadata(migrationsDir),
+  );
 
   return Promise.all(
     filenames.map(async (filename) => {
       const content = await fs.readFile(path.join(migrationsDir, filename), 'utf8');
-      return { filename, checksum: computeChecksum(content), content };
+      const phase = phaseByFilename.get(filename);
+      if (phase === undefined) {
+        throw new Error(`Missing migration phase for ${filename}`);
+      }
+      return { filename, checksum: computeChecksum(content), content, phase };
     }),
   );
+}
+
+export function migrationFilesForPhase(
+  files: MigrationFile[],
+  phase: MigrationPhase,
+): MigrationFile[] {
+  return files.filter((file) => (file.phase ?? DEFAULT_MIGRATION_PHASE) === phase);
+}
+
+function pendingMigrationFiles(status: MigrationStatus, files: MigrationFile[]): MigrationFile[] {
+  const filesByFilename = new Map(files.map((file) => [file.filename, file]));
+  return status.pending.flatMap((filename) => {
+    const file = filesByFilename.get(filename);
+    if (file === undefined) {
+      throw new Error(`Missing migration file metadata for ${filename}`);
+    }
+    return file;
+  });
+}
+
+/**
+ * Select work for a rollout stage without reordering numbered migrations.
+ * pre_roll stops at the first pending post_roll marker; post_roll owns that
+ * marker and its remaining pending suffix, including later default-pre files.
+ */
+export function pendingMigrationFilesForPhase(
+  status: MigrationStatus,
+  files: MigrationFile[],
+  phase: MigrationPhase,
+): MigrationFile[] {
+  const pendingFiles = pendingMigrationFiles(status, files);
+  const firstPostRoll = pendingFiles.findIndex(
+    (file) => (file.phase ?? DEFAULT_MIGRATION_PHASE) === 'post_roll',
+  );
+
+  if (phase === 'pre_roll') {
+    return firstPostRoll < 0 ? pendingFiles : pendingFiles.slice(0, firstPostRoll);
+  }
+
+  return firstPostRoll < 0 ? [] : pendingFiles.slice(firstPostRoll);
+}
+
+/**
+ * A post-roll invocation must never skip a numbered pre-roll prefix. Once a
+ * pending post-roll marker is reached, that invocation owns the full suffix.
+ */
+export function pendingPreRollBlockers(
+  status: MigrationStatus,
+  files: MigrationFile[],
+): MigrationFile[] {
+  const pendingFiles = pendingMigrationFiles(status, files);
+  const firstPostRoll = pendingFiles.findIndex(
+    (file) => (file.phase ?? DEFAULT_MIGRATION_PHASE) === 'post_roll',
+  );
+  return firstPostRoll < 0 ? [] : pendingFiles.slice(0, firstPostRoll);
+}
+
+/**
+ * Scope ordinary pending/applied reporting to one rollout stage without
+ * allowing global ledger drift or unknown rows to be hidden by that filter.
+ */
+export function statusForMigrationPhase(
+  status: MigrationStatus,
+  files: MigrationFile[],
+  phase: MigrationPhase,
+): MigrationStatus {
+  const phaseFilenames = new Set(
+    pendingMigrationFilesForPhase(status, files, phase).map((file) => file.filename),
+  );
+  const appliedPhaseFilenames = new Set(
+    migrationFilesForPhase(files, phase).map((file) => file.filename),
+  );
+  const applied = status.applied.filter((filename) => appliedPhaseFilenames.has(filename));
+  const pending = status.pending.filter((filename) => phaseFilenames.has(filename));
+
+  if (status.state === 'untracked') {
+    return { applied, pending, drift: [], unknown: [], state: 'untracked' };
+  }
+  if (status.drift.length > 0 || status.unknown.length > 0) {
+    return {
+      applied,
+      pending,
+      drift: status.drift,
+      unknown: status.unknown,
+      state: 'drift',
+    };
+  }
+
+  return {
+    applied,
+    pending,
+    drift: [],
+    unknown: [],
+    state: pending.length > 0 ? 'pending' : 'in_sync',
+  };
 }
 
 export async function ledgerExists(sql: MigrateSqlClient): Promise<boolean> {
@@ -394,15 +595,20 @@ export async function applyPending(opts: {
   files: MigrationFile[];
   ledger: LedgerRow[];
   appliedBy: 'db:migrate' | 'db:setup';
+  phase?: MigrationPhase;
   lockTimeout?: string;
   log?: (line: string) => void;
 }): Promise<{ appliedCount: number }> {
   const lockTimeout = opts.lockTimeout ?? '30s';
   const status = computeStatus(opts.files, opts.ledger);
   const filesByFilename = new Map(opts.files.map((file) => [file.filename, file]));
+  const pending =
+    opts.phase === undefined
+      ? status.pending
+      : pendingMigrationFilesForPhase(status, opts.files, opts.phase).map((file) => file.filename);
   let appliedCount = 0;
 
-  for (const filename of status.pending) {
+  for (const filename of pending) {
     const file = filesByFilename.get(filename);
     if (!file) {
       throw new Error(`Missing migration file metadata for ${filename}`);
