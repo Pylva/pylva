@@ -1,0 +1,235 @@
+{
+  "$comment": "B2b §4.5 — Canonical Stripe webhook events with signature envelopes. Drives stripe-webhook-*.test.ts. The 'expected_signature_hex' values are computed at runtime via stripe.webhooks.generateTestHeaderString({payload, secret, timestamp}) — fixtures store the raw event + the expected handler side-effect, not the signature itself.",
+  "version": "1.0",
+  "webhook_secret": "whsec_test_contract",
+  "fixtures": [
+    {
+      "name": "invoice_paid",
+      "description": "Happy path — status flips to 'paid', paid_at set, audit 'billing.invoice_paid'.",
+      "event": {
+        "id": "evt_1OaZ1X2eZvKYlo2C0001paid",
+        "object": "event",
+        "api_version": "2024-11-20.acacia",
+        "type": "invoice.paid",
+        "created": 1745236800,
+        "account": "acct_test_connected_account",
+        "data": {
+          "object": {
+            "id": "in_1OaZ1X2eZvKYlo2C0001",
+            "object": "invoice",
+            "customer": "cus_test_enduser_1",
+            "status": "paid",
+            "amount_paid": 10050,
+            "currency": "usd",
+            "metadata": {
+              "pylva_invoice_id": "aaaaaaaa-1111-1111-1111-111111111111",
+              "pylva_builder_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+              "pylva_customer_id": "cust_test_1"
+            }
+          }
+        }
+      },
+      "expected": {
+        "handler": "handleInvoicePaid",
+        "db_update": { "status": "paid", "paid_at_set": true },
+        "audit_action": "billing.invoice_paid",
+        "response_status": 200
+      }
+    },
+    {
+      "name": "invoice_payment_failed_with_alert",
+      "description": "Failed payment — status='failed', payment_failed_at set, deliverBuilderAlert invoked against builder_alert_config.",
+      "event": {
+        "id": "evt_1OaZ1X2eZvKYlo2C0002failed",
+        "object": "event",
+        "api_version": "2024-11-20.acacia",
+        "type": "invoice.payment_failed",
+        "created": 1745237000,
+        "account": "acct_test_connected_account",
+        "data": {
+          "object": {
+            "id": "in_1OaZ1X2eZvKYlo2C0002",
+            "object": "invoice",
+            "customer": "cus_test_enduser_2",
+            "status": "open",
+            "attempt_count": 1,
+            "amount_remaining": 5000,
+            "currency": "usd",
+            "metadata": {
+              "pylva_invoice_id": "bbbbbbbb-2222-2222-2222-222222222222",
+              "pylva_builder_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+              "pylva_customer_id": "cust_test_2"
+            }
+          }
+        }
+      },
+      "expected": {
+        "handler": "handleInvoicePaymentFailed",
+        "db_update": { "status": "failed", "payment_failed_at_set": true },
+        "audit_action": "billing.invoice_payment_failed",
+        "alert_delivered": true,
+        "response_status": 200
+      }
+    },
+    {
+      "name": "invoice_payment_failed_no_alert_config",
+      "description": "Builder has no builder_alert_config — status still updates, audit marks alert_skipped_no_config (§5.4 edge).",
+      "event": {
+        "id": "evt_1OaZ1X2eZvKYlo2C0003failed",
+        "object": "event",
+        "api_version": "2024-11-20.acacia",
+        "type": "invoice.payment_failed",
+        "created": 1745237100,
+        "account": "acct_test_connected_account",
+        "data": {
+          "object": {
+            "id": "in_1OaZ1X2eZvKYlo2C0003",
+            "object": "invoice",
+            "customer": "cus_test_enduser_3",
+            "status": "open",
+            "attempt_count": 1,
+            "amount_remaining": 2500,
+            "currency": "usd",
+            "metadata": {
+              "pylva_invoice_id": "cccccccc-3333-3333-3333-333333333333",
+              "pylva_builder_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+              "pylva_customer_id": "cust_test_3"
+            }
+          }
+        }
+      },
+      "expected": {
+        "handler": "handleInvoicePaymentFailed",
+        "db_update": { "status": "failed", "payment_failed_at_set": true },
+        "audit_action": "billing.invoice_payment_failed",
+        "alert_delivered": false,
+        "alert_skip_reason": "alert_skipped_no_config",
+        "response_status": 200
+      }
+    },
+    {
+      "name": "invoice_viewed",
+      "description": "End-user opened Stripe-hosted invoice page → last_viewed_at updated.",
+      "event": {
+        "id": "evt_1OaZ1X2eZvKYlo2C0004viewed",
+        "object": "event",
+        "api_version": "2024-11-20.acacia",
+        "type": "invoice.sent",
+        "created": 1745237200,
+        "account": "acct_test_connected_account",
+        "data": {
+          "object": {
+            "id": "in_1OaZ1X2eZvKYlo2C0001",
+            "object": "invoice",
+            "customer": "cus_test_enduser_1",
+            "metadata": {
+              "pylva_invoice_id": "aaaaaaaa-1111-1111-1111-111111111111",
+              "pylva_builder_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            }
+          }
+        }
+      },
+      "expected": {
+        "handler": "handleInvoiceSent",
+        "db_update": { "last_viewed_at_set": true },
+        "audit_action": null,
+        "response_status": 200
+      }
+    },
+    {
+      "name": "charge_dispute_created",
+      "description": "Customer opened a dispute — audit + fire builder alert.",
+      "event": {
+        "id": "evt_1OaZ1X2eZvKYlo2C0005dispute",
+        "object": "event",
+        "api_version": "2024-11-20.acacia",
+        "type": "charge.dispute.created",
+        "created": 1745237500,
+        "account": "acct_test_connected_account",
+        "data": {
+          "object": {
+            "id": "dp_test_1",
+            "object": "dispute",
+            "amount": 5000,
+            "currency": "usd",
+            "charge": "ch_test_1",
+            "reason": "fraudulent",
+            "status": "needs_response",
+            "metadata": {
+              "pylva_builder_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            }
+          }
+        }
+      },
+      "expected": {
+        "handler": "handleChargeDisputeCreated",
+        "audit_action": "billing.dispute_created",
+        "alert_delivered": true,
+        "response_status": 200
+      }
+    },
+    {
+      "name": "invoice_paid_row_missing_race",
+      "description": "Webhook arrives before invoices row exists (race). Handler UPDATE WHERE stripe_invoice_id → 0 rows; audit alert_skipped_no_invoice; returns 200 (Stripe won't retry).",
+      "event": {
+        "id": "evt_1OaZ1X2eZvKYlo2C0006orphan",
+        "object": "event",
+        "api_version": "2024-11-20.acacia",
+        "type": "invoice.paid",
+        "created": 1745237800,
+        "account": "acct_test_connected_account",
+        "data": {
+          "object": {
+            "id": "in_unknown_orphan",
+            "object": "invoice",
+            "customer": "cus_test_orphan",
+            "status": "paid",
+            "amount_paid": 100,
+            "currency": "usd",
+            "metadata": {
+              "pylva_invoice_id": "zzzzzzzz-9999-9999-9999-999999999999",
+              "pylva_builder_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            }
+          }
+        }
+      },
+      "expected": {
+        "handler": "handleInvoicePaid",
+        "db_update": { "rows_affected": 0 },
+        "audit_action": "alert_skipped_no_invoice",
+        "response_status": 200
+      }
+    },
+    {
+      "name": "duplicate_event_id_replay",
+      "description": "Stripe redelivery with same event.id → idempotent no-op on second call (§5.3 stripe-webhook-replay test).",
+      "event": {
+        "id": "evt_1OaZ1X2eZvKYlo2C0001paid",
+        "object": "event",
+        "api_version": "2024-11-20.acacia",
+        "type": "invoice.paid",
+        "created": 1745236800,
+        "account": "acct_test_connected_account",
+        "data": {
+          "object": {
+            "id": "in_1OaZ1X2eZvKYlo2C0001",
+            "object": "invoice",
+            "customer": "cus_test_enduser_1",
+            "status": "paid",
+            "amount_paid": 10050,
+            "currency": "usd",
+            "metadata": {
+              "pylva_invoice_id": "aaaaaaaa-1111-1111-1111-111111111111",
+              "pylva_builder_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            }
+          }
+        }
+      },
+      "expected": {
+        "handler": "handleInvoicePaid",
+        "db_update": { "idempotent_noop": true },
+        "response_status": 200
+      }
+    }
+  ]
+}

@@ -1,0 +1,150 @@
+name: Self-Host Smoke
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DATABASE_URL: postgresql://pylva:pylva_test@localhost:5432/pylva_test
+  CLICKHOUSE_URL: http://default:test@localhost:8123
+  REDIS_URL: redis://localhost:6379
+  JWT_PRIVATE_KEY: /tmp/pylva-ci-private.pem
+  JWT_PUBLIC_KEY: /tmp/pylva-ci-public.pem
+  ARGON2_SECRET: ci-test-secret-must-be-32-bytes-long!!
+  PYLVA_BACKEND_URL: http://localhost:3000
+  PUBLIC_SITE_URL: http://localhost:3000
+  OAUTH_REDIRECT_BASE_URL: http://localhost:3000
+  SESSION_COOKIE_SECURE: 'false'
+
+jobs:
+  self-host-smoke:
+    name: self-host-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: pylva_test
+          POSTGRES_USER: pylva
+          POSTGRES_PASSWORD: pylva_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pylva"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8
+        env:
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: test
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+        ports:
+          - 8123:8123
+        options: >-
+          --health-cmd "clickhouse-client --password test --query 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate JWT keypair
+        run: |
+          node --input-type=module <<'NODE'
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+
+          const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
+            modulusLength: 2048,
+            publicKeyEncoding: {
+              type: 'spki',
+              format: 'pem',
+            },
+            privateKeyEncoding: {
+              type: 'pkcs8',
+              format: 'pem',
+            },
+          });
+
+          fs.writeFileSync(process.env.JWT_PRIVATE_KEY, privateKey, { mode: 0o600 });
+          fs.writeFileSync(process.env.JWT_PUBLIC_KEY, publicKey, { mode: 0o644 });
+          NODE
+
+      - name: Run migrations
+        run: pnpm db:setup
+
+      - name: Seed database
+        run: pnpm db:seed
+
+      - name: Build app
+        run: pnpm build
+
+      - name: Start production server
+        run: |
+          pnpm exec next start -p 3000 > /tmp/pylva-next.log 2>&1 &
+          echo "$!" > /tmp/pylva-next.pid
+
+      - name: Probe liveness and print health
+        run: |
+          set -euo pipefail
+
+          code=""
+          for attempt in {1..45}; do
+            code="$(curl --max-time 5 -sS -o /tmp/pylva-livez.json -w "%{http_code}" http://localhost:3000/api/v1/livez || true)"
+            if [ "$code" = "200" ]; then
+              cat /tmp/pylva-livez.json
+              echo
+              break
+            fi
+
+            if ! kill -0 "$(cat /tmp/pylva-next.pid)" 2>/dev/null; then
+              echo "Server exited before /api/v1/livez returned 200."
+              cat /tmp/pylva-next.log
+              exit 1
+            fi
+
+            sleep 2
+          done
+
+          if [ "$code" != "200" ]; then
+            echo "/api/v1/livez did not return 200 within 90 seconds."
+            cat /tmp/pylva-next.log
+            exit 1
+          fi
+
+          echo "GET /api/v1/health:"
+          curl --max-time 10 -sS -i http://localhost:3000/api/v1/health || true
+          echo
+
+      - name: Dump server log
+        if: failure()
+        run: cat /tmp/pylva-next.log || true

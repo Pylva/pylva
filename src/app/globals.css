@@ -1,0 +1,390 @@
+/* B2a Phase 0a — global styles.
+ * Tailwind v4 loads here via @import. Custom tokens declared with @theme
+ * flow through to shadcn/ui components.
+ *
+ * Since 2026-06-11: one brand palette, two densities. The product surface
+ * renders the marketing cream + teal + ink language at app density.
+ * Surface scoping via [data-marketing]/[data-app]/[data-portal].
+ * Dark-mode (D19): follow system by default; ThemeProvider toggles .dark.
+ */
+
+@import 'tailwindcss';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  /* --- One-brand palette shared by marketing, app, and portal surfaces. --- */
+  /* Teal accent ramp. brand-700 (= --accent-ink) is the light-mode primary —
+   * AA with white text. Bright teal (300) is rings/highlights/dark primary. */
+  --color-brand-50: oklch(0.97 0.018 190);
+  --color-brand-100: oklch(0.92 0.05 190);
+  --color-brand-300: oklch(0.72 0.12 190);
+  --color-brand-500: oklch(0.58 0.14 190);
+  --color-brand-700: oklch(0.35 0.09 190);
+  --color-brand-900: oklch(0.25 0.06 190);
+
+  /* Cream paper + ink neutrals (same language as [data-marketing]). */
+  --color-neutral-0: oklch(1 0 0);
+  --color-neutral-50: oklch(0.985 0.004 95);
+  --color-neutral-100: oklch(0.965 0.005 95);
+  --color-neutral-200: oklch(0.92 0.005 90);
+  --color-neutral-300: oklch(0.86 0.006 90);
+  --color-neutral-500: oklch(0.48 0.01 200);
+  --color-neutral-700: oklch(0.28 0.012 200);
+  --color-neutral-800: oklch(0.22 0.012 210);
+  --color-neutral-900: oklch(0.18 0.01 200);
+
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* Radii — soft but not pillowy. */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+}
+
+/* --- shadcn tokens (light) ---
+ * These map the design tokens above into the CSS variables that shadcn/ui
+ * components expect. Keep this section in sync when adding shadcn primitives.
+ */
+:root {
+  --background: var(--color-neutral-50); /* cream page; cards stay white */
+  --foreground: var(--color-neutral-900);
+
+  --card: var(--color-neutral-0);
+  --card-foreground: var(--color-neutral-900);
+
+  --popover: var(--color-neutral-0);
+  --popover-foreground: var(--color-neutral-900);
+
+  --primary: var(--color-brand-700); /* teal ink — AA with white foreground */
+  --primary-foreground: var(--color-neutral-0);
+
+  --secondary: var(--color-neutral-100);
+  --secondary-foreground: var(--color-neutral-900);
+
+  --muted: var(--color-neutral-100);
+  --muted-foreground: var(--color-neutral-500);
+
+  --accent: var(--color-neutral-100);
+  --accent-foreground: var(--color-neutral-900);
+
+  --destructive: oklch(0.57 0.22 26);
+  --destructive-foreground: var(--color-neutral-0);
+
+  --border: var(--color-neutral-200);
+  --input: var(--color-neutral-200);
+  --ring: var(--color-brand-500);
+
+  --radius: 0.5rem;
+}
+
+.dark {
+  /* Dark surface family (hue-210 surfaces) + bright-teal primary. */
+  --background: oklch(0.17 0.01 210);
+  --foreground: oklch(0.96 0.006 210);
+
+  --card: var(--color-neutral-800);
+  --card-foreground: oklch(0.96 0.006 210);
+
+  --popover: var(--color-neutral-800);
+  --popover-foreground: oklch(0.96 0.006 210);
+
+  --primary: var(--color-brand-300);
+  --primary-foreground: oklch(0.12 0.01 200);
+
+  --secondary: var(--color-neutral-800);
+  --secondary-foreground: oklch(0.96 0.006 210);
+
+  --muted: var(--color-neutral-800);
+  --muted-foreground: oklch(0.8 0.008 210);
+
+  --accent: var(--color-neutral-800);
+  --accent-foreground: oklch(0.96 0.006 210);
+
+  --destructive: oklch(0.48 0.22 26);
+  --destructive-foreground: var(--color-neutral-0);
+
+  --border: oklch(0.27 0.013 210);
+  --input: oklch(0.27 0.013 210);
+  --ring: var(--color-brand-300);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* --- Marketing surface tokens (frontend launch) ---
+ * Scoped via [data-marketing] on the marketing layout wrapper so the public
+ * site can match the cream + teal direction (Test.zip "Current") without
+ * destabilizing dashboard tokens. Dashboard token isolation is kept by
+ * surface-scoped variables.
+ */
+[data-marketing] {
+  /* Warm off-white cream background. */
+  --mkt-bg: oklch(0.985 0.004 95);
+  --mkt-surface: oklch(1 0 0);
+  --mkt-surface-muted: oklch(0.965 0.005 95);
+  --mkt-surface-tint: oklch(0.97 0.018 190);
+
+  /* Near-black text. */
+  --mkt-fg: oklch(0.18 0.01 200);
+  --mkt-fg-2: oklch(0.28 0.012 200);
+  --mkt-fg-muted: oklch(0.48 0.01 200);
+  --mkt-fg-soft: oklch(0.51 0.009 200); /* §4.1 ink-4 — AA at 12px on cream/white (2026-06-11) */
+
+  /* Teal accent. */
+  --mkt-accent: oklch(0.72 0.12 190);
+  --mkt-accent-2: oklch(0.58 0.14 190);
+  --mkt-accent-3: oklch(0.92 0.05 190);
+  --mkt-accent-ink: oklch(0.35 0.09 190);
+  --mkt-accent-fg: oklch(0.12 0.01 200);
+  --mkt-accent-hover: oklch(0.64 0.13 190);
+
+  --mkt-border: oklch(0.92 0.005 90);
+  --mkt-border-strong: oklch(0.86 0.006 90);
+  --mkt-dark: oklch(0.17 0.01 210);
+  --mkt-dark-elev: oklch(0.22 0.012 210);
+  --mkt-dark-line: oklch(0.27 0.013 210);
+  --mkt-dark-fg: oklch(0.96 0.006 210);
+  --mkt-dark-muted: oklch(0.72 0.008 210);
+  --mkt-radius: 8px;
+  --mkt-radius-lg: 14px;
+  --mkt-section-pad: 96px;
+
+  --mkt-font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mkt-font-display: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mkt-font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  background-color: var(--mkt-bg);
+  color: var(--mkt-fg);
+  font-family: var(--mkt-font-sans);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'ss01', 'cv11';
+}
+
+[data-marketing] .mkt-mono {
+  font-family: var(--mkt-font-mono);
+}
+
+[data-marketing] .mkt-display {
+  font-family: var(--mkt-font-display);
+  font-size: clamp(44px, 6.2vw, 84px);
+  font-weight: 460;
+  letter-spacing: -0.035em;
+  line-height: 1.02;
+}
+
+[data-marketing] .mkt-money-display {
+  font-family: var(--mkt-font-display);
+  font-size: 40px;
+  font-weight: 460;
+  letter-spacing: 0;
+  line-height: 1.05;
+}
+
+[data-marketing] .mkt-money-heading {
+  font-family: var(--mkt-font-display);
+  font-size: 32px;
+  font-weight: 460;
+  letter-spacing: 0;
+  line-height: 1.08;
+}
+
+@media (min-width: 768px) {
+  [data-marketing] .mkt-money-display {
+    font-size: 68px;
+  }
+
+  [data-marketing] .mkt-money-heading {
+    font-size: 48px;
+  }
+}
+
+@media (min-width: 1024px) {
+  [data-marketing] .mkt-money-display {
+    font-size: 80px;
+  }
+}
+
+[data-marketing] .mkt-sequence-label {
+  align-self: flex-start;
+  display: inline-block;
+  font-family: var(--mkt-font-display);
+  font-size: clamp(36px, 4.2vw, 54px);
+  font-weight: 460;
+  letter-spacing: 0;
+  line-height: 0.95;
+  white-space: nowrap;
+}
+
+[data-marketing] .mkt-h2 {
+  font-family: var(--mkt-font-display);
+  font-size: clamp(32px, 4vw, 52px);
+  font-weight: 480;
+  letter-spacing: -0.03em;
+  line-height: 1.08;
+}
+
+[data-marketing] .mkt-section {
+  border-top: 1px solid var(--mkt-border);
+  padding-block: var(--mkt-section-pad);
+}
+
+[data-marketing] .mkt-container {
+  margin-inline: auto;
+  max-width: 1240px;
+  padding-inline: 32px;
+}
+
+[data-marketing] .mkt-eyebrow {
+  align-items: center;
+  color: var(--mkt-fg-soft);
+  display: inline-flex;
+  font-family: var(--mkt-font-mono);
+  font-size: 12px;
+  gap: 8px;
+  letter-spacing: 0;
+}
+
+[data-marketing] .mkt-eyebrow::before {
+  background: var(--mkt-accent);
+  border-radius: 999px;
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--mkt-accent) 18%, transparent);
+  content: '';
+  height: 7px;
+  width: 7px;
+}
+
+[data-marketing] .mkt-card {
+  background: var(--mkt-surface);
+  border: 1px solid var(--mkt-border);
+  border-radius: var(--mkt-radius-lg);
+}
+
+[data-marketing] .mkt-card.overflow-x-auto {
+  overflow-x: auto;
+}
+
+[data-marketing] .mkt-dark-panel {
+  background: var(--mkt-dark);
+  border: 1px solid var(--mkt-dark-line);
+  border-radius: var(--mkt-radius-lg);
+  color: var(--mkt-dark-fg);
+}
+
+[data-marketing] .hero-active-event {
+  animation: hero-active-event 520ms ease-out;
+}
+
+[data-marketing] .hero-metric-pulse-a {
+  animation: hero-metric-pulse-a 520ms ease-out;
+}
+
+[data-marketing] .hero-metric-pulse-b {
+  animation: hero-metric-pulse-b 520ms ease-out;
+}
+
+@keyframes hero-active-event {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklch, var(--mkt-accent) 32%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 22px -14px var(--mkt-accent);
+  }
+}
+
+@keyframes hero-metric-pulse-a {
+  0% {
+    background-color: color-mix(in oklch, var(--mkt-accent) 18%, transparent);
+  }
+  100% {
+    background-color: color-mix(in oklch, var(--mkt-accent) 9%, transparent);
+  }
+}
+
+@keyframes hero-metric-pulse-b {
+  0% {
+    background-color: color-mix(in oklch, var(--mkt-accent) 18%, transparent);
+  }
+  100% {
+    background-color: color-mix(in oklch, var(--mkt-accent) 9%, transparent);
+  }
+}
+
+[data-app] {
+  --app-bg: oklch(0.985 0.004 95); /* cream — same paper as marketing */
+  --app-panel: oklch(1 0 0);
+  --app-panel-muted: oklch(0.965 0.005 95);
+  --app-line: oklch(0.92 0.005 90);
+  --app-line-strong: oklch(0.86 0.006 90);
+  --app-ink: oklch(0.18 0.01 200);
+  --app-muted: oklch(0.48 0.01 200);
+  --app-brand: oklch(0.35 0.09 190); /* teal ink (accent-ink) */
+  --app-success: oklch(0.55 0.14 150);
+  --app-warn: oklch(0.57 0.15 75);
+  --app-danger: oklch(0.58 0.18 25);
+  background: var(--app-bg);
+  color: var(--app-ink);
+}
+
+/* Dark mode: without this, [data-app]'s light values clobber the .dark body
+ * tokens (pre-existing). Remap chrome tokens to the §4.1 dark family. */
+.dark [data-app] {
+  --app-bg: oklch(0.17 0.01 210);
+  --app-panel: oklch(0.22 0.012 210);
+  --app-panel-muted: oklch(0.14 0.01 210);
+  --app-line: oklch(0.27 0.013 210);
+  --app-line-strong: oklch(0.33 0.014 210);
+  --app-ink: oklch(0.96 0.006 210);
+  --app-muted: oklch(0.8 0.008 210);
+  --app-brand: oklch(0.72 0.12 190);
+  --app-success: oklch(0.74 0.14 150);
+  --app-warn: oklch(0.82 0.14 75);
+  --app-danger: oklch(0.72 0.16 25);
+}
+
+[data-app] .app-card {
+  background: var(--app-panel);
+  border: 1px solid var(--app-line);
+  border-radius: 10px;
+}
+
+/* Product headings render in the display family. */
+[data-app] h1,
+[data-app] h2 {
+  font-family: var(--font-sans);
+}
+
+[data-app] .app-muted {
+  color: var(--app-muted);
+}
+
+[data-portal] {
+  --portal-bg: oklch(0.985 0.004 95);
+  --portal-panel: oklch(1 0 0);
+  --portal-line: oklch(0.9 0.006 95);
+  --portal-ink: oklch(0.2 0.01 220);
+  --portal-muted: oklch(0.48 0.01 220);
+  background: var(--portal-bg);
+  color: var(--portal-ink);
+}
+
+@media (max-width: 820px) {
+  [data-marketing] {
+    --mkt-section-pad: 56px;
+  }
+
+  [data-marketing] .mkt-container {
+    padding-inline: 20px;
+  }
+}

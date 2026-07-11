@@ -1,0 +1,98 @@
+[
+  {
+    "provider": "openai",
+    "model": "gpt-4o",
+    "input_per_1m": 2.5,
+    "output_per_1m": 10.0,
+    "effective_from": "2024-05-13T00:00:00Z",
+    "source": "admin"
+  },
+  {
+    "provider": "openai",
+    "model": "gpt-4o-mini",
+    "input_per_1m": 0.15,
+    "output_per_1m": 0.6,
+    "effective_from": "2024-07-18T00:00:00Z",
+    "source": "admin"
+  },
+  {
+    "provider": "openai",
+    "model": "gpt-4-turbo",
+    "input_per_1m": 10.0,
+    "output_per_1m": 30.0,
+    "effective_from": "2024-04-09T00:00:00Z",
+    "source": "admin"
+  },
+  {
+    "provider": "openai",
+    "model": "gpt-3.5-turbo",
+    "input_per_1m": 0.5,
+    "output_per_1m": 1.5,
+    "effective_from": "2024-01-25T00:00:00Z",
+    "source": "admin"
+  },
+  {
+    "provider": "openai",
+    "model": "o3-mini",
+    "input_per_1m": 1.1,
+    "output_per_1m": 4.4,
+    "effective_from": "2025-01-31T00:00:00Z",
+    "source": "admin"
+  },
+  {
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-6",
+    "input_per_1m": 3.0,
+    "output_per_1m": 15.0,
+    "effective_from": "2025-05-01T00:00:00Z",
+    "source": "admin"
+  },
+  {
+    "provider": "anthropic",
+    "model": "claude-haiku-4-5",
+    "input_per_1m": 1.0,
+    "output_per_1m": 5.0,
+    "effective_from": "2025-04-01T00:00:00Z",
+    "source": "admin"
+  },
+  {
+    "provider": "anthropic",
+    "model": "claude-opus-4",
+    "input_per_1m": 15.0,
+    "output_per_1m": 75.0,
+    "effective_from": "2025-05-01T00:00:00Z",
+    "source": "admin"
+  },
+  {
+    "provider": "google",
+    "model": "gemini-1.5-pro",
+    "input_per_1m": 1.25,
+    "output_per_1m": 5.0,
+    "effective_from": "2024-05-14T00:00:00Z",
+    "source": "admin"
+  },
+  {
+    "provider": "google",
+    "model": "gemini-1.5-flash",
+    "input_per_1m": 0.075,
+    "output_per_1m": 0.3,
+    "effective_from": "2024-05-14T00:00:00Z",
+    "source": "admin"
+  },
+  {
+    "provider": "google",
+    "model": "gemini-2.0-flash",
+    "input_per_1m": 0.1,
+    "output_per_1m": 0.4,
+    "effective_from": "2025-02-01T00:00:00Z",
+    "source": "admin"
+  },
+  {
+    "provider": "mistral",
+    "model": "mistral-large-latest",
+    "input_per_1m": 0.5,
+    "output_per_1m": 1.5,
+    "effective_from": "2024-11-01T00:00:00Z",
+    "source": "admin"
+  }
+]

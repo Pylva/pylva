@@ -1,0 +1,176 @@
+{
+  "name": "@pylva/sdk",
+  "version": "1.1.0",
+  "description": "Pylva SDK — cost infrastructure for AI agent businesses",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./openai": {
+      "types": "./dist/openai.d.ts",
+      "import": "./dist/openai.js",
+      "require": "./dist/openai.cjs"
+    },
+    "./anthropic": {
+      "types": "./dist/anthropic.d.ts",
+      "import": "./dist/anthropic.js",
+      "require": "./dist/anthropic.cjs"
+    },
+    "./vercel-ai": {
+      "types": "./dist/vercel-ai.d.ts",
+      "import": "./dist/vercel-ai.js",
+      "require": "./dist/vercel-ai.cjs"
+    },
+    "./langgraph": {
+      "types": "./dist/langgraph.d.ts",
+      "import": "./dist/langgraph.js",
+      "require": "./dist/langgraph.cjs"
+    },
+    "./langchain": {
+      "types": "./dist/langgraph.d.ts",
+      "import": "./dist/langgraph.js",
+      "require": "./dist/langgraph.cjs"
+    }
+  },
+  "bin": {
+    "pylva": "dist/cli/validate.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Pylva/pylva.git",
+    "directory": "packages/sdk-ts"
+  },
+  "homepage": "https://pylva.com",
+  "keywords": [
+    "llm",
+    "cost",
+    "telemetry",
+    "openai",
+    "anthropic",
+    "ai",
+    "agents",
+    "langchain",
+    "langgraph"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "size": "size-limit",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run test && npm run typecheck && npm run build && npm run size"
+  },
+  "size-limit": [
+    {
+      "name": "core",
+      "path": "dist/index.js",
+      "limit": "20 KB",
+      "gzip": true,
+      "ignore": [
+        "node:crypto",
+        "node:module",
+        "node:async_hooks",
+        "crypto",
+        "module",
+        "async_hooks"
+      ]
+    },
+    {
+      "name": "openai wrapper",
+      "path": "dist/openai.js",
+      "limit": "15 KB",
+      "gzip": true,
+      "ignore": [
+        "node:crypto",
+        "node:module",
+        "node:async_hooks",
+        "crypto",
+        "module",
+        "async_hooks"
+      ]
+    },
+    {
+      "name": "anthropic wrapper",
+      "path": "dist/anthropic.js",
+      "limit": "15 KB",
+      "gzip": true,
+      "ignore": [
+        "node:crypto",
+        "node:module",
+        "node:async_hooks",
+        "crypto",
+        "module",
+        "async_hooks"
+      ]
+    },
+    {
+      "name": "vercel-ai wrapper",
+      "path": "dist/vercel-ai.js",
+      "limit": "15 KB",
+      "gzip": true,
+      "ignore": [
+        "node:crypto",
+        "node:module",
+        "node:async_hooks",
+        "crypto",
+        "module",
+        "async_hooks"
+      ]
+    },
+    {
+      "name": "langgraph callback",
+      "path": "dist/langgraph.js",
+      "limit": "15 KB",
+      "gzip": true,
+      "ignore": [
+        "node:crypto",
+        "node:async_hooks",
+        "crypto",
+        "async_hooks"
+      ]
+    }
+  ],
+  "peerDependencies": {
+    "openai": ">=4 <6",
+    "@anthropic-ai/sdk": ">=0.30",
+    "ai": ">=3",
+    "@langchain/core": ">=1 <2",
+    "@langchain/langgraph": ">=1 <2"
+  },
+  "peerDependenciesMeta": {
+    "openai": {
+      "optional": true
+    },
+    "@anthropic-ai/sdk": {
+      "optional": true
+    },
+    "ai": {
+      "optional": true
+    },
+    "@langchain/core": {
+      "optional": true
+    },
+    "@langchain/langgraph": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "valibot": "^1.3.1"
+  }
+}

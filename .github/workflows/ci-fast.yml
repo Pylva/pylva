@@ -1,0 +1,128 @@
+name: CI Required
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  DATABASE_URL: postgresql://pylva:pylva_test@localhost:5432/pylva_test
+  CLICKHOUSE_URL: http://localhost:8123
+  REDIS_URL: redis://localhost:6379
+  JWT_PRIVATE_KEY: /tmp/pylva-ci-private.pem
+  JWT_PUBLIC_KEY: /tmp/pylva-ci-public.pem
+  ARGON2_SECRET: ci-test-secret-must-be-32-bytes-long!!
+
+jobs:
+  ci-static:
+    name: ci-static
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: License map check
+        run: pnpm license:check
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+  ci-unit-js:
+    name: ci-unit-js
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Unit Tests (excluding security/integration/e2e)
+        run: pnpm test -- --exclude '**/security/**'
+
+      - name: Frontend component tests
+        run: pnpm test:frontend
+
+  ci-egress-runtime:
+    name: ci-egress-runtime-node-${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20.18.1', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Real-socket external egress integration
+        run: pnpm exec vitest run --config vitest.integration.config.ts tests/integration/external-egress-transport.test.ts
+
+  ci-sdk-py:
+    name: ci-sdk-py
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python SDK dev deps
+        run: python -m pip install -e 'packages/sdk-py[dev]'
+
+      - name: Python ruff
+        run: ruff check packages/sdk-py/pylva packages/sdk-py/tests
+
+      - name: Python mypy
+        run: mypy packages/sdk-py/pylva
+
+      - name: Python pytest
+        run: pytest packages/sdk-py/tests
+
+  ci-build-smoke:
+    name: ci-build-smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build smoke
+        run: pnpm build
+
+      - name: Performance budget
+        run: pnpm perf:budget

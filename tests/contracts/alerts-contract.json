@@ -1,0 +1,106 @@
+{
+  "$comment": "B2a §4.8 — Canonical (AlertPayload, HMACEnvelope) pairs. Cross-language contract test: TS SDK signWebhook + Py SDK verify_webhook must agree on byte-for-byte serialization. Both single-alert and batched-alert shapes covered (I-T4a-7). Extended for batched shape in v1.0.",
+  "version": "1.0",
+  "fixtures": [
+    {
+      "name": "single_cost_threshold",
+      "description": "One rule fired; single-alert shape preserves pre-batch v1.1 wire contract.",
+      "secret": "whsec_test_single_cost",
+      "payload": {
+        "version": "1.0",
+        "rule_id": "11111111-1111-1111-1111-111111111111",
+        "fired_at": "2026-04-21T10:15:00Z",
+        "payload": {
+          "id": "evt_0001",
+          "type": "cost.threshold_exceeded",
+          "builder_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          "timestamp": "2026-04-21T10:15:00Z",
+          "data": {
+            "customer_id": "acme-corp",
+            "threshold_usd": 25.0,
+            "current_usd": 27.31,
+            "period": "day",
+            "rule_id": "11111111-1111-1111-1111-111111111111"
+          }
+        }
+      },
+      "expected_body": "{\"version\":\"1.0\",\"rule_id\":\"11111111-1111-1111-1111-111111111111\",\"fired_at\":\"2026-04-21T10:15:00Z\",\"payload\":{\"id\":\"evt_0001\",\"type\":\"cost.threshold_exceeded\",\"builder_id\":\"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\",\"timestamp\":\"2026-04-21T10:15:00Z\",\"data\":{\"customer_id\":\"acme-corp\",\"threshold_usd\":25.0,\"current_usd\":27.31,\"period\":\"day\",\"rule_id\":\"11111111-1111-1111-1111-111111111111\"}}}",
+      "expected_timestamp": "1745229300",
+      "expected_signature_hex": "compute-at-runtime"
+    },
+    {
+      "name": "single_budget_exceeded_hard_stop",
+      "description": "Budget limit hard_stop fired; source field absent from wire (source is an SDK-internal enum).",
+      "secret": "whsec_test_budget",
+      "payload": {
+        "version": "1.0",
+        "rule_id": "22222222-2222-2222-2222-222222222222",
+        "fired_at": "2026-04-21T11:30:00Z",
+        "payload": {
+          "id": "evt_0002",
+          "type": "budget.exceeded",
+          "builder_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          "timestamp": "2026-04-21T11:30:00Z",
+          "data": {
+            "customer_id": "acme-corp",
+            "budget_usd": 50.0,
+            "current_usd": 50.17,
+            "action_taken": "blocked",
+            "rule_id": "22222222-2222-2222-2222-222222222222"
+          }
+        }
+      },
+      "expected_timestamp": "1745233800",
+      "expected_signature_hex": "compute-at-runtime"
+    },
+    {
+      "name": "batched_three_rules_slack",
+      "description": "Batcher coalesced 3 rule fires within 60s into one delivery. count=3, batch has 3 entries; integration layer renders the summary.",
+      "secret": "whsec_test_batch",
+      "payload": {
+        "version": "1.0",
+        "count": 3,
+        "fired_at": "2026-04-21T12:00:00Z",
+        "batch": [
+          {
+            "version": "1.0",
+            "rule_id": "11111111-1111-1111-1111-111111111111",
+            "fired_at": "2026-04-21T12:00:00Z",
+            "payload": {
+              "id": "evt_0003",
+              "type": "cost.threshold_exceeded",
+              "builder_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+              "timestamp": "2026-04-21T12:00:00Z",
+              "data": {
+                "customer_id": "acme-corp",
+                "threshold_usd": 10.0,
+                "current_usd": 12.44,
+                "period": "hour",
+                "rule_id": "11111111-1111-1111-1111-111111111111"
+              }
+            }
+          },
+          {
+            "version": "1.0",
+            "rule_id": "33333333-3333-3333-3333-333333333333",
+            "fired_at": "2026-04-21T12:00:30Z",
+            "payload": {
+              "id": "evt_0004",
+              "type": "margin.alert",
+              "builder_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+              "timestamp": "2026-04-21T12:00:30Z",
+              "data": {
+                "customer_id": "gamma-co",
+                "margin_percent": -8.2,
+                "threshold_percent": 15.0,
+                "diagnosis": { "top_drivers": [{ "label": "claude-sonnet-4-5", "cost_usd": 4.02 }] }
+              }
+            }
+          }
+        ]
+      },
+      "expected_timestamp": "1745236800",
+      "expected_signature_hex": "compute-at-runtime"
+    }
+  ]
+}

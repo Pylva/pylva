@@ -1,0 +1,97 @@
+{
+  "$comment": "B2a §4.8 — Canonical (BudgetSyncRequest, BudgetSyncResponse) pairs. Both TS SDK budget_accumulator and Py SDK budget_accumulator must round-trip these fixtures against the backend's /api/v1/budget/sync handler. scope + rule_id included (I-T3-3).",
+  "version": "1.0",
+  "fixtures": [
+    {
+      "name": "per_customer_under_budget",
+      "description": "Per-end-user scope; local $20 accumulated, server truth $20 (exact match); budget $50; not exceeded.",
+      "request": {
+        "rule_id": "22222222-2222-2222-2222-222222222222",
+        "scope": "per_customer",
+        "customer_id": "acme-corp",
+        "accumulated_cost_usd": 20.0,
+        "period_start": "2026-04-21T00:00:00Z",
+        "event_count": 40
+      },
+      "expected_response": {
+        "rule_id": "22222222-2222-2222-2222-222222222222",
+        "scope": "per_customer",
+        "customer_id": "acme-corp",
+        "period_start": "2026-04-21T00:00:00Z",
+        "server_total_usd": 20.0,
+        "budget_remaining_usd": 30.0,
+        "budget_exceeded": false,
+        "reconciled_at": "timestamp-at-runtime"
+      }
+    },
+    {
+      "name": "per_customer_server_ahead_overwrites_local",
+      "description": "Local $20 but server $50 (another container saw more events); sync REPLACES local with $50 (I-T3-3 overwrite semantics).",
+      "request": {
+        "rule_id": "22222222-2222-2222-2222-222222222222",
+        "scope": "per_customer",
+        "customer_id": "acme-corp",
+        "accumulated_cost_usd": 20.0,
+        "period_start": "2026-04-21T00:00:00Z",
+        "event_count": 40
+      },
+      "server_state_override": {
+        "aggregate_cost_usd": 50.0
+      },
+      "expected_response": {
+        "rule_id": "22222222-2222-2222-2222-222222222222",
+        "scope": "per_customer",
+        "customer_id": "acme-corp",
+        "period_start": "2026-04-21T00:00:00Z",
+        "server_total_usd": 50.0,
+        "budget_remaining_usd": 0.0,
+        "budget_exceeded": true,
+        "reconciled_at": "timestamp-at-runtime"
+      }
+    },
+    {
+      "name": "pooled_scope_null_customer",
+      "description": "Pooled budget across all end-users; customer_id MUST be null; server SUMs across all customers.",
+      "request": {
+        "rule_id": "55555555-5555-5555-5555-555555555555",
+        "scope": "pooled",
+        "customer_id": null,
+        "accumulated_cost_usd": 75.3,
+        "period_start": "2026-04-21T00:00:00Z",
+        "event_count": 200
+      },
+      "expected_response": {
+        "rule_id": "55555555-5555-5555-5555-555555555555",
+        "scope": "pooled",
+        "customer_id": null,
+        "period_start": "2026-04-21T00:00:00Z",
+        "server_total_usd": 75.3,
+        "budget_remaining_usd": 24.7,
+        "budget_exceeded": false,
+        "reconciled_at": "timestamp-at-runtime"
+      }
+    },
+    {
+      "name": "no_budget_rule_configured",
+      "description": "rule_id resolves but rule has no budget_limit type (maybe cost_threshold only); budget_remaining is null, exceeded false.",
+      "request": {
+        "rule_id": "66666666-6666-6666-6666-666666666666",
+        "scope": "per_customer",
+        "customer_id": "beta-labs",
+        "accumulated_cost_usd": 5.0,
+        "period_start": "2026-04-21T00:00:00Z",
+        "event_count": 10
+      },
+      "expected_response": {
+        "rule_id": "66666666-6666-6666-6666-666666666666",
+        "scope": "per_customer",
+        "customer_id": "beta-labs",
+        "period_start": "2026-04-21T00:00:00Z",
+        "server_total_usd": 5.0,
+        "budget_remaining_usd": null,
+        "budget_exceeded": false,
+        "reconciled_at": "timestamp-at-runtime"
+      }
+    }
+  ]
+}

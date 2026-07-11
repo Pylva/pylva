@@ -1,0 +1,192 @@
+name: CI E2E Smoke
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '47 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  DATABASE_URL: postgresql://pylva:pylva_test@localhost:5432/pylva_test
+  CLICKHOUSE_URL: http://default:test@localhost:8123
+  REDIS_URL: redis://localhost:6379
+  JWT_PRIVATE_KEY: /tmp/pylva-ci-private.pem
+  JWT_PUBLIC_KEY: /tmp/pylva-ci-public.pem
+  ARGON2_SECRET: ci-test-secret-must-be-32-bytes-long!!
+  SESSION_COOKIE_SECURE: 'false'
+  E2E_DASHBOARD: 'true'
+
+jobs:
+  ci-e2e-smoke:
+    name: ci-e2e-smoke
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: pylva_test
+          POSTGRES_USER: pylva
+          POSTGRES_PASSWORD: pylva_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pylva"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8
+        env:
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: test
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+        ports:
+          - 8123:8123
+        options: >-
+          --health-cmd "clickhouse-client --password test --query 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether E2E should run
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ ",$PR_LABELS," == *",e2e,"* ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch origin "$BASE_REF"
+          changed="$(git diff --name-only "origin/$BASE_REF"...HEAD)"
+          echo "$changed"
+
+          if echo "$changed" | grep -Eq '^(src/app|src/components|tests/e2e|playwright\.config\.ts|package\.json|pnpm-lock\.yaml)'; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: E2E not required for this change
+        if: steps.scope.outputs.should_run != 'true'
+        run: echo "Skipping E2E smoke; no e2e label or frontend/auth/marketing path changes."
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        if: steps.scope.outputs.should_run == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.scope.outputs.should_run == 'true'
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        if: steps.scope.outputs.should_run == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        if: steps.scope.outputs.should_run == 'true'
+        run: pnpm exec playwright install --with-deps chromium webkit
+
+      - name: Generate JWT keypair
+        if: steps.scope.outputs.should_run == 'true'
+        run: |
+          node --input-type=module <<'NODE'
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+
+          const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
+            modulusLength: 2048,
+            publicKeyEncoding: {
+              type: 'spki',
+              format: 'pem',
+            },
+            privateKeyEncoding: {
+              type: 'pkcs8',
+              format: 'pem',
+            },
+          });
+
+          fs.writeFileSync(process.env.JWT_PRIVATE_KEY, privateKey, { mode: 0o600 });
+          fs.writeFileSync(process.env.JWT_PUBLIC_KEY, publicKey, { mode: 0o644 });
+          NODE
+
+      - name: Run migrations
+        if: steps.scope.outputs.should_run == 'true'
+        run: pnpm db:setup
+
+      - name: ClickHouse doctor
+        if: steps.scope.outputs.should_run == 'true'
+        run: pnpm clickhouse:doctor
+
+      - name: Seed database
+        if: steps.scope.outputs.should_run == 'true'
+        run: pnpm db:seed
+
+      - name: Seed dashboard e2e fixtures
+        if: steps.scope.outputs.should_run == 'true'
+        run: pnpm exec tsx tests/e2e/setup/seed-dashboard-fixtures.ts
+
+      - name: Build app
+        if: steps.scope.outputs.should_run == 'true'
+        run: pnpm build
+
+      - name: Start app
+        if: steps.scope.outputs.should_run == 'true'
+        timeout-minutes: 3
+        run: |
+          pnpm exec next start -p 3000 > /tmp/pylva-next.log 2>&1 &
+          for attempt in {1..30}; do
+            if curl --max-time 5 -fsS http://localhost:3000/login >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          cat /tmp/pylva-next.log
+          exit 1
+
+      - name: Run Playwright smoke
+        if: steps.scope.outputs.should_run == 'true'
+        run: pnpm exec playwright test tests/e2e/login.spec.ts tests/e2e/accessibility.spec.ts tests/e2e/dashboard-tables.spec.ts tests/e2e/security
+
+      - name: Upload Playwright report
+        if: failure() && steps.scope.outputs.should_run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+            /tmp/pylva-next.log
+          if-no-files-found: ignore

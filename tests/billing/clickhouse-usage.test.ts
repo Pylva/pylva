@@ -1,0 +1,77 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const queryCostEvents = vi.fn();
+
+vi.mock('../../src/lib/clickhouse/client.js', () => ({
+  queryCostEvents,
+}));
+
+const { getUsageForPeriod } = await import('../../src/lib/billing/clickhouse-usage.js');
+
+describe('getUsageForPeriod', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('uses a non-shadowing metric alias so LLM token rows aggregate', async () => {
+    queryCostEvents.mockResolvedValue([
+      {
+        metric_key: '',
+        metric_value_sum: null,
+        tokens_in_sum: '2300',
+        tokens_out_sum: '620',
+        unpriced_count: '0',
+      },
+    ]);
+
+    const usage = await getUsageForPeriod({
+      builderId: 'builder-1',
+      customerId: 'builder-1:customer-1',
+      from: new Date('2026-06-01T00:00:00Z'),
+      to: new Date('2026-06-02T00:00:00Z'),
+    });
+
+    const query = queryCostEvents.mock.calls[0]?.[1] as string;
+    expect(query).toContain("ifNull(metric, '') AS metric_key");
+    expect(query).toContain('isNull(metric)');
+    expect(query).toContain('GROUP BY metric_key');
+    expect(usage.by_metric).toEqual({
+      input_tokens: 2300,
+      output_tokens: 620,
+    });
+    expect(usage.has_unpriced).toBe(false);
+  });
+
+  it('keeps reported metric usage separate from LLM token usage', async () => {
+    queryCostEvents.mockResolvedValue([
+      {
+        metric_key: 'credits',
+        metric_value_sum: '120',
+        tokens_in_sum: '0',
+        tokens_out_sum: '0',
+        unpriced_count: '1',
+      },
+      {
+        metric_key: '',
+        metric_value_sum: null,
+        tokens_in_sum: '10',
+        tokens_out_sum: '20',
+        unpriced_count: '0',
+      },
+    ]);
+
+    const usage = await getUsageForPeriod({
+      builderId: 'builder-1',
+      customerId: 'builder-1:customer-1',
+      from: new Date('2026-06-01T00:00:00Z'),
+      to: new Date('2026-06-02T00:00:00Z'),
+    });
+
+    expect(usage.by_metric).toEqual({
+      credits: 120,
+      input_tokens: 10,
+      output_tokens: 20,
+    });
+    expect(usage.has_unpriced).toBe(true);
+  });
+});

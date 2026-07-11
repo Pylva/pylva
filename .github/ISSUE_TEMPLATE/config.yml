@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Slack community
+    url: https://join.slack.com/t/pylva/shared_invite/zt-4357amddc-QvNEhpxYU~6DyrF5P6Cw8Q
+    about: Ask setup questions and discuss Pylva with the community.
+  - name: Documentation
+    url: https://docs.pylva.com
+    about: Read the product and SDK docs.
+  - name: Security vulnerability
+    url: https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing/privately-reporting-a-security-vulnerability
+    about: Use the Security tab and "Report a vulnerability" instead of opening a public issue.

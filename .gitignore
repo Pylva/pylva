@@ -1,0 +1,90 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-tsc/
+.next/
+.open-next/
+*.tsbuildinfo
+
+# Python build output
+.venv/
+packages/sdk-py/dist/
+packages/sdk-py/*.egg-info/
+packages/sdk-py/.pytest_cache/
+packages/sdk-py/**/__pycache__/
+packages/sdk-py/.mypy_cache/
+packages/sdk-py/.ruff_cache/
+
+# Environment
+.env
+.env.local
+.env.*.local
+.env.sentry-build-plugin
+
+# Dev keys
+.keys/
+
+# OS
+.DS_Store
+
+# Turbo
+.turbo/
+
+# Doc auditor cache (gh pr view results, 24h TTL)
+.audit-cache/
+
+# Local browser/UI review artifacts
+.codex-ui-review/
+test-results/
+playwright-report/
+playwright/.auth/
+
+# IDE
+.vscode/
+.idea/
+
+# Terraform
+# NOTE: .terraform.lock.hcl is intentionally NOT ignored — commit it so
+# every machine + CI resolves identical provider versions.
+.terraform/
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+tfplan-*
+crash.log
+crash.*.log
+infrastructure/envs/*/terraform.tfvars
+
+# Local runtime / tooling cruft — never commit (contains secret_key, codex DB, logs)
+/config/
+
+# Playwright visual baselines are per-machine (regen: pnpm test:e2e --update-snapshots tests/e2e/visual.spec.ts)
+tests/e2e/visual.spec.ts-snapshots/
+
+# Conductor inter-agent scratch (receipts, markers) — must never travel between workspaces
+.context/
+
+# Codex/GStack local scratch
+.gstack/
+.playwright-cli/
+
+# ClickHouse daemon runtime artifacts (session-local server)
+access/
+preprocessed_configs/
+flags/
+status
+uuid
+
+# founder/internal overlay — never committed to the public repo
+.agent/
+.agents/
+.claude/
+.codex/
+.context/
+CLAUDE.md
+conductor.json
+hosted.next.config.mjs

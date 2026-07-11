@@ -1,0 +1,212 @@
+{
+  "description": "Budget rule selection + enforcement semantics shared by the TS and Python SDKs. Each case seeds the rules cache (in cache order), optionally seeds local accumulator spend per rule, then runs the pre-call hook for `customer_id`. Enforce-ALL semantics: every applicable budget rule is checked (a customer-specific cap is never shadowed by a newer global rule); the first exceeded hard_stop in cache order blocks; soft rules never block; spend exactly at the limit blocks (>= boundary, matching the server's computeBudgetExceededFlags).",
+  "notes": [
+    "rules[i].id is derived by the harness as `rule-<i>`.",
+    "accumulated[].rule_index references rules[] by position; scope_customer_id is the accumulator scope token (null for pooled).",
+    "period_start values are computed at runtime from each SDK's own period math for the rule's period.",
+    "expect.blocked_by is the rule index whose hard stop must throw; absent when blocked is false."
+  ],
+  "cases": [
+    {
+      "name": "customer_specific_cap_not_shadowed_by_newer_global",
+      "rules": [
+        {
+          "type": "budget_limit",
+          "enabled": true,
+          "customer_id": null,
+          "config": { "limit_usd": 100, "period": "month", "hard_stop": true, "scope": "per_customer" }
+        },
+        {
+          "type": "budget_limit",
+          "enabled": true,
+          "customer_id": "cust_1",
+          "config": { "limit_usd": 5, "period": "day", "hard_stop": true, "scope": "per_customer" }
+        }
+      ],
+      "customer_id": "cust_1",
+      "accumulated": [
+        { "rule_index": 1, "scope_customer_id": "cust_1", "period": "day", "amount_usd": 6 }
+      ],
+      "expect": { "blocked": true, "blocked_by": 1 }
+    },
+    {
+      "name": "global_cap_still_applies_when_customer_override_exists",
+      "rules": [
+        {
+          "type": "budget_limit",
+          "enabled": true,
+          "customer_id": null,
+          "config": { "limit_usd": 100, "period": "month", "hard_stop": true, "scope": "per_customer" }
+        },
+        {
+          "type": "budget_limit",
+          "enabled": true,
+          "customer_id": "cust_1",
+          "config": { "limit_usd": 500, "period": "day", "hard_stop": true, "scope": "per_customer" }
+        }
+      ],
+      "customer_id": "cust_1",
+      "accumulated": [
+        { "rule_index": 0, "scope_customer_id": "cust_1", "period": "month", "amount_usd": 150 }
+      ],
+      "expect": { "blocked": true, "blocked_by": 0 }
+    },
+    {
+      "name": "soft_rule_never_blocks",
+      "rules": [
+        {
+          "type": "budget_limit",
+          "enabled": true,
+          "customer_id": "cust_1",
+          "config": { "limit_usd": 5, "period": "day", "hard_stop": false, "scope": "per_customer" }
+        }
+      ],
+      "customer_id": "cust_1",
+      "accumulated": [
+        { "rule_index": 0, "scope_customer_id": "cust_1", "period": "day", "amount_usd": 50 }
+      ],
+      "expect": { "blocked": false }
+    },
+    {
+      "name": "malformed_rule_skipped_next_rule_still_enforced",
+      "rules": [
+        {
+          "type": "budget_limit",
+          "enabled": true,
+          "customer_id": null,
+          "config": { "limit_usd": -5, "period": "day", "hard_stop": true, "scope": "per_customer" }
+        },
+        {
+          "type": "budget_limit",
+          "enabled": true,
+          "customer_id": "cust_1",
+          "config": { "limit_usd": 5, "period": "day", "hard_stop": true, "scope": "per_customer" }
+        }
+      ],
+      "customer_id": "cust_1",
+      "accumulated": [
+        { "rule_index": 1, "scope_customer_id": "cust_1", "period": "day", "amount_usd": 9 }
+      ],
+      "expect": { "blocked": true, "blocked_by": 1 }
+    },
+    {
+      "name": "spend_exactly_at_limit_blocks",
+      "rules": [
+        {
+          "type": "budget_limit",
+          "enabled": true,
+          "customer_id": "cust_1",
+          "config": { "limit_usd": 5, "period": "day", "hard_stop": true, "scope": "per_customer" }
+        }
+      ],
+      "customer_id": "cust_1",
+      "accumulated": [
+        { "rule_index": 0, "scope_customer_id": "cust_1", "period": "day", "amount_usd": 5 }
+      ],
+      "expect": { "blocked": true, "blocked_by": 0 }
+    },
+    {
+      "name": "untracked_traffic_enforced_as_anonymous",
+      "rules": [
+        {
+          "type": "budget_limit",
+          "enabled": true,
+          "customer_id": null,
+          "config": { "limit_usd": 5, "period": "day", "hard_stop": true, "scope": "per_customer" }
+        }
+      ],
+      "customer_id": "anonymous",
+      "accumulated": [
+        { "rule_index": 0, "scope_customer_id": "anonymous", "period": "day", "amount_usd": 6 }
+      ],
+      "expect": { "blocked": true, "blocked_by": 0 }
+    },
+    {
+      "name": "rule_targeting_other_customer_ignored",
+      "rules": [
+        {
+          "type": "budget_limit",
+          "enabled": true,
+          "customer_id": "cust_2",
+          "config": { "limit_usd": 5, "period": "day", "hard_stop": true, "scope": "per_customer" }
+        }
+      ],
+      "customer_id": "cust_1",
+      "accumulated": [
+        { "rule_index": 0, "scope_customer_id": "cust_2", "period": "day", "amount_usd": 50 }
+      ],
+      "expect": { "blocked": false }
+    },
+    {
+      "name": "disabled_rule_ignored",
+      "rules": [
+        {
+          "type": "budget_limit",
+          "enabled": false,
+          "customer_id": "cust_1",
+          "config": { "limit_usd": 5, "period": "day", "hard_stop": true, "scope": "per_customer" }
+        }
+      ],
+      "customer_id": "cust_1",
+      "accumulated": [
+        { "rule_index": 0, "scope_customer_id": "cust_1", "period": "day", "amount_usd": 50 }
+      ],
+      "expect": { "blocked": false }
+    },
+    {
+      "name": "pooled_rule_shares_one_pot_across_customers",
+      "rules": [
+        {
+          "type": "budget_limit",
+          "enabled": true,
+          "customer_id": null,
+          "config": { "limit_usd": 20, "period": "day", "hard_stop": true, "scope": "pooled" }
+        }
+      ],
+      "customer_id": "cust_1",
+      "accumulated": [
+        { "rule_index": 0, "scope_customer_id": null, "period": "day", "amount_usd": 21 }
+      ],
+      "expect": { "blocked": true, "blocked_by": 0, "blocked_customer_id": null }
+    },
+    {
+      "name": "per_customer_spend_of_one_customer_never_blocks_another",
+      "rules": [
+        {
+          "type": "budget_limit",
+          "enabled": true,
+          "customer_id": null,
+          "config": { "limit_usd": 5, "period": "day", "hard_stop": true, "scope": "per_customer" }
+        }
+      ],
+      "customer_id": "cust_2",
+      "accumulated": [
+        { "rule_index": 0, "scope_customer_id": "cust_1", "period": "day", "amount_usd": 50 }
+      ],
+      "expect": { "blocked": false }
+    },
+    {
+      "name": "hard_and_soft_mix_blocks_on_hard_only",
+      "rules": [
+        {
+          "type": "budget_limit",
+          "enabled": true,
+          "customer_id": null,
+          "config": { "limit_usd": 3, "period": "day", "hard_stop": false, "scope": "per_customer" }
+        },
+        {
+          "type": "budget_limit",
+          "enabled": true,
+          "customer_id": "cust_1",
+          "config": { "limit_usd": 8, "period": "day", "hard_stop": true, "scope": "per_customer" }
+        }
+      ],
+      "customer_id": "cust_1",
+      "accumulated": [
+        { "rule_index": 0, "scope_customer_id": "cust_1", "period": "day", "amount_usd": 9 },
+        { "rule_index": 1, "scope_customer_id": "cust_1", "period": "day", "amount_usd": 9 }
+      ],
+      "expect": { "blocked": true, "blocked_by": 1 }
+    }
+  ]
+}

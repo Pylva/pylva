@@ -1,0 +1,196 @@
+name: Publish Python SDK
+
+on:
+  push:
+    tags:
+      - 'pylva-py-v*'
+
+permissions:
+  contents: read
+
+jobs:
+  publish-python:
+    name: Publish pylva
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify release tag is on main
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          TAG_COMMIT="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
+            echo "::error::Release tags must point at commits already merged to origin/main"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip build
+          python -m pip install -e 'packages/sdk-py[dev]'
+
+      - name: Verify release metadata
+        env:
+          # Pass the ref name via env and read it at runtime instead of
+          # interpolating ${{ github.ref_name }} into the Python source (a tag
+          # name can contain quotes and break out of the string literal).
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import tomllib
+
+          pyproject = tomllib.loads(pathlib.Path("packages/sdk-py/pyproject.toml").read_text())
+          project_name = pyproject["project"]["name"]
+          version = pyproject["project"]["version"]
+          expected_tag = f"pylva-py-v{version}"
+          ref_name = os.environ["REF_NAME"]
+          assert project_name == "pylva-sdk"
+          assert pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"] == ["pylva"]
+          assert ref_name == expected_tag, (
+              f"tag {ref_name} does not match Python SDK version {version}"
+          )
+          PY
+
+      - name: Test
+        run: python -m pytest packages/sdk-py/tests
+
+      - name: Ruff
+        run: python -m ruff check packages/sdk-py/pylva packages/sdk-py/tests
+
+      - name: Mypy
+        run: python -m mypy packages/sdk-py/pylva
+
+      - name: Build wheel and sdist
+        run: |
+          rm -rf packages/sdk-py/dist
+          python -m build packages/sdk-py
+
+      - name: Inspect artifacts
+        run: |
+          python - <<'PY'
+          import pathlib
+          import re
+          import tomllib
+          import zipfile
+
+          pyproject = tomllib.loads(pathlib.Path("packages/sdk-py/pyproject.toml").read_text())
+          project_name = pyproject["project"]["name"]
+          dist_stem = re.sub(r"[-_.]+", "_", project_name).lower()
+          version = pyproject["project"]["version"]
+          dist = pathlib.Path("packages/sdk-py/dist")
+          wheels = sorted(dist.glob(f"{dist_stem}-{version}-*.whl"))
+          sdists = sorted(dist.glob(f"{dist_stem}-{version}.tar.gz"))
+          assert len(wheels) == 1, sorted(p.name for p in dist.iterdir())
+          assert len(sdists) == 1, sorted(p.name for p in dist.iterdir())
+          with zipfile.ZipFile(wheels[0]) as zf:
+              names = set(zf.namelist())
+              assert "pylva/__init__.py" in names
+              assert "pylva/langchain/__init__.py" in names
+              assert "pylva/langchain/callback.py" in names
+              assert any(name.endswith(".dist-info/METADATA") for name in names)
+              assert any(name.endswith(".dist-info/licenses/LICENSE") for name in names)
+              metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
+              metadata = zf.read(metadata_name).decode()
+              assert f"Name: {project_name}" in metadata
+              assert f"Version: {version}" in metadata
+              assert "Provides-Extra: langchain" in metadata
+              assert "Requires-Dist: langchain<2.0,>=1.0; extra == 'langchain'" in metadata
+              assert "Requires-Dist: langgraph<2.0,>=1.0; extra == 'langchain'" in metadata
+          PY
+
+      - name: Clean install smoke
+        run: |
+          python -m venv /tmp/pylva-smoke
+          /tmp/pylva-smoke/bin/python -m pip install --upgrade pip
+          WHEEL=$(ls packages/sdk-py/dist/pylva_sdk-*.whl | head -1)
+          /tmp/pylva-smoke/bin/python -m pip install "$WHEEL"
+          /tmp/pylva-smoke/bin/python - <<'PY'
+          import pathlib
+          import sys
+          import tomllib
+          import types
+
+          import pylva
+          from pylva.langchain import PylvaCallbackHandler
+          from pylva.core import telemetry
+          from pylva.wrappers import anthropic_wrapper, openai_wrapper
+
+          expected = tomllib.loads(pathlib.Path("packages/sdk-py/pyproject.toml").read_text())["project"]["version"]
+          assert pylva.__version__ == expected, f"{pylva.__version__!r} != {expected!r}"
+          assert PylvaCallbackHandler.__name__ == "PylvaCallbackHandler"
+          pylva.init("pv_live_12345678_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", local_mode=True)
+
+          class OpenAIUsage:
+              prompt_tokens = 11
+              completion_tokens = 7
+
+          class OpenAIResponse:
+              model = "gpt-4o-mini"
+              usage = OpenAIUsage()
+
+          class Completions:
+              def create(self, **kwargs):
+                  assert kwargs["messages"][0]["content"] == "hello"
+                  return OpenAIResponse()
+
+          openai_pkg = types.ModuleType("openai")
+          resources_pkg = types.ModuleType("openai.resources")
+          chat_pkg = types.ModuleType("openai.resources.chat")
+          completions_mod = types.ModuleType("openai.resources.chat.completions")
+          completions_mod.Completions = Completions
+          sys.modules["openai"] = openai_pkg
+          sys.modules["openai.resources"] = resources_pkg
+          sys.modules["openai.resources.chat"] = chat_pkg
+          sys.modules["openai.resources.chat.completions"] = completions_mod
+          openai_wrapper._reset_openai_patch_for_tests()
+          openai_wrapper.try_patch_openai()
+          Completions().create(model="gpt-4o-mini", messages=[{"role": "user", "content": "hello"}])
+
+          class AnthropicUsage:
+              input_tokens = 13
+              output_tokens = 5
+
+          class AnthropicResponse:
+              model = "claude-3-5-sonnet-20241022"
+              usage = AnthropicUsage()
+
+          class Messages:
+              def create(self, **kwargs):
+                  assert kwargs["messages"][0]["content"] == "hello"
+                  return AnthropicResponse()
+
+          anthropic_pkg = types.ModuleType("anthropic")
+          anthropic_resources_pkg = types.ModuleType("anthropic.resources")
+          messages_mod = types.ModuleType("anthropic.resources.messages")
+          messages_mod.Messages = Messages
+          sys.modules["anthropic"] = anthropic_pkg
+          sys.modules["anthropic.resources"] = anthropic_resources_pkg
+          sys.modules["anthropic.resources.messages"] = messages_mod
+          anthropic_wrapper._reset_anthropic_patch_for_tests()
+          anthropic_wrapper.try_patch_anthropic()
+          Messages().create(model="claude-3-5-sonnet-20241022", messages=[{"role": "user", "content": "hello"}])
+
+          assert telemetry.buffer_size() == 2
+          providers = {event["provider"] for event in telemetry._state.buffer}
+          assert providers == {"openai", "anthropic"}
+          for event in telemetry._state.buffer:
+              assert "messages" not in event
+              assert "prompt" not in event
+          PY
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        with:
+          packages-dir: packages/sdk-py/dist

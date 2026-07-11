@@ -1,0 +1,340 @@
+{
+  "$comment": "B2b §4.5 — Canonical (CustomerPricing, UsageAggregate, ExpectedInvoicePayload) triples. Formula oracle for src/lib/billing/formulas.ts. Every pricing_model has ≥ 3 fixtures + edges (0-value, boundary of included_credits). Used by formula-*.test.ts.",
+  "version": "1.0",
+  "fixtures": [
+    {
+      "name": "flat_standard",
+      "description": "Flat rate — single $299/mo fee regardless of usage.",
+      "pricing": {
+        "pricing_model": "flat",
+        "flat_rate_usd": 299.0,
+        "billing_period": "monthly",
+        "version": 1
+      },
+      "usage": { "by_model": {}, "by_metric": {}, "has_unpriced": false },
+      "expected": {
+        "amount_usd": 299.0,
+        "line_items": [
+          {
+            "description": "Flat monthly fee",
+            "metric": "base",
+            "quantity": 1,
+            "unit_price_usd": 299.0,
+            "total_usd": 299.0,
+            "pricing_version": 1
+          }
+        ],
+        "has_unpriced_events": false
+      }
+    },
+    {
+      "name": "flat_zero",
+      "description": "Edge: 0-value flat rate (free tier). Invoice still created so audit trail persists.",
+      "pricing": {
+        "pricing_model": "flat",
+        "flat_rate_usd": 0.0,
+        "billing_period": "monthly",
+        "version": 1
+      },
+      "usage": { "by_model": {}, "by_metric": {}, "has_unpriced": false },
+      "expected": {
+        "amount_usd": 0.0,
+        "line_items": [
+          {
+            "description": "Flat monthly fee",
+            "metric": "base",
+            "quantity": 1,
+            "unit_price_usd": 0.0,
+            "total_usd": 0.0,
+            "pricing_version": 1
+          }
+        ],
+        "has_unpriced_events": false
+      }
+    },
+    {
+      "name": "pay_as_you_go_standard",
+      "description": "Per-unit pricing — 1000 input_tokens @ $0.003 + 500 output_tokens @ $0.015 = $10.50.",
+      "pricing": {
+        "pricing_model": "pay_as_you_go",
+        "per_unit_rates": { "input_tokens": 0.003, "output_tokens": 0.015 },
+        "markup_pct": 0.0,
+        "billing_period": "monthly",
+        "version": 1
+      },
+      "usage": {
+        "by_model": {},
+        "by_metric": { "input_tokens": 1000, "output_tokens": 500 },
+        "has_unpriced": false
+      },
+      "expected": {
+        "amount_usd": 10.5,
+        "line_items": [
+          {
+            "description": "input_tokens",
+            "metric": "input_tokens",
+            "quantity": 1000,
+            "unit_price_usd": 0.003,
+            "total_usd": 3.0,
+            "pricing_version": 1
+          },
+          {
+            "description": "output_tokens",
+            "metric": "output_tokens",
+            "quantity": 500,
+            "unit_price_usd": 0.015,
+            "total_usd": 7.5,
+            "pricing_version": 1
+          }
+        ],
+        "has_unpriced_events": false
+      }
+    },
+    {
+      "name": "pay_as_you_go_with_markup",
+      "description": "Per-unit pricing + 25% markup. $10 raw × 1.25 = $12.50.",
+      "pricing": {
+        "pricing_model": "pay_as_you_go",
+        "per_unit_rates": { "input_tokens": 0.01 },
+        "markup_pct": 25.0,
+        "billing_period": "monthly",
+        "version": 1
+      },
+      "usage": { "by_model": {}, "by_metric": { "input_tokens": 1000 }, "has_unpriced": false },
+      "expected": {
+        "amount_usd": 12.5,
+        "line_items": [
+          {
+            "description": "input_tokens",
+            "metric": "input_tokens",
+            "quantity": 1000,
+            "unit_price_usd": 0.01,
+            "total_usd": 10.0,
+            "pricing_version": 1
+          },
+          {
+            "description": "Markup (25%)",
+            "metric": "markup",
+            "quantity": 1,
+            "unit_price_usd": 2.5,
+            "total_usd": 2.5,
+            "pricing_version": 1
+          }
+        ],
+        "has_unpriced_events": false
+      }
+    },
+    {
+      "name": "pay_as_you_go_unpriced",
+      "description": "Some events have pricing_status='null'; those are filtered out. has_unpriced_events=true surfaces the warning, invoice stays draft until builder finalizes (D14).",
+      "pricing": {
+        "pricing_model": "pay_as_you_go",
+        "per_unit_rates": { "input_tokens": 0.002 },
+        "markup_pct": 0.0,
+        "billing_period": "monthly",
+        "version": 1
+      },
+      "usage": { "by_model": {}, "by_metric": { "input_tokens": 500 }, "has_unpriced": true },
+      "expected": {
+        "amount_usd": 1.0,
+        "line_items": [
+          {
+            "description": "input_tokens",
+            "metric": "input_tokens",
+            "quantity": 500,
+            "unit_price_usd": 0.002,
+            "total_usd": 1.0,
+            "pricing_version": 1
+          }
+        ],
+        "has_unpriced_events": true
+      }
+    },
+    {
+      "name": "credit_pack_under_included",
+      "description": "Credit pack: 10000 credits for $100. Usage 7500 credits → $100 pack fee, 0 overage.",
+      "pricing": {
+        "pricing_model": "credit_pack",
+        "pack_price_usd": 100.0,
+        "included_credits": 10000,
+        "overage_rate_usd": 0.015,
+        "billing_period": "monthly",
+        "version": 1
+      },
+      "usage": { "by_model": {}, "by_metric": { "credits": 7500 }, "has_unpriced": false },
+      "expected": {
+        "amount_usd": 100.0,
+        "line_items": [
+          {
+            "description": "Credit pack (10000 credits)",
+            "metric": "pack",
+            "quantity": 1,
+            "unit_price_usd": 100.0,
+            "total_usd": 100.0,
+            "pricing_version": 1
+          }
+        ],
+        "has_unpriced_events": false
+      }
+    },
+    {
+      "name": "credit_pack_boundary_exactly_included",
+      "description": "Edge: usage equals included credits. No overage. Same as under_included.",
+      "pricing": {
+        "pricing_model": "credit_pack",
+        "pack_price_usd": 100.0,
+        "included_credits": 10000,
+        "overage_rate_usd": 0.015,
+        "billing_period": "monthly",
+        "version": 1
+      },
+      "usage": { "by_model": {}, "by_metric": { "credits": 10000 }, "has_unpriced": false },
+      "expected": {
+        "amount_usd": 100.0,
+        "line_items": [
+          {
+            "description": "Credit pack (10000 credits)",
+            "metric": "pack",
+            "quantity": 1,
+            "unit_price_usd": 100.0,
+            "total_usd": 100.0,
+            "pricing_version": 1
+          }
+        ],
+        "has_unpriced_events": false
+      }
+    },
+    {
+      "name": "credit_pack_over_included",
+      "description": "Usage 12500 credits → $100 pack + 2500 overage @ $0.015 = $37.50. Total $137.50.",
+      "pricing": {
+        "pricing_model": "credit_pack",
+        "pack_price_usd": 100.0,
+        "included_credits": 10000,
+        "overage_rate_usd": 0.015,
+        "billing_period": "monthly",
+        "version": 1
+      },
+      "usage": { "by_model": {}, "by_metric": { "credits": 12500 }, "has_unpriced": false },
+      "expected": {
+        "amount_usd": 137.5,
+        "line_items": [
+          {
+            "description": "Credit pack (10000 credits)",
+            "metric": "pack",
+            "quantity": 1,
+            "unit_price_usd": 100.0,
+            "total_usd": 100.0,
+            "pricing_version": 1
+          },
+          {
+            "description": "Overage (2500 credits @ $0.015)",
+            "metric": "overage",
+            "quantity": 2500,
+            "unit_price_usd": 0.015,
+            "total_usd": 37.5,
+            "pricing_version": 1
+          }
+        ],
+        "has_unpriced_events": false
+      }
+    },
+    {
+      "name": "hybrid_under_included",
+      "description": "Hybrid: $50 base + 5000 credits included + $0.005 overage. Usage 3000 → $50 base.",
+      "pricing": {
+        "pricing_model": "hybrid",
+        "base_fee_usd": 50.0,
+        "included_credits": 5000,
+        "overage_rate_usd": 0.005,
+        "billing_period": "monthly",
+        "version": 1
+      },
+      "usage": { "by_model": {}, "by_metric": { "credits": 3000 }, "has_unpriced": false },
+      "expected": {
+        "amount_usd": 50.0,
+        "line_items": [
+          {
+            "description": "Base fee",
+            "metric": "base",
+            "quantity": 1,
+            "unit_price_usd": 50.0,
+            "total_usd": 50.0,
+            "pricing_version": 1
+          }
+        ],
+        "has_unpriced_events": false
+      }
+    },
+    {
+      "name": "hybrid_over_included",
+      "description": "Hybrid: $50 base + 5000 credits + $0.005 overage. Usage 8000 → $50 + 3000 × $0.005 = $65.",
+      "pricing": {
+        "pricing_model": "hybrid",
+        "base_fee_usd": 50.0,
+        "included_credits": 5000,
+        "overage_rate_usd": 0.005,
+        "billing_period": "monthly",
+        "version": 1
+      },
+      "usage": { "by_model": {}, "by_metric": { "credits": 8000 }, "has_unpriced": false },
+      "expected": {
+        "amount_usd": 65.0,
+        "line_items": [
+          {
+            "description": "Base fee",
+            "metric": "base",
+            "quantity": 1,
+            "unit_price_usd": 50.0,
+            "total_usd": 50.0,
+            "pricing_version": 1
+          },
+          {
+            "description": "Overage (3000 credits @ $0.005)",
+            "metric": "overage",
+            "quantity": 3000,
+            "unit_price_usd": 0.005,
+            "total_usd": 15.0,
+            "pricing_version": 1
+          }
+        ],
+        "has_unpriced_events": false
+      }
+    },
+    {
+      "name": "hybrid_float_precision_edge",
+      "description": "Float edge: 333 credits × $0.003 = $0.999 → round to $1.00 (Math.round(x*100)/100).",
+      "pricing": {
+        "pricing_model": "hybrid",
+        "base_fee_usd": 0.0,
+        "included_credits": 0,
+        "overage_rate_usd": 0.003,
+        "billing_period": "monthly",
+        "version": 1
+      },
+      "usage": { "by_model": {}, "by_metric": { "credits": 333 }, "has_unpriced": false },
+      "expected": {
+        "amount_usd": 1.0,
+        "line_items": [
+          {
+            "description": "Base fee",
+            "metric": "base",
+            "quantity": 1,
+            "unit_price_usd": 0.0,
+            "total_usd": 0.0,
+            "pricing_version": 1
+          },
+          {
+            "description": "Overage (333 credits @ $0.003)",
+            "metric": "overage",
+            "quantity": 333,
+            "unit_price_usd": 0.003,
+            "total_usd": 1.0,
+            "pricing_version": 1
+          }
+        ],
+        "has_unpriced_events": false
+      }
+    }
+  ]
+}

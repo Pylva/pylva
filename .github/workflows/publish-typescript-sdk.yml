@@ -1,0 +1,155 @@
+name: Publish TypeScript SDK
+
+on:
+  push:
+    tags:
+      - 'pylva-ts-v*'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish-typescript:
+    name: Publish @pylva/sdk
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify release tag is on main
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          TAG_COMMIT="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
+            echo "::error::Release tags must point at commits already merged to origin/main"
+            exit 1
+          fi
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          cache: 'pnpm'
+
+      - name: Verify trusted publishing runtime
+        run: |
+          node - <<'NODE'
+          const [major, minor, patch] = process.versions.node.split('.').map(Number);
+          if (major < 22 || (major === 22 && (minor < 14 || (minor === 14 && patch < 0)))) {
+            throw new Error(`npm Trusted Publishing requires Node >=22.14.0, got ${process.version}`);
+          }
+          NODE
+          npm --version | node -e '
+            const version = require("node:fs").readFileSync(0, "utf8").trim();
+            const [major, minor, patch] = version.split(".").map(Number);
+            if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) {
+              throw new Error(`npm Trusted Publishing requires npm >=11.5.1, got ${version}`);
+            }
+            console.log(`trusted publishing runtime ok: node ${process.version}, npm ${version}`);
+          '
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify release metadata
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const pkg = JSON.parse(fs.readFileSync('packages/sdk-ts/package.json', 'utf8'));
+          const expectedTag = `pylva-ts-v${pkg.version}`;
+          if (pkg.name !== '@pylva/sdk') {
+            throw new Error(`unexpected package name: ${pkg.name}`);
+          }
+          if (process.env.GITHUB_REF_NAME !== expectedTag) {
+            throw new Error(`tag ${process.env.GITHUB_REF_NAME} does not match TypeScript SDK version ${pkg.version}`);
+          }
+          NODE
+
+      - name: Test
+        run: pnpm --filter @pylva/sdk test
+
+      - name: Build shared type references
+        run: pnpm exec tsc -b packages/shared/tsconfig.json --force
+
+      - name: Typecheck
+        run: pnpm --filter @pylva/sdk typecheck
+
+      - name: Build
+        run: pnpm --filter @pylva/sdk build
+
+      - name: Size limit
+        run: pnpm --filter @pylva/sdk size
+
+      # npm pack (NOT pnpm pack): the publish step below runs `npm publish`,
+      # which ships package.json verbatim — pnpm pack rewrites workspace:*
+      # specifiers and would mask an uninstallable manifest.
+      - name: Package artifact guard
+        working-directory: packages/sdk-ts
+        run: |
+          npm pack --pack-destination /tmp
+          node - <<'NODE'
+          const { execSync } = require('node:child_process');
+          const tarball = '/tmp/pylva-sdk-' + require('./package.json').version + '.tgz';
+          const manifest = JSON.parse(
+            execSync(`tar -xzOf ${tarball} package/package.json`, { encoding: 'utf8' }),
+          );
+          for (const field of ['dependencies', 'peerDependencies', 'optionalDependencies']) {
+            for (const [name, spec] of Object.entries(manifest[field] ?? {})) {
+              if (spec.startsWith('workspace:') || name.startsWith('@pylva/')) {
+                throw new Error(`${field}.${name}=${spec} would be uninstallable from npm`);
+              }
+            }
+          }
+          const files = execSync(`tar -tzf ${tarball}`, { encoding: 'utf8' }).split('\n');
+          if (!files.includes('package/dist/cli/validate.js')) {
+            throw new Error('CLI bin dist/cli/validate.js missing from tarball');
+          }
+          const bin = execSync(`tar -xzOf ${tarball} package/dist/cli/validate.js`, { encoding: 'utf8' });
+          if (!bin.startsWith('#!/usr/bin/env node')) {
+            throw new Error('CLI bin lost its shebang');
+          }
+          const dist = execSync(`tar -xzOf ${tarball} package/dist/index.js package/dist/index.cjs`, { encoding: 'utf8' });
+          if (dist.includes("'@pylva/shared'") || dist.includes('"@pylva/shared"')) {
+            throw new Error('dist still imports @pylva/shared — bundling broke');
+          }
+          console.log('package artifact guard passed');
+          NODE
+
+      - name: Clean install smoke
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./packages/sdk-ts/package.json').version")"
+          TARBALL="/tmp/pylva-sdk-${VERSION}.tgz"
+          test -f "$TARBALL"
+
+          SMOKE_DIR="$(mktemp -d)"
+          cd "$SMOKE_DIR"
+          npm init -y >/dev/null
+          npm install "$TARBALL" --ignore-scripts >/dev/null
+
+          PACKAGE_VERSION="$VERSION" node -e 'const fail = (actual) => { throw new Error("ESM SDK_VERSION " + actual + " !== " + process.env.PACKAGE_VERSION); }; (async () => { const m = await import("@pylva/sdk"); if (m.SDK_VERSION !== process.env.PACKAGE_VERSION) fail(m.SDK_VERSION); })().catch((err) => { console.error(err); process.exit(1); })'
+          PACKAGE_VERSION="$VERSION" node -e 'const m = require("@pylva/sdk"); if (m.SDK_VERSION !== process.env.PACKAGE_VERSION) throw new Error("CJS SDK_VERSION " + m.SDK_VERSION + " !== " + process.env.PACKAGE_VERSION)'
+
+          npx pylva validate --help >/tmp/pylva-validate-help.txt
+          grep -q 'pylva validate' /tmp/pylva-validate-help.txt
+          npx pylva --help >/tmp/pylva-help.txt
+          grep -q 'pylva validate' /tmp/pylva-help.txt
+
+      # --ignore-scripts: prepublishOnly would re-run test+typecheck+build
+      # (already explicit steps above) and the rebuild would replace dist
+      # AFTER the artifact guard audited it — publish exactly the bytes that
+      # were built and vetted. prepublishOnly remains the safety belt for
+      # manual publishes outside CI.
+      # The @pylva/sdk npm package uses Trusted Publishing for this exact
+      # GitHub Actions workflow. npm exchanges the job OIDC token for a
+      # short-lived publish credential and records provenance automatically.
+      - name: Publish
+        run: npm publish --access public --ignore-scripts
+        working-directory: packages/sdk-ts

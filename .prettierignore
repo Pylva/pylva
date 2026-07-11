@@ -1,0 +1,18 @@
+# Build outputs / generated
+node_modules
+.next
+dist
+build
+coverage
+.turbo
+dist-tsc
+db/migrations
+
+# Hand-formatted aligned-column style; prettier reflows 665 -> 878 lines.
+# Keep ignored so PostToolUse hook edits stay surgical.
+src/lib/db/schema.ts
+
+# Harness-managed dirs (settings edited by stacked PRs; receipts are scratch)
+.claude/
+.codex/
+.context/
