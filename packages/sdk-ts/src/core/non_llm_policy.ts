@@ -88,12 +88,12 @@ interface RemoteNonLlmPolicyResponse {
 
 export function normalizeNonLlmMatcher(value: unknown): string | null {
   if (typeof value !== 'string' || value.length === 0) return null;
-  const normalized = value
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9_.:/-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 100);
+  const sanitized = value.toLowerCase().trim().replace(/[^a-z0-9_.:/-]+/g, '-');
+  let start = 0;
+  while (sanitized[start] === '-') start += 1;
+  let end = sanitized.length;
+  while (end > start && sanitized[end - 1] === '-') end -= 1;
+  const normalized = sanitized.slice(start, end).slice(0, 100);
   return normalized.length > 0 ? normalized : null;
 }
 
