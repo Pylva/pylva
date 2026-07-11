@@ -4,6 +4,7 @@ import {
   buildPostAuthRedirectUrl,
   decodeOAuthStateNext,
   encodeOAuthStateValue,
+  isDashboardAuthNext,
   nextPathOrgSlug,
   validateAuthNext,
 } from '@/lib/auth/post-auth-redirect';
@@ -49,6 +50,7 @@ describe('post-auth redirect helpers', () => {
   it('extracts the org slug from a validated next path', () => {
     const next = validateAuthNext('/o/my-org2/dashboard/rules');
     expect(next).not.toBeNull();
+    expect(isDashboardAuthNext(next!)).toBe(true);
     expect(nextPathOrgSlug(next!)).toBe('my-org2');
   });
 

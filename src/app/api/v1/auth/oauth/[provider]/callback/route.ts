@@ -26,6 +26,7 @@ import { externalFetch } from '@/lib/external-egress';
 import {
   buildPostAuthRedirectUrl,
   decodeOAuthStateNext,
+  isDashboardAuthNext,
   nextPathOrgSlug,
   type AllowedAuthNextPath,
 } from '@/lib/auth/post-auth-redirect';
@@ -269,7 +270,7 @@ async function continueOAuthCallback(
   // back to the default org (buildPostAuthRedirectUrl drops the mismatched
   // next), so this can't be used to probe org membership.
   let target = { builderId: org.builderId, slug: org.slug, role: org.role, tier: org.tier };
-  if (next) {
+  if (next && isDashboardAuthNext(next)) {
     const nextSlug = nextPathOrgSlug(next);
     if (nextSlug !== org.slug) {
       try {

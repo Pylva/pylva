@@ -18,6 +18,7 @@ import { ErrorCode } from '@pylva/shared';
 import { logger } from '@/lib/logger';
 import {
   buildPostAuthRedirectUrl,
+  isDashboardAuthNext,
   nextPathOrgSlug,
   validateAuthNext,
 } from '@/lib/auth/post-auth-redirect';
@@ -51,7 +52,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     // org they were bounced out of, provided they hold membership there.
     let target = { builderId: org.builderId, slug: org.slug, role: org.role, tier: org.tier };
     const next = validateAuthNext(result.next);
-    if (next) {
+    if (next && isDashboardAuthNext(next)) {
       const nextSlug = nextPathOrgSlug(next);
       if (nextSlug !== org.slug) {
         // Non-fatal: the one-time token is already consumed, so a transient
