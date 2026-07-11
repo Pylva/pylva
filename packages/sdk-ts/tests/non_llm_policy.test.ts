@@ -243,9 +243,12 @@ describe('non-LLM usage and discovery', () => {
 
   it('normalizes unsafe high-cardinality matcher names', () => {
     const long = `${'A'.repeat(120)} secret@example.com`;
+    const repeatedHyphens = `a${'-'.repeat(20_000)}b`;
 
     expect(normalizeNonLlmMatcher('  Local Lookup !!  ')).toBe('local-lookup');
     expect(normalizeNonLlmMatcher(long)).toHaveLength(100);
+    expect(normalizeNonLlmMatcher('--safe-matcher--')).toBe('safe-matcher');
+    expect(normalizeNonLlmMatcher(repeatedHyphens)).toBe(`a${'-'.repeat(99)}`);
     expect(normalizeNonLlmMatcher('@@@')).toBeNull();
   });
 
