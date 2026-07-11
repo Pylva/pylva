@@ -49,9 +49,10 @@ describe('post-auth redirect helpers', () => {
 
   it('extracts the org slug from a validated next path', () => {
     const next = validateAuthNext('/o/my-org2/dashboard/rules');
-    expect(next).not.toBeNull();
-    expect(isDashboardAuthNext(next!)).toBe(true);
-    expect(nextPathOrgSlug(next!)).toBe('my-org2');
+    if (!next || !isDashboardAuthNext(next)) {
+      throw new Error('expected a validated dashboard next path');
+    }
+    expect(nextPathOrgSlug(next)).toBe('my-org2');
   });
 
   it('round-trips OAuth state next only for the v1 encoded shape', () => {
