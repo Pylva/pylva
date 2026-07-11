@@ -87,6 +87,15 @@ Run Pylva locally from source with Docker-managed PostgreSQL, ClickHouse, and Re
 
 Pylva tracks usage at the API layer, so your agent does not need a particular framework. Use automatic instrumentation where available or direct usage reporting for any other LLM or non-LLM API.
 
+Install the SDK for your language:
+
+```bash
+npm install @pylva/sdk
+pip install pylva-sdk
+```
+
+The Python PyPI distribution is `pylva-sdk`; its runtime import package is `pylva`.
+
 ## Privacy & Data
 
 **Meter costs without collecting agent conversations.** Pylva's automatic instrumentation records the usage metadata needed for attribution, controls, and billing-ready metering.

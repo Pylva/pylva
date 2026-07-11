@@ -16,9 +16,10 @@ const MAX_NEXT_LENGTH = 200;
 // underscore and slashes, which covers every dashboard route (ids are UUIDs).
 const AUTH_NEXT_PATTERN = /^\/o\/[a-z0-9][a-z0-9-]{0,62}\/dashboard(?:\/[A-Za-z0-9\-_/]*)?$/;
 
-declare const allowedAuthNextBrand: unique symbol;
+declare const dashboardAuthNextBrand: unique symbol;
+export type DashboardAuthNextPath = string & { readonly [dashboardAuthNextBrand]: true };
 /** A `next` path that passed validateAuthNext — the only form ever redirected to. */
-export type AllowedAuthNextPath = string & { readonly [allowedAuthNextBrand]: true };
+export type AllowedAuthNextPath = DashboardAuthNextPath;
 
 export function validateAuthNext(value: string | null | undefined): AllowedAuthNextPath | null {
   if (!value || value.length > MAX_NEXT_LENGTH) return null;
@@ -27,8 +28,12 @@ export function validateAuthNext(value: string | null | undefined): AllowedAuthN
   return value as AllowedAuthNextPath;
 }
 
-/** Org slug segment of a validated next path (`/o/{slug}/dashboard/...`). */
-export function nextPathOrgSlug(next: AllowedAuthNextPath): string {
+export function isDashboardAuthNext(next: AllowedAuthNextPath): next is DashboardAuthNextPath {
+  return AUTH_NEXT_PATTERN.test(next);
+}
+
+/** Org slug segment of a validated dashboard next path (`/o/{slug}/dashboard/...`). */
+export function nextPathOrgSlug(next: DashboardAuthNextPath): string {
   return next.split('/')[2]!;
 }
 
@@ -51,7 +56,11 @@ export function buildPostAuthRedirectUrl(params: {
   next?: string | null;
 }): string {
   const safeNext = validateAuthNext(params.next);
-  if (safeNext && nextPathOrgSlug(safeNext) === params.orgSlug) {
+  if (
+    safeNext &&
+    isDashboardAuthNext(safeNext) &&
+    nextPathOrgSlug(safeNext) === params.orgSlug
+  ) {
     return `${params.baseUrl}${safeNext}`;
   }
   return `${params.baseUrl}/o/${params.orgSlug}/dashboard`;
