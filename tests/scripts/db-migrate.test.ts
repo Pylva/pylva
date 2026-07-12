@@ -26,6 +26,16 @@ async function writeMigration(filename: string, content: string): Promise<void> 
   await fs.writeFile(path.join(migrationsDir, filename), content, 'utf8');
 }
 
+async function writePhaseMetadata(
+  overrides: Record<string, 'pre_roll' | 'post_roll'>,
+): Promise<void> {
+  await fs.writeFile(
+    path.join(rootDir, 'db/migration-phases.json'),
+    JSON.stringify({ default: 'pre_roll', overrides }),
+    'utf8',
+  );
+}
+
 async function writeThreeMigrations(): Promise<Record<string, string>> {
   const contents = {
     '001_one.sql': "SELECT '001';",
@@ -97,6 +107,101 @@ describe('db-migrate core and CLI', () => {
 
     expect(result.exitCode).toBe(0);
     expect(pendingContentCalls(calls)).toEqual(["SELECT '001';", "SELECT '002';", "SELECT '003';"]);
+  });
+
+  it('applies only the selected phase while keeping other pending migrations deferred', async () => {
+    const contents = await writeThreeMigrations();
+    await writePhaseMetadata({ '002_two.sql': 'post_roll' });
+    const { client, calls } = createRecordingSqlClient({ ledgerRows: [] });
+
+    const result = await runWithRecording(
+      { mode: 'apply', phase: 'pre_roll', yes: false, json: false },
+      client,
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(pendingContentCalls(calls)).toEqual(["SELECT '001';"]);
+    expect(insertCalls(calls).map((call) => call.params?.[0])).toEqual(['001_one.sql']);
+
+    const phaseStatus = createRecordingSqlClient({
+      ledgerRows: ledgerRowsFor(contents, ['001_one.sql']),
+    });
+    const statusResult = await runWithRecording(
+      { mode: 'status', phase: 'pre_roll', yes: false, json: true },
+      phaseStatus.client,
+    );
+    expect(statusResult.exitCode).toBe(0);
+    expect(parseSingleJsonLog(statusResult.logs)).toMatchObject({
+      phase: 'pre_roll',
+      state: 'in_sync',
+      pending: [],
+      deferred_pending: ['002_two.sql', '003_three.sql'],
+    });
+  });
+
+  it('keeps an unphased run backward-compatible by applying every pending migration', async () => {
+    await writeThreeMigrations();
+    await writePhaseMetadata({ '002_two.sql': 'post_roll' });
+    const { client, calls } = createRecordingSqlClient({ ledgerRows: [] });
+
+    const result = await runWithRecording({ mode: 'apply', yes: false, json: false }, client);
+
+    expect(result.exitCode).toBe(0);
+    expect(pendingContentCalls(calls)).toEqual(["SELECT '001';", "SELECT '002';", "SELECT '003';"]);
+  });
+
+  it('requires every pre_roll migration before applying post_roll work', async () => {
+    const contents = await writeThreeMigrations();
+    await writePhaseMetadata({ '002_two.sql': 'post_roll' });
+
+    const blocked = createRecordingSqlClient({ ledgerRows: [] });
+    const blockedResult = await runWithRecording(
+      { mode: 'apply', phase: 'post_roll', yes: false, json: false },
+      blocked.client,
+    );
+    expect(blockedResult.exitCode).toBe(4);
+    expect(blockedResult.errors.join('\n')).toContain('pre_roll migrations remain pending');
+    expect(beginCount(blocked.calls)).toBe(0);
+
+    const ready = createRecordingSqlClient({
+      ledgerRows: ledgerRowsFor(contents, ['001_one.sql']),
+    });
+    const readyResult = await runWithRecording(
+      { mode: 'apply', phase: 'post_roll', yes: false, json: false },
+      ready.client,
+    );
+    expect(readyResult.exitCode).toBe(0);
+    expect(pendingContentCalls(ready.calls)).toEqual(["SELECT '002';", "SELECT '003';"]);
+  });
+
+  it('does not hide global ledger drift when inspecting one phase', async () => {
+    const contents = await writeThreeMigrations();
+    await writePhaseMetadata({ '002_two.sql': 'post_roll' });
+    const { client } = createRecordingSqlClient({
+      ledgerRows: [
+        { filename: '001_one.sql', checksum: 'wrong-checksum' },
+        ...ledgerRowsFor(contents, ['003_three.sql']),
+      ],
+    });
+
+    const result = await runWithRecording(
+      { mode: 'status', phase: 'post_roll', yes: false, json: true },
+      client,
+    );
+
+    expect(result.exitCode).toBe(2);
+    expect(parseSingleJsonLog(result.logs)).toMatchObject({
+      phase: 'post_roll',
+      state: 'drift',
+      pending: ['002_two.sql'],
+      drift: [
+        {
+          filename: '001_one.sql',
+          ledgerChecksum: 'wrong-checksum',
+          fileChecksum: computeChecksum(contents['001_one.sql']!),
+        },
+      ],
+    });
   });
 
   it('serializes the ledger read and apply sequence with an advisory lock', async () => {
@@ -371,6 +476,28 @@ describe('db-migrate core and CLI', () => {
   });
 
   it('validates CLI argument combinations', () => {
+    expect(parseArgs(['--phase', 'pre_roll'])).toEqual({
+      mode: 'apply',
+      phase: 'pre_roll',
+      yes: false,
+      json: false,
+    });
+    expect(parseArgs(['--status', '--phase', 'post_roll', '--json'])).toEqual({
+      mode: 'status',
+      phase: 'post_roll',
+      yes: false,
+      json: true,
+    });
+    expect(() => parseArgs(['--phase'])).toThrow('--phase requires pre_roll or post_roll');
+    expect(() => parseArgs(['--phase', 'unknown'])).toThrow(
+      '--phase requires pre_roll or post_roll',
+    );
+    expect(() => parseArgs(['--phase', 'pre_roll', '--phase', 'post_roll'])).toThrow(
+      '--phase can only be specified once',
+    );
+    expect(() => parseArgs(['--baseline', '--phase', 'pre_roll'])).toThrow(
+      '--phase is not supported with --baseline',
+    );
     expect(() => parseArgs(['--through'])).toThrow('--through requires a migration filename');
     expect(() => parseArgs(['--through', '001_one.sql'])).toThrow(
       '--through is only supported with --baseline',

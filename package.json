@@ -30,6 +30,7 @@
     "db:manifest": "tsx scripts/generate-migration-manifest.ts",
     "db:migrate": "tsx scripts/db-migrate.ts",
     "db:migrate:status": "tsx scripts/db-migrate.ts --status",
+    "db:migrate:verify-physical": "tsx scripts/verify-physical-schema-contract.ts",
     "db:setup:clickhouse": "SKIP_POSTGRES=true pnpm db:setup",
     "db:seed": "tsx db/seed.ts",
     "db:reset": "tsx db/setup.ts && tsx db/seed.ts",

@@ -8,14 +8,19 @@ import {
   computeStatus,
   ensureLedger,
   errorMessage,
+  isMigrationPhase,
   ledgerExists,
   listMigrationFiles,
   logDrift,
   migrationHead,
+  pendingMigrationFilesForPhase,
+  pendingPreRollBlockers,
   readLedger,
   recordBaseline,
+  statusForMigrationPhase,
   withMigrationAdvisoryLock,
   type LedgerRow,
+  type MigrationPhase,
   type MigrateSqlClient,
   type MigrationFile,
   type MigrationState,
@@ -29,6 +34,7 @@ const DEFAULT_MIGRATIONS_DIR = path.resolve(DEFAULT_ROOT_DIR, 'db/migrations');
 
 export interface DbMigrateArgs {
   mode: 'apply' | 'status' | 'baseline';
+  phase?: MigrationPhase;
   through?: string;
   yes: boolean;
   json: boolean;
@@ -43,10 +49,12 @@ interface DbMigrateDeps {
 }
 
 interface StatusJson {
+  phase?: MigrationPhase;
   state: MigrationState;
   head_file: string | null;
   applied_count: number;
   pending: string[];
+  deferred_pending?: string[];
   drift: MigrationStatus['drift'];
   unknown: string[];
 }
@@ -67,6 +75,7 @@ function setMode(
 
 export function parseArgs(argv: string[]): DbMigrateArgs {
   let mode: DbMigrateArgs['mode'] = 'apply';
+  let phase: MigrationPhase | undefined;
   let through: string | undefined;
   let yes = false;
   let json = false;
@@ -79,6 +88,18 @@ export function parseArgs(argv: string[]): DbMigrateArgs {
     }
     if (arg === '--baseline') {
       mode = setMode(mode, 'baseline');
+      continue;
+    }
+    if (arg === '--phase') {
+      const value = argv[index + 1];
+      if (!isMigrationPhase(value)) {
+        throw new Error('--phase requires pre_roll or post_roll');
+      }
+      if (phase !== undefined) {
+        throw new Error('--phase can only be specified once');
+      }
+      phase = value;
+      index += 1;
       continue;
     }
     if (arg === '--through') {
@@ -104,15 +125,20 @@ export function parseArgs(argv: string[]): DbMigrateArgs {
   if (through !== undefined && mode !== 'baseline') {
     throw new Error('--through is only supported with --baseline');
   }
+  if (phase !== undefined && mode === 'baseline') {
+    throw new Error('--phase is not supported with --baseline');
+  }
   if (json && mode !== 'status') {
     throw new Error('--json is only supported with --status');
   }
 
-  if (through === undefined) {
-    return { mode, yes, json };
-  }
-
-  return { mode, through, yes, json };
+  return {
+    mode,
+    ...(phase === undefined ? {} : { phase }),
+    ...(through === undefined ? {} : { through }),
+    yes,
+    json,
+  };
 }
 
 function statusExitCode(state: MigrationState): number {
@@ -126,13 +152,21 @@ function logStatusHuman(
   status: MigrationStatus,
   headFile: string | null,
   log: (line: string) => void,
+  opts?: { phase?: MigrationPhase; appliedCount?: number; deferredPending?: string[] },
 ): void {
+  if (opts?.phase !== undefined) {
+    log(`phase: ${opts.phase}`);
+  }
   log(`state: ${status.state}`);
   log(`head_file: ${headFile ?? '(none)'}`);
-  log(`applied_count: ${status.applied.length}`);
+  log(`applied_count: ${opts?.appliedCount ?? status.applied.length}`);
   if (status.pending.length > 0) {
     log('pending:');
     for (const filename of status.pending) log(`  ${filename}`);
+  }
+  if (opts?.deferredPending !== undefined && opts.deferredPending.length > 0) {
+    log('deferred_pending:');
+    for (const filename of opts.deferredPending) log(`  ${filename}`);
   }
   if (status.drift.length > 0) {
     log('drift:');
@@ -153,7 +187,11 @@ function logBaselineListing(files: MigrationFile[], log: (line: string) => void)
   log(`${files.length} file(s)`);
 }
 
-async function runApply(deps: DbMigrateDeps, files: MigrationFile[]): Promise<number> {
+async function runApply(
+  deps: DbMigrateDeps,
+  files: MigrationFile[],
+  phase: MigrationPhase | undefined,
+): Promise<number> {
   return withMigrationAdvisoryLock(deps.sql, async (lockedSql) => {
     const hasLedger = await ledgerExists(lockedSql);
     if (!hasLedger && (await buildersTableExists(lockedSql))) {
@@ -170,6 +208,16 @@ async function runApply(deps: DbMigrateDeps, files: MigrationFile[]): Promise<nu
       logDrift(status, deps.error);
       return 2;
     }
+    if (phase === 'post_roll') {
+      const pendingPreRoll = pendingPreRollBlockers(status, files).map((file) => file.filename);
+      if (pendingPreRoll.length > 0) {
+        deps.error(
+          'pre_roll migrations remain pending; apply pnpm db:migrate --phase pre_roll before post_roll',
+        );
+        for (const filename of pendingPreRoll) deps.error(`  ${filename}`);
+        return 4;
+      }
+    }
 
     try {
       const { appliedCount } = await applyPending({
@@ -177,14 +225,25 @@ async function runApply(deps: DbMigrateDeps, files: MigrationFile[]): Promise<nu
         files,
         ledger,
         appliedBy: 'db:migrate',
+        phase,
         lockTimeout: deps.lockTimeout ?? '30s',
         log: deps.log,
       });
-      const headFile = migrationHead(files) ?? '(none)';
+      const phaseFiles =
+        phase === undefined ? files : pendingMigrationFilesForPhase(status, files, phase);
+      const headFile = migrationHead(phaseFiles) ?? migrationHead(files) ?? '(none)';
       if (appliedCount === 0) {
-        deps.log(`0 pending — schema at head ${headFile}`);
+        deps.log(
+          phase === undefined
+            ? `0 pending — schema at head ${headFile}`
+            : `0 pending — ${phase} phase at head ${headFile}`,
+        );
       } else {
-        deps.log(`applied ${appliedCount} migration(s); head: ${headFile}`);
+        deps.log(
+          phase === undefined
+            ? `applied ${appliedCount} migration(s); head: ${headFile}`
+            : `applied ${appliedCount} ${phase} migration(s); head: ${headFile}`,
+        );
       }
       return 0;
     } catch (error) {
@@ -201,23 +260,36 @@ async function runStatus(
   deps: DbMigrateDeps,
   files: MigrationFile[],
   json: boolean,
+  phase: MigrationPhase | undefined,
 ): Promise<number> {
   const ledger = (await ledgerExists(deps.sql)) ? await readLedger(deps.sql) : null;
-  const status = computeStatus(files, ledger);
+  const fullStatus = computeStatus(files, ledger);
+  const status =
+    phase === undefined ? fullStatus : statusForMigrationPhase(fullStatus, files, phase);
+  const deferredPending =
+    phase === undefined
+      ? undefined
+      : fullStatus.pending.filter((filename) => !status.pending.includes(filename));
   const headFile = migrationHead(files);
 
   if (json) {
     const payload: StatusJson = {
+      ...(phase === undefined ? {} : { phase }),
       state: status.state,
       head_file: headFile,
-      applied_count: status.applied.length,
+      applied_count: phase === undefined ? status.applied.length : fullStatus.applied.length,
       pending: status.pending,
+      ...(deferredPending === undefined ? {} : { deferred_pending: deferredPending }),
       drift: status.drift,
       unknown: status.unknown,
     };
     deps.log(JSON.stringify(payload));
   } else {
-    logStatusHuman(status, headFile, deps.log);
+    logStatusHuman(status, headFile, deps.log, {
+      phase,
+      appliedCount: phase === undefined ? undefined : fullStatus.applied.length,
+      deferredPending,
+    });
   }
 
   return statusExitCode(status.state);
@@ -276,12 +348,12 @@ export async function runDbMigrate(args: DbMigrateArgs, deps: DbMigrateDeps): Pr
   const files = await listMigrationFiles(deps.migrationsDir);
 
   if (args.mode === 'status') {
-    return runStatus(deps, files, args.json);
+    return runStatus(deps, files, args.json, args.phase);
   }
   if (args.mode === 'baseline') {
     return runBaseline(args, deps, files);
   }
-  return runApply(deps, files);
+  return runApply(deps, files, args.phase);
 }
 
 async function main(): Promise<void> {
