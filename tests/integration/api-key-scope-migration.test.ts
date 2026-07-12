@@ -156,11 +156,15 @@ describe('migration 048 universal api key scope', () => {
 
       await scratch.sql`
         CREATE TABLE _048_api_keys_scope_backup AS
-          SELECT key_id, scope FROM api_keys WHERE false;
+          SELECT key_id, scope FROM api_keys WHERE false
+      `;
+      await scratch.sql`
         CREATE UNIQUE INDEX idx_048_api_keys_scope_backup_key_id
-          ON _048_api_keys_scope_backup(key_id);
+          ON _048_api_keys_scope_backup(key_id)
+      `;
+      await scratch.sql`
         INSERT INTO api_keys (key_id, builder_id, key_hash, scope)
-        VALUES ('lateswp1', ${builder!.id}, 'hash', 'admin_api');
+        VALUES ('lateswp1', ${builder!.id}, 'hash', 'admin_api')
       `;
 
       await scratch.sql.begin(async (tx) => {
