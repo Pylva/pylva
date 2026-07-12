@@ -107,6 +107,10 @@ The Python PyPI distribution is `pylva-sdk`; its runtime import package is `pylv
 | **Self-hosted deployments** | Do not phone home to Pylva. Optional PostHog analytics remain off unless you configure them, and Next.js telemetry is disabled. |
 | **Builder-provided fields** | Customer IDs, step names, and custom metadata are not automatically redacted. Use identifiers rather than personal data or raw user content. |
 
+Self-hosted analytics are opt-in. To enable the privacy-limited PostHog events, set
+`NEXT_PUBLIC_POSTHOG_KEY` and an allowlisted HTTPS `NEXT_PUBLIC_POSTHOG_HOST`
+before building the image. Leaving the key empty keeps analytics disabled.
+
 ## Community & Contributing
 
 Pylva improves through feedback and contributions from AI agent builders.
