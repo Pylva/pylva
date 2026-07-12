@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   defaultMigrationPhaseMetadata,
+  finalizeOnlineMigration,
   parseMigrationPhaseMetadata,
   prepareOnlineMigration,
   resolveMigrationPhases,
@@ -119,5 +120,32 @@ describe('prepareOnlineMigration', () => {
         .flat()
         .filter((query) => query.includes("lock_timeout = '5s'")),
     ).toHaveLength(3);
+  });
+});
+
+describe('finalizeOnlineMigration', () => {
+  it('does nothing outside migration 048', async () => {
+    const tx = { unsafe: vi.fn() } as unknown as MigrateTx;
+
+    await finalizeOnlineMigration(tx, '049_other.sql');
+
+    expect(tx.unsafe).not.toHaveBeenCalled();
+  });
+
+  it('blocks writes and captures late legacy rows before the final migration update', async () => {
+    const tx = { unsafe: vi.fn(async () => []) } as unknown as MigrateTx;
+
+    await finalizeOnlineMigration(tx, '048_universal_api_key_scope.sql');
+
+    expect(tx.unsafe).toHaveBeenCalledTimes(1);
+    const query = String(vi.mocked(tx.unsafe).mock.calls[0]?.[0]);
+    expect(query.indexOf('LOCK TABLE api_keys IN SHARE ROW EXCLUSIVE MODE')).toBeGreaterThanOrEqual(
+      0,
+    );
+    expect(query.indexOf('INSERT INTO _048_api_keys_scope_backup')).toBeGreaterThan(
+      query.indexOf('LOCK TABLE api_keys IN SHARE ROW EXCLUSIVE MODE'),
+    );
+    expect(query).toContain("WHERE scope <> 'universal'");
+    expect(query).toContain('ON CONFLICT (key_id) DO NOTHING');
   });
 });

@@ -543,6 +543,27 @@ FROM updated`,
   }
 }
 
+/**
+ * Close the final rollback-backup race for migration 048.
+ *
+ * The bounded preparation deliberately commits between batches. A previous
+ * release can therefore insert one last legacy-scope key after the final empty
+ * batch. Take a write-conflicting lock in the migration transaction and sweep
+ * those rows into the rollback table before the immutable migration SQL runs
+ * its final UPDATE.
+ */
+export async function finalizeOnlineMigration(tx: MigrateTx, filename: string): Promise<void> {
+  if (filename !== UNIVERSAL_API_KEY_SCOPE_MIGRATION) return;
+
+  await tx.unsafe(`LOCK TABLE api_keys IN SHARE ROW EXCLUSIVE MODE;
+
+INSERT INTO _048_api_keys_scope_backup (key_id, scope)
+SELECT key_id, scope
+FROM api_keys
+WHERE scope <> 'universal'
+ON CONFLICT (key_id) DO NOTHING;`);
+}
+
 export function computeStatus(files: MigrationFile[], ledger: LedgerRow[] | null): MigrationStatus {
   const sortedFiles = [...files].sort(compareFilename);
 
@@ -625,6 +646,7 @@ export async function applyPending(opts: {
       await opts.sql.begin(async (tx) => {
         const fileLockTimeout = onlineMigrationLockTimeout(file.filename) ?? lockTimeout;
         await tx.unsafe(`SET LOCAL lock_timeout = '${fileLockTimeout}'`);
+        await finalizeOnlineMigration(tx, file.filename);
         await tx.unsafe(file.content);
         elapsedMs = Date.now() - startedAt;
         await tx.unsafe(
