@@ -2,7 +2,7 @@
 // at init when a reliability_failover rule names a backup provider whose
 // wrapper isn't loaded in this process.
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Provider, RuleStatus, RuleType } from '@pylva/shared';
 
 import {
@@ -15,8 +15,13 @@ import { failoverRule } from './helpers/failover_fixtures.js';
 let warnSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
+  vi.restoreAllMocks();
   _resetInitValidationForTests();
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+});
+
+afterEach(() => {
+  warnSpy.mockRestore();
 });
 
 describe('validateFailoverWrappers', () => {
