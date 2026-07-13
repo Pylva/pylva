@@ -19,6 +19,7 @@ function checkedInManifest(): MigrationManifest {
     entries: EXPECTED_MIGRATIONS.map((entry) => ({
       filename: entry.filename,
       sha256: entry.sha256,
+      phase: entry.phase,
     })),
     head: EXPECTED_SCHEMA_HEAD,
   };
@@ -37,6 +38,19 @@ describe('migration manifest sync', () => {
       .at(-1)?.filename;
 
     expect(EXPECTED_SCHEMA_HEAD).toBe(lastFilename);
+  });
+
+  it('marks only migration 048 as post_roll and defaults every other migration to pre_roll', () => {
+    const postRoll = EXPECTED_MIGRATIONS.filter((migration) => migration.phase === 'post_roll');
+
+    expect(postRoll.map((migration) => migration.filename)).toEqual([
+      '048_universal_api_key_scope.sql',
+    ]);
+    expect(
+      EXPECTED_MIGRATIONS.filter((migration) => migration.filename !== postRoll[0]?.filename).every(
+        (migration) => migration.phase === 'pre_roll',
+      ),
+    ).toBe(true);
   });
 
   it('keeps the generated module bundleable in the db-less app image', async () => {

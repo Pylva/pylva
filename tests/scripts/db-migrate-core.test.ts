@@ -1,9 +1,52 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  defaultMigrationPhaseMetadata,
+  finalizeOnlineMigration,
+  parseMigrationPhaseMetadata,
   prepareOnlineMigration,
+  resolveMigrationPhases,
   type MigrateSqlClient,
   type MigrateTx,
 } from '../../scripts/db-migrate-core.js';
+
+describe('migration phase metadata', () => {
+  it('defaults migrations to pre_roll and applies explicit post_roll overrides', () => {
+    const metadata = parseMigrationPhaseMetadata({
+      default: 'pre_roll',
+      overrides: { '048_universal_api_key_scope.sql': 'post_roll' },
+    });
+    const phases = resolveMigrationPhases(
+      ['041_rename_api_key_scopes.sql', '048_universal_api_key_scope.sql'],
+      metadata,
+    );
+
+    expect(phases.get('041_rename_api_key_scopes.sql')).toBe('pre_roll');
+    expect(phases.get('048_universal_api_key_scope.sql')).toBe('post_roll');
+    expect(defaultMigrationPhaseMetadata()).toEqual({ default: 'pre_roll', overrides: {} });
+  });
+
+  it('rejects invalid phases and stale override filenames', () => {
+    expect(() => parseMigrationPhaseMetadata({ default: 'before_roll', overrides: {} })).toThrow(
+      /default must be one of/,
+    );
+    expect(() =>
+      parseMigrationPhaseMetadata({
+        default: 'pre_roll',
+        overrides: { '048_universal_api_key_scope.sql': 'after_roll' },
+      }),
+    ).toThrow(/override for 048_universal_api_key_scope\.sql must be one of/);
+
+    expect(() =>
+      resolveMigrationPhases(
+        ['041_rename_api_key_scopes.sql'],
+        parseMigrationPhaseMetadata({
+          default: 'pre_roll',
+          overrides: { '048_universal_api_key_scope.sql': 'post_roll' },
+        }),
+      ),
+    ).toThrow(/override references migration missing from disk/);
+  });
+});
 
 describe('prepareOnlineMigration', () => {
   it('does nothing for migrations without an online preparation', async () => {
@@ -77,5 +120,32 @@ describe('prepareOnlineMigration', () => {
         .flat()
         .filter((query) => query.includes("lock_timeout = '5s'")),
     ).toHaveLength(3);
+  });
+});
+
+describe('finalizeOnlineMigration', () => {
+  it('does nothing outside migration 048', async () => {
+    const tx = { unsafe: vi.fn() } as unknown as MigrateTx;
+
+    await finalizeOnlineMigration(tx, '049_other.sql');
+
+    expect(tx.unsafe).not.toHaveBeenCalled();
+  });
+
+  it('blocks writes and captures late legacy rows before the final migration update', async () => {
+    const tx = { unsafe: vi.fn(async () => []) } as unknown as MigrateTx;
+
+    await finalizeOnlineMigration(tx, '048_universal_api_key_scope.sql');
+
+    expect(tx.unsafe).toHaveBeenCalledTimes(1);
+    const query = String(vi.mocked(tx.unsafe).mock.calls[0]?.[0]);
+    expect(query.indexOf('LOCK TABLE api_keys IN SHARE ROW EXCLUSIVE MODE')).toBeGreaterThanOrEqual(
+      0,
+    );
+    expect(query.indexOf('INSERT INTO _048_api_keys_scope_backup')).toBeGreaterThan(
+      query.indexOf('LOCK TABLE api_keys IN SHARE ROW EXCLUSIVE MODE'),
+    );
+    expect(query).toContain("WHERE scope <> 'universal'");
+    expect(query).toContain('ON CONFLICT (key_id) DO NOTHING');
   });
 });

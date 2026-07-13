@@ -134,7 +134,7 @@ describe('track() runtime guard', () => {
       is_owner: true,
     } as never);
 
-    vi.waitFor(() => expect(calls.length).toBeGreaterThan(0));
+    await vi.waitFor(() => expect(calls.length).toBeGreaterThan(0));
     const call = calls.at(-1)!;
     const serialized = JSON.stringify(call.properties);
     expect(serialized).not.toContain('pv_live_AAAA');

@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { applyPostgresMigration } from '../../scripts/apply-postgres-migration.js';
+import { finalizeOnlineMigration } from '../../scripts/db-migrate-core.js';
 import { runDbMigrate } from '../../scripts/db-migrate.js';
 import { applyMigrationsThrough, createScratchDb } from '../helpers/scratch-db.js';
 
@@ -143,6 +144,42 @@ describe('migration 041 api key scopes', () => {
 });
 
 describe('migration 048 universal api key scope', () => {
+  it('backs up a legacy key found by the final transactional sweep', async () => {
+    const scratch = await createScratchDb({ prefix: 'universal_scope_final_sweep' });
+    try {
+      await applyMigrationsThrough(scratch, THROUGH_045);
+      const [builder] = await scratch.sql<{ id: string }[]>`
+        INSERT INTO builders (email, name, slug)
+        VALUES ('final-sweep@example.com', 'Final Sweep Test', 'final-sweep-test')
+        RETURNING id
+      `;
+
+      await scratch.sql`
+        CREATE TABLE _048_api_keys_scope_backup AS
+          SELECT key_id, scope FROM api_keys WHERE false
+      `;
+      await scratch.sql`
+        CREATE UNIQUE INDEX idx_048_api_keys_scope_backup_key_id
+          ON _048_api_keys_scope_backup(key_id)
+      `;
+      await scratch.sql`
+        INSERT INTO api_keys (key_id, builder_id, key_hash, scope)
+        VALUES ('lateswp1', ${builder!.id}, 'hash', 'admin_api')
+      `;
+
+      await scratch.sql.begin(async (tx) => {
+        await finalizeOnlineMigration(tx, '048_universal_api_key_scope.sql');
+      });
+
+      const backup = await scratch.sql<{ key_id: string; scope: string }[]>`
+        SELECT key_id, scope FROM _048_api_keys_scope_backup ORDER BY key_id
+      `;
+      expect(backup).toEqual([{ key_id: 'lateswp1', scope: 'admin_api' }]);
+    } finally {
+      await scratch.drop();
+    }
+  });
+
   it('upgrades every legacy scope to universal with a rollback backup, idempotent rerun', async () => {
     const scratch = await createScratchDb({ prefix: 'universal_scope_migration' });
     try {

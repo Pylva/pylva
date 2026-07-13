@@ -68,6 +68,29 @@ describe('getSchemaStatus', () => {
     });
   });
 
+  it('reports behind when a deferred post_roll migration is missing after a later pre_roll entry', async () => {
+    const deferredFilename = '048_universal_api_key_scope.sql';
+    const appliedMigrations = EXPECTED_MIGRATIONS.filter(
+      (migration) => migration.filename !== deferredFilename,
+    );
+    const client = stubClient();
+    client.unsafe.mockResolvedValueOnce(
+      appliedMigrations.map((migration) => ({
+        filename: migration.filename,
+        checksum: migration.sha256,
+      })),
+    );
+
+    const status = await getSchemaStatus(asSchemaStatusClient(client), 50);
+
+    expect(status).toEqual({
+      expected_head: EXPECTED_SCHEMA_HEAD,
+      applied_head: EXPECTED_SCHEMA_HEAD,
+      pending_count: 1,
+      state: 'behind',
+    });
+  });
+
   it('reports drift when an applied migration checksum differs from the manifest', async () => {
     const client = stubClient();
     client.unsafe.mockResolvedValueOnce(
