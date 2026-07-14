@@ -105,6 +105,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (!parsed.success) return validationError(parsed.issues[0]?.message ?? 'Invalid body', 'body');
 
   const bodyHash = hashBody(parsed.output);
+  // Give manual invoice generation the same resumable per-slice dedupe rail
+  // as the monthly cron. If an auto-split request persists slice 1 and then
+  // fails on slice 2, retrying the same Idempotency-Key must reuse slice 1
+  // instead of creating a duplicate Stripe draft. Hash the key before storing
+  // it in invoices.draft_key so caller-supplied key material is not persisted.
+  const draftKeyBase = `oneoff:${hashBody({ key: idempotencyKey, bodyHash })}`;
   const claim = await checkOrClaim({ builderId: ctx.builderId, key: idempotencyKey, bodyHash });
 
   if (claim.status === 'conflict') {
@@ -117,18 +123,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
   if (claim.status === 'replay') {
-    if (!claim.invoiceId) {
-      // Prior claim never committed (crash between claim + commit). Safe to
-      // tell the client to retry with a fresh key.
-      return apiError(
-        409,
-        'invalid_request_error',
-        ErrorCode.VALIDATION_ERROR,
-        'Prior request using this Idempotency-Key did not complete. Retry with a new key.',
-        'Idempotency-Key',
-      );
+    if (claim.invoiceId) {
+      return NextResponse.json({ invoices: [{ invoice_id: claim.invoiceId }], replayed: true });
     }
-    return NextResponse.json({ invoices: [{ invoice_id: claim.invoiceId }], replayed: true });
+    // An uncommitted claim can mean a prior attempt stopped after persisting
+    // only some auto-split slices. Resume with the deterministic draft keys;
+    // persistOneDraft returns existing winners and creates only missing slices.
   }
 
   try {
@@ -140,6 +140,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         end: new Date(parsed.output.period_end),
       },
       actorUserId: ctx.userId ?? undefined,
+      draftKeyBase,
     });
 
     // Record the first invoice id against the key — for auto-split both drafts

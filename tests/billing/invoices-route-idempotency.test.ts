@@ -97,7 +97,11 @@ function makeRequest(key = 'invoice-key-1'): NextRequest {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.hashBody.mockReturnValue('stable-body-hash');
+  mocks.hashBody.mockImplementation((value: unknown) =>
+    typeof value === 'object' && value !== null && 'key' in value
+      ? 'stable-draft-key-hash'
+      : 'stable-body-hash',
+  );
   mocks.releaseClaim.mockResolvedValue(undefined);
   mocks.commitClaim.mockResolvedValue(undefined);
 });
@@ -161,5 +165,47 @@ describe('POST /api/v1/billing/invoices idempotency', () => {
       bodyHash: 'stable-body-hash',
     });
     expect(mocks.commitClaim).not.toHaveBeenCalled();
+  });
+
+  it('resumes an interrupted auto-split request with the same idempotency key', async () => {
+    mocks.checkOrClaim.mockResolvedValueOnce({ status: 'replay', invoiceId: null });
+    mocks.generateInvoice.mockResolvedValueOnce([
+      {
+        invoice_id: '33333333-3333-4333-8333-333333333333',
+        stripe_invoice_id: 'in_slice_1',
+        amount_usd: 10,
+        has_unpriced_events: false,
+        billing_cycle_id: '55555555-5555-4555-8555-555555555555',
+      },
+      {
+        invoice_id: '44444444-4444-4444-8444-444444444444',
+        stripe_invoice_id: 'in_slice_2',
+        amount_usd: 20,
+        has_unpriced_events: false,
+        billing_cycle_id: '55555555-5555-4555-8555-555555555555',
+      },
+    ]);
+
+    const response = await POST(makeRequest('interrupted-split-key'));
+    const body = await response.json();
+
+    expect(response.status).toBe(201);
+    expect(body.invoices).toHaveLength(2);
+    expect(mocks.generateInvoice).toHaveBeenCalledWith({
+      builderId: mocks.builderId,
+      customerId: mocks.customerId,
+      period: {
+        start: new Date('2026-06-01T00:00:00.000Z'),
+        end: new Date('2026-07-01T00:00:00.000Z'),
+      },
+      actorUserId: mocks.userId,
+      draftKeyBase: 'oneoff:stable-draft-key-hash',
+    });
+    expect(mocks.commitClaim).toHaveBeenCalledWith({
+      builderId: mocks.builderId,
+      key: 'interrupted-split-key',
+      invoiceId: '33333333-3333-4333-8333-333333333333',
+    });
+    expect(mocks.releaseClaim).not.toHaveBeenCalled();
   });
 });
