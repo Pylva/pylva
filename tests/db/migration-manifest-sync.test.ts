@@ -40,14 +40,15 @@ describe('migration manifest sync', () => {
     expect(EXPECTED_SCHEMA_HEAD).toBe(lastFilename);
   });
 
-  it('marks only migration 048 as post_roll and defaults every other migration to pre_roll', () => {
+  it('marks the resumable 048-049 suffix as post_roll and defaults earlier migrations to pre_roll', () => {
     const postRoll = EXPECTED_MIGRATIONS.filter((migration) => migration.phase === 'post_roll');
 
     expect(postRoll.map((migration) => migration.filename)).toEqual([
       '048_universal_api_key_scope.sql',
+      '049_backfill_builder_owner_memberships.sql',
     ]);
     expect(
-      EXPECTED_MIGRATIONS.filter((migration) => migration.filename !== postRoll[0]?.filename).every(
+      EXPECTED_MIGRATIONS.filter((migration) => !postRoll.includes(migration)).every(
         (migration) => migration.phase === 'pre_roll',
       ),
     ).toBe(true);
