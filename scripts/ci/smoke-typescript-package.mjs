@@ -312,7 +312,7 @@ function assertPackedManifest(manifest, files, tarball, expectedVersion) {
     Object.fromEntries(peerNames.map((peer) => [peer, { optional: true }])),
     'packed optional-peer metadata',
   );
-  exactJson(manifest.dependencies, { valibot: '^1.3.1' }, 'packed runtime dependencies');
+  exactJson(manifest.dependencies, { valibot: '^1.4.2' }, 'packed runtime dependencies');
   exactJson(manifest.optionalDependencies ?? {}, {}, 'packed optional dependencies');
   assert(
     manifest.bundleDependencies === undefined && manifest.bundledDependencies === undefined,
