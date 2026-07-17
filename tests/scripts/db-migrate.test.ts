@@ -174,6 +174,26 @@ describe('db-migrate core and CLI', () => {
     expect(pendingContentCalls(ready.calls)).toEqual(["SELECT '002';", "SELECT '003';"]);
   });
 
+  it('resumes a post_roll suffix after an earlier post_roll migration committed', async () => {
+    const contents = await writeThreeMigrations();
+    await writePhaseMetadata({
+      '002_two.sql': 'post_roll',
+      '003_three.sql': 'post_roll',
+    });
+    const retry = createRecordingSqlClient({
+      ledgerRows: ledgerRowsFor(contents, ['001_one.sql', '002_two.sql']),
+    });
+
+    const result = await runWithRecording(
+      { mode: 'apply', phase: 'post_roll', yes: false, json: false },
+      retry.client,
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(pendingContentCalls(retry.calls)).toEqual(["SELECT '003';"]);
+    expect(insertCalls(retry.calls).map((call) => call.params?.[0])).toEqual(['003_three.sql']);
+  });
+
   it('does not hide global ledger drift when inspecting one phase', async () => {
     const contents = await writeThreeMigrations();
     await writePhaseMetadata({ '002_two.sql': 'post_roll' });
