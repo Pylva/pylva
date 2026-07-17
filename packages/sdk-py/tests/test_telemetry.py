@@ -192,6 +192,33 @@ async def test_flush_401_enters_degraded(
     assert "https://pylva.com/settings/keys" in capsys.readouterr().out
 
 
+async def test_reinit_after_401_resumes_telemetry(
+    patched_httpx: dict[str, _FakeClient],
+) -> None:
+    patched_httpx["client"] = _FakeClient(
+        [
+            _FakeResponse(401),
+            _FakeResponse(200, {"accepted": 1, "rejected": 0}),
+        ]
+    )
+    telemetry.enqueue(_ev(0))
+    await telemetry.flush()
+    assert telemetry.is_degraded() is True
+
+    pylva.init(
+        api_key="pv_live_11223344_" + "b" * 32,
+        endpoint="https://example.test",
+        batch_size=1000,
+        flush_interval=60.0,
+    )
+    assert telemetry.is_degraded() is False
+    telemetry.enqueue(_ev(1))
+    await telemetry.flush()
+
+    assert patched_httpx["client"].posts == 2
+    assert telemetry.buffer_size() == 0
+
+
 async def test_flush_5xx_retries_and_reinserts(patched_httpx: dict[str, _FakeClient]) -> None:
     # Four attempts total: initial + 3 retries. All 500 -> batch goes back into
     # the buffer.
