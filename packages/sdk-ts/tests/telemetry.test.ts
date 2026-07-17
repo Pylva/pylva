@@ -119,6 +119,34 @@ describe('telemetry HTTP exporter', () => {
     (fetchSpy as any).mockRestore?.();
   });
 
+  it('resumes telemetry after re-init following a 401', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('', { status: 401 }) as Response)
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ accepted: 1, rejected: 0 }), { status: 200 }) as Response,
+      );
+    init({ apiKey: VALID_KEY, endpoint: 'http://mock', batchSize: 100, flushInterval: 60_000 });
+    enqueue(makeEvent(makeSpanId(45)));
+    await flush();
+    expect(isDegraded()).toBe(true);
+
+    init({
+      apiKey: 'pv_live_11223344_' + 'b'.repeat(32),
+      endpoint: 'http://mock',
+      batchSize: 100,
+      flushInterval: 60_000,
+    });
+    expect(isDegraded()).toBe(false);
+    enqueue(makeEvent(makeSpanId(46)));
+    await flush();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(bufferSize()).toBe(0);
+    warnSpy.mockRestore();
+  });
+
   it('applies backend budget_exceeded flags to the local accumulator', async () => {
     const periodStart = '2026-04-01T00:00:00.000Z';
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(

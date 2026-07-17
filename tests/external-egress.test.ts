@@ -5,6 +5,9 @@ const mocks = vi.hoisted(() => ({
   invokeCommand: vi.fn(function InvokeCommand(input: unknown) {
     return { input };
   }),
+  lambdaClient: vi.fn(function LambdaClient() {
+    return { send: mocks.lambdaSend };
+  }),
   lambdaSend: vi.fn(),
 }));
 
@@ -19,7 +22,7 @@ vi.mock('undici', async (importOriginal) => {
 });
 vi.mock('@aws-sdk/client-lambda', () => ({
   InvokeCommand: mocks.invokeCommand,
-  LambdaClient: vi.fn(() => ({ send: mocks.lambdaSend })),
+  LambdaClient: mocks.lambdaClient,
 }));
 
 import { externalFetch, _internal } from '../src/lib/external-egress';
@@ -27,6 +30,7 @@ import { externalFetch, _internal } from '../src/lib/external-egress';
 afterEach(() => {
   testEnv.EGRESS_BROKER_FUNCTION_NAME = undefined;
   mocks.fetch.mockReset();
+  mocks.lambdaClient.mockClear();
   mocks.invokeCommand.mockClear();
   mocks.lambdaSend.mockReset();
 });
