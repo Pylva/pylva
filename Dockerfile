@@ -11,6 +11,7 @@ WORKDIR /app
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates \
   && rm -rf /var/lib/apt/lists/* \
+  && npm install --global corepack@0.35.0 \
   && corepack enable
 
 FROM base AS deps
