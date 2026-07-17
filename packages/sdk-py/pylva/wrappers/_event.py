@@ -24,16 +24,14 @@ def build_llm_event(
     tokens_in: int,
     tokens_out: int,
     latency_ms: int,
-    status: str,                 # success | failure | aborted
+    status: str,  # success | failure | aborted
     token_count_source: str | None = None,  # exact | estimated
     tool_name: str | None = None,
     step_name_fallback: str | None = None,
 ) -> dict[str, Any]:
     """Build a TelemetryEvent-shaped dict ready for enqueue()."""
     ctx = current_context()
-    safe_provider = (
-        clean_provider_model_identifier(provider) if provider is not None else "other"
-    )
+    safe_provider = clean_provider_model_identifier(provider) if provider is not None else "other"
     event: dict[str, Any] = {
         "run_id": ctx.run_id if ctx else str(uuid.uuid4()),
         "parent_run_id": ctx.parent_run_id if ctx else None,

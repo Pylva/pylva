@@ -14,9 +14,7 @@ from .identifiers import validate_provider_model_identifier
 
 Provider = str
 EventStatus = Literal["success", "failure", "retry", "aborted"]
-Framework = Literal[
-    "langgraph", "crewai", "mastra", "openai-agents", "pydantic-ai", "none"
-]
+Framework = Literal["langgraph", "crewai", "mastra", "openai-agents", "pydantic-ai", "none"]
 InstrumentationTier = Literal["sdk_wrapper", "reported"]
 CostSource = Literal["auto", "configured"]
 TokenCountSource = Literal["exact", "estimated"]

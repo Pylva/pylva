@@ -8,6 +8,7 @@ export const PYLVA_BUDGET_EXCEEDED_CODE = 'budget_exceeded' as const;
 export const BudgetExceededSource = {
   SDK_PRECALL: 'sdk_precall',
   BACKEND_INGEST_FLAG: 'backend_ingest_flag',
+  AUTHORITATIVE_CONTROL: 'authoritative_control',
 } as const;
 
 export type BudgetExceededSource = (typeof BudgetExceededSource)[keyof typeof BudgetExceededSource];

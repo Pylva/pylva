@@ -356,55 +356,66 @@ describe('event cap enforcement', () => {
       from: '2026-07-01 00:00:00',
       to: '2026-08-01 00:00:00',
     });
+    expect(h.queryCalls[0]?.query).toContain('FROM cost_events_with_control');
     expect(h.redisSetCalls).toEqual([{ key, value: '12', nx: true }]);
     expect(h.redisExpireCalls[0]).toMatchObject({ key });
     expect(h.redisGetCalls).toEqual([key, key]);
+  });
+
+  it('counts authoritative projected commits when gating a later legacy ingest request', async () => {
+    h.rows = [{ tier: 'free' }];
+    // The canonical ClickHouse result includes both legacy rows and already
+    // committed authoritative rows. Projection itself never calls this gate;
+    // only a subsequent legacy /events admission is refused at the cap.
+    h.queryRows = [{ event_count: '100000' }];
+
+    await expect(
+      checkEventCap('builder-a', new Date('2026-07-02T00:00:00.000Z')),
+    ).resolves.toMatchObject({ blocked: true, used: 100000, cap: 100000 });
+    expect(h.queryCalls[0]?.query).toContain('FROM cost_events_with_control');
   });
 
   it.each([
     [79, 2, ['warning_80']],
     [99, 2, ['exceeded']],
     [50, 100, ['exceeded']],
-  ] as const)(
-    'logs threshold crossings from %i by %i',
-    async (initial, count, expected) => {
-      const { start, end, key } = julyWindow();
-      h.redis.set(key, String(initial));
+  ] as const)('logs threshold crossings from %i by %i', async (initial, count, expected) => {
+    const { start, end, key } = julyWindow();
+    h.redis.set(key, String(initial));
 
-      await expect(
-        recordAcceptedEvents(
-          'builder-a',
-          {
-            enabled: true,
-            blocked: false,
-            tier: BuilderTier.FREE,
-            cap: 100,
-            used: initial,
-            window: { start, end, source: 'calendar_month' },
-          },
-          count,
-        ),
-      ).resolves.toBe(initial + count);
-
-      expect(thresholdInfoKinds()).toEqual(expected);
-      expect(h.info).toHaveBeenCalledWith(
-        expect.objectContaining({
-          event: 'threshold_crossed',
-          kind: expected[0],
-          builder_id: 'builder-a',
+    await expect(
+      recordAcceptedEvents(
+        'builder-a',
+        {
+          enabled: true,
+          blocked: false,
           tier: BuilderTier.FREE,
-          used: initial + count,
           cap: 100,
-          window: expect.objectContaining({
-            start: start.toISOString(),
-            end: end.toISOString(),
-            source: 'calendar_month',
-          }),
+          used: initial,
+          window: { start, end, source: 'calendar_month' },
+        },
+        count,
+      ),
+    ).resolves.toBe(initial + count);
+
+    expect(thresholdInfoKinds()).toEqual(expected);
+    expect(h.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'threshold_crossed',
+        kind: expected[0],
+        builder_id: 'builder-a',
+        tier: BuilderTier.FREE,
+        used: initial + count,
+        cap: 100,
+        window: expect.objectContaining({
+          start: start.toISOString(),
+          end: end.toISOString(),
+          source: 'calendar_month',
         }),
-        'event cap threshold crossed',
-      );
-    },
-  );
+      }),
+      'event cap threshold crossed',
+    );
+  });
 
   it('returns null when the Redis increment fails open', async () => {
     const { start, end, key } = julyWindow();

@@ -46,7 +46,9 @@ function readAll(relativeDir: string): string {
 
 describe('AWS ownership boundary', () => {
   it('does not keep the production ECR/ECS image deploy workflow in the public repo', () => {
-    expect(fs.existsSync(path.join(repoRoot, '.github/workflows/build-push-image.yml'))).toBe(false);
+    expect(fs.existsSync(path.join(repoRoot, '.github/workflows/build-push-image.yml'))).toBe(
+      false,
+    );
   });
 
   it('keeps public workflows limited to CI, self-host smoke tests, and SDK publishing', () => {
@@ -54,6 +56,7 @@ describe('AWS ownership boundary', () => {
     const workflowFiles = fs.readdirSync(workflowDir).sort();
 
     expect(workflowFiles).toEqual([
+      'authoritative-budget-control-ci.yml',
       'ci-e2e-smoke.yml',
       'ci-fast.yml',
       'ci-integration.yml',

@@ -4,6 +4,7 @@ import { _resetConfigForTests } from '../src/core/config.js';
 import { enqueue } from '../src/core/telemetry.js';
 import {
   _resetNonLlmPolicyForTests,
+  decideNonLlmTool,
   ensureNonLlmPolicy,
   flushNonLlmDiscoveries,
 } from '../src/core/non_llm_policy.js';
@@ -25,6 +26,7 @@ vi.mock('../src/core/budget_accumulator.js', () => ({
 }));
 
 const VALID_KEY = `pv_live_aabbccdd_${'a'.repeat(32)}`;
+const SECOND_KEY = `pv_live_bbccddee_${'b'.repeat(32)}`;
 const TOOL_SECRET = 'TOOL SECRET SHOULD NOT LEAVE PROCESS';
 
 type EnqueuedEvent = Parameters<typeof enqueue>[0];
@@ -176,8 +178,83 @@ describe('PylvaCallbackHandler non-LLM policy mode', () => {
     expect(mocks.enqueue).not.toHaveBeenCalled();
   });
 
+  it('installs the new callback policy after an SDK identity switch clears old state', () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => policyResponse([]));
+    new PylvaCallbackHandler({
+      apiKey: VALID_KEY,
+      endpoint: 'http://mock',
+      nonLlm: {
+        mode: 'policy',
+        policy: { sources: [{ slug: 'old', status: 'tracked', matchers: ['old.tool'] }] },
+      },
+    });
+    expect(decideNonLlmTool(['old.tool']).kind).toBe('tracked');
+
+    new PylvaCallbackHandler({
+      apiKey: SECOND_KEY,
+      endpoint: 'http://mock',
+      nonLlm: {
+        mode: 'policy',
+        policy: { sources: [{ slug: 'new', status: 'tracked', matchers: ['new.tool'] }] },
+      },
+    });
+    expect(decideNonLlmTool(['old.tool']).kind).toBe('unknown');
+    expect(decideNonLlmTool(['new.tool']).kind).toBe('tracked');
+  });
+
+  it('drops an old-identity policy-tool end without poisoning same-id dedup for the new tenant', () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => policyResponse([]));
+    const handler = new PylvaCallbackHandler({
+      apiKey: VALID_KEY,
+      endpoint: 'http://mock',
+      nonLlm: {
+        mode: 'policy',
+        policy: {
+          sources: [
+            {
+              slug: 'shared-tool',
+              status: 'tracked',
+              matchers: ['shared.tool'],
+              metric: 'calls',
+              default_metric_value: 1,
+            },
+          ],
+        },
+      },
+    });
+    const sharedRunId = runId(80);
+    handler.handleToolStart({ name: 'shared.tool' }, TOOL_SECRET, sharedRunId);
+
+    new PylvaCallbackHandler({
+      apiKey: SECOND_KEY,
+      endpoint: 'http://mock',
+      nonLlm: {
+        mode: 'policy',
+        policy: {
+          sources: [
+            {
+              slug: 'shared-tool',
+              status: 'tracked',
+              matchers: ['shared.tool'],
+              metric: 'calls',
+              default_metric_value: 1,
+            },
+          ],
+        },
+      },
+    });
+    handler.handleToolEnd({}, sharedRunId);
+    handler.handleToolEnd({}, sharedRunId);
+    handler.handleToolEnd({}, runId(81));
+    expect(mocks.enqueue).not.toHaveBeenCalled();
+
+    handler.handleToolStart({ name: 'shared.tool' }, TOOL_SECRET, sharedRunId);
+    handler.handleToolEnd({}, sharedRunId);
+    expect(mocks.enqueue).toHaveBeenCalledTimes(1);
+  });
+
   it('dedupes duplicate tool end callbacks and handles tool end without start safely', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
       policyResponse([
         {
           slug: 'tool',

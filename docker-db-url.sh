@@ -1,10 +1,9 @@
 #!/bin/sh
-# Shared DATABASE_URL assembly — sourced (not executed) by both
-# docker-entrypoint.sh (Next.js runtime) and docker-migrate-entrypoint.sh
-# (Step 6 one-off migration task). Single source of truth so the two images
-# can't drift. Inherits `set -eu` from the caller; never `exec`s.
+# General Next.js runtime DATABASE_URL assembly. The migration image uses the
+# separate docker-migration-db-url.sh path and cannot fall back to these DB_*
+# credentials. Inherits `set -eu` from the caller; never `exec`s.
 #
-# Assemble DATABASE_URL from injected parts when not already set. ECS injects
+# Assemble the general app DATABASE_URL from injected parts when not already set. ECS injects
 # DB_* (plain) + the rotating RDS-managed master secret; reading them here
 # means a rotated password is picked up on the next container start. Local/dev
 # passes DATABASE_URL directly and skips this. node is always present (it runs

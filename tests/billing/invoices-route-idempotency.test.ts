@@ -40,7 +40,13 @@ vi.mock('@/lib/billing/invoice-generator', () => {
   class BillingError extends Error {
     constructor(
       public code:
-        'pricing_not_configured' | 'stripe_not_connected' | 'stripe_capabilities_pending',
+        | 'pricing_not_configured'
+        | 'stripe_not_connected'
+        | 'stripe_capabilities_pending'
+        | 'projection_pending'
+        | 'period_not_closed'
+        | 'usage_unbillable'
+        | 'invalid_period',
       message: string,
     ) {
       super(message);
@@ -182,6 +188,50 @@ describe('POST /api/v1/billing/invoices idempotency', () => {
       bodyHash: 'stable-body-hash',
     });
     expect(mocks.commitClaim).not.toHaveBeenCalled();
+  });
+
+  it('returns a retryable 503 and releases the claim while projection is pending', async () => {
+    mocks.checkOrClaim.mockResolvedValueOnce({
+      status: 'new',
+      claimCreatedAt: FIRST_CLAIM_CREATED_AT,
+    });
+    mocks.generateInvoice.mockRejectedValueOnce(
+      new BillingError('projection_pending', 'Authoritative usage is still reconciling'),
+    );
+
+    const res = await POST(makeRequest('projection-pending-key'));
+    const body = await res.json();
+
+    expect(res.status).toBe(503);
+    expect(body.error.type).toBe('api_error');
+    expect(body.error.param).toBe('projection_pending');
+    expect(mocks.releaseClaim).toHaveBeenCalledWith({
+      builderId: mocks.builderId,
+      key: 'projection-pending-key',
+      bodyHash: 'stable-body-hash',
+    });
+    expect(mocks.commitClaim).not.toHaveBeenCalled();
+  });
+
+  it('returns 409 and releases the claim while the requested period is still open', async () => {
+    mocks.checkOrClaim.mockResolvedValueOnce({
+      status: 'new',
+      claimCreatedAt: FIRST_CLAIM_CREATED_AT,
+    });
+    mocks.generateInvoice.mockRejectedValueOnce(
+      new BillingError('period_not_closed', 'Billing period is still open'),
+    );
+
+    const res = await POST(makeRequest('period-open-key'));
+    const body = await res.json();
+
+    expect(res.status).toBe(409);
+    expect(body.error.param).toBe('period_not_closed');
+    expect(mocks.releaseClaim).toHaveBeenCalledWith({
+      builderId: mocks.builderId,
+      key: 'period-open-key',
+      bodyHash: 'stable-body-hash',
+    });
   });
 
   it('resumes an interrupted auto-split request with the same idempotency key', async () => {

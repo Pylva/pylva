@@ -5,7 +5,7 @@ import type { Metadata } from 'next';
 import { readDashboardHeaders } from '@/lib/dashboard/headers';
 import { getCustomerCostSummary } from '@/lib/clickhouse/dashboard-queries';
 import { COPY } from '@/lib/copy';
-import { formatUsd, formatRelative } from '@/lib/formatting';
+import { formatTelemetryUsd, formatRelative } from '@/lib/formatting';
 import { PageHeader } from '@/components/dashboard/PageHeader';
 import {
   Table,
@@ -85,7 +85,7 @@ export default async function EndUsersPage({
                     </a>
                   </TableCell>
                   <TableCell className="text-end tabular-nums">
-                    {formatUsd(row.total_spend_usd)}
+                    {formatTelemetryUsd(row.total_spend_usd)}
                   </TableCell>
                   <TableCell className="text-end tabular-nums">
                     {row.event_count.toLocaleString()}

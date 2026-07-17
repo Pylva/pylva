@@ -80,6 +80,6 @@ describe('aggregateSpendForRule — excludes demo events', () => {
     // / customer predicates.
     expect(sql).toContain('builder_id = {builder_id:String}');
     expect(sql).toContain('customer_id = {customer_id:String}');
-    expect(sql).toContain('timestamp < {to:DateTime}');
+    expect(sql).toContain("timestamp < parseDateTime64BestEffort({to:String}, 3, 'UTC')");
   });
 });

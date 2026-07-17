@@ -8,6 +8,7 @@ to ``Pylva(...)`` and the failover engine resolves them here.
 
 Process-wide registry. Last registered client wins per provider.
 """
+
 from __future__ import annotations
 
 from collections.abc import Mapping

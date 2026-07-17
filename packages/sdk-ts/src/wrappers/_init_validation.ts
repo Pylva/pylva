@@ -6,9 +6,10 @@
 // warning. The init-time check surfaces the same gap once at startup so
 // builders see it before traffic.
 
-import { RuleType, type ReliabilityFailoverConfig } from '@pylva/shared';
+import { RuleType, type ReliabilityFailoverConfig } from '@pylva/shared/rules';
 import { narrowRules } from '../core/rules_engine.js';
 import { hasRegisteredClient } from '../core/client_registry.js';
+import { registerIdentityResetter } from '../core/identity_registry.js';
 
 const PATCHED_PROVIDERS = new Set<string>();
 
@@ -32,9 +33,7 @@ export function validateFailoverWrappers(rawRules: unknown[]): void {
   try {
     rules = narrowRules(rawRules);
   } catch {
-    console.warn(
-      '[pylva] failover validation skipped: rules cache returned malformed entries',
-    );
+    console.warn('[pylva] failover validation skipped: rules cache returned malformed entries');
     return;
   }
   for (const rule of rules) {
@@ -65,3 +64,7 @@ export function _resetInitValidationForTests(): void {
   PATCHED_PROVIDERS.clear();
   warnedPairs.clear();
 }
+
+// Patched-provider capability belongs to the process, not a builder. Only the
+// per-builder warning dedup is tenant-owned and must be cleared on reinit.
+registerIdentityResetter(() => warnedPairs.clear());

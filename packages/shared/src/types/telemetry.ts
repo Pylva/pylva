@@ -2,66 +2,24 @@
 // NO cost_usd — enforces "Report Usage, Not Cost" at the type level.
 
 import * as v from 'valibot';
+import {
+  CostSource,
+  EventStatus,
+  Framework,
+  InstrumentationTier,
+  TokenCountSource,
+} from './telemetry-values.js';
+
+export {
+  CostSource,
+  EventStatus,
+  Framework,
+  InstrumentationTier,
+  Provider,
+  TokenCountSource,
+} from './telemetry-values.js';
 
 // --- Enums ---
-
-export const Provider = {
-  OPENAI: 'openai',
-  ANTHROPIC: 'anthropic',
-  GOOGLE: 'google',
-  DEEPSEEK: 'deepseek',
-  MISTRAL: 'mistral',
-  COHERE: 'cohere',
-  OTHER: 'other',
-} as const;
-
-// Non-exhaustive convenience constants. Runtime telemetry may use any
-// store-safe provider identifier emitted by an SDK/runtime.
-export type Provider = string;
-
-export const EventStatus = {
-  SUCCESS: 'success',
-  FAILURE: 'failure',
-  RETRY: 'retry',
-  ABORTED: 'aborted',
-} as const;
-
-export type EventStatus = (typeof EventStatus)[keyof typeof EventStatus];
-
-export const Framework = {
-  LANGGRAPH: 'langgraph',
-  CREWAI: 'crewai',
-  MASTRA: 'mastra',
-  OPENAI_AGENTS: 'openai-agents',
-  PYDANTIC_AI: 'pydantic-ai',
-  NONE: 'none',
-} as const;
-
-export type Framework = (typeof Framework)[keyof typeof Framework];
-
-// NOTE: InstrumentationTier is intentionally narrow in v1.6. A future proxy tier
-// (deferred indefinitely per internal design notes) can be re-added as a new enum
-// value and a schema bump to v1.7 without breaking stored events.
-export const InstrumentationTier = {
-  SDK_WRAPPER: 'sdk_wrapper',
-  REPORTED: 'reported',
-} as const;
-
-export type InstrumentationTier = (typeof InstrumentationTier)[keyof typeof InstrumentationTier];
-
-export const TokenCountSource = {
-  EXACT: 'exact',
-  ESTIMATED: 'estimated',
-} as const;
-
-export type TokenCountSource = (typeof TokenCountSource)[keyof typeof TokenCountSource];
-
-export const CostSource = {
-  AUTO: 'auto',
-  CONFIGURED: 'configured',
-} as const;
-
-export type CostSource = (typeof CostSource)[keyof typeof CostSource];
 
 // --- Valibot Validation Schemas (Section 4.10 constraints) ---
 
@@ -76,10 +34,29 @@ export const PROVIDER_MODEL_MAX_LENGTH = 255;
 
 const CONTROL_CHARACTER_RE = /[\u0000-\u001F\u007F]/;
 
+// Union of Unicode White_Space and U+FEFF (ECMAScript's legacy trim marker).
+// Keeping this set explicit avoids JS trim() / Python strip() disagreements.
+export const STORE_BLANK_STRING_PATTERN =
+  /^[\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]*$/u;
+export const STORE_LONE_SURROGATE_PATTERN = /[\uD800-\uDFFF]/u;
+
 const storeSafeProviderModelSchema = v.pipe(
   v.string(),
-  v.maxLength(PROVIDER_MODEL_MAX_LENGTH),
-  v.check((value) => value.trim().length > 0, 'must not be empty or whitespace-only'),
+  // Count Unicode scalar values, matching Python's `len(str)`. Valibot's
+  // maxLength counts UTF-16 code units and would reject astral characters
+  // earlier in TypeScript than in Python.
+  v.check(
+    (value) => [...value].length <= PROVIDER_MODEL_MAX_LENGTH,
+    `must be at most ${PROVIDER_MODEL_MAX_LENGTH} characters`,
+  ),
+  v.check(
+    (value) => !STORE_BLANK_STRING_PATTERN.test(value),
+    'must not be empty or whitespace-only',
+  ),
+  v.check(
+    (value) => !STORE_LONE_SURROGATE_PATTERN.test(value),
+    'must contain valid Unicode scalar values',
+  ),
   v.check((value) => !CONTROL_CHARACTER_RE.test(value), 'must not contain control characters'),
 );
 

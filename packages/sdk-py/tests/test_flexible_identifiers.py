@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from pylva import Pylva
+from pylva import Pylva, __version__
 from pylva.core.client_registry import (
     _reset_client_registry,
     get_registered_client,
@@ -43,7 +43,7 @@ def _telemetry_payload(provider: str | None, model: str | None) -> dict[str, obj
         "metric_value": None,
         "stream_aborted": False,
         "abort_savings_usd": 0,
-        "sdk_version": "1.1.0",
+        "sdk_version": __version__,
         "timestamp": "2026-04-18T10:00:00.000Z",
     }
 

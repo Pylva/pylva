@@ -22,6 +22,10 @@ const NAV: NavGroup[] = [
       { href: (s) => `/o/${s}/dashboard`, label: COPY.nav_overview },
       { href: (s) => `/o/${s}/dashboard/end-users`, label: COPY.nav_end_users },
       { href: (s) => `/o/${s}/dashboard/models`, label: COPY.nav_models },
+      {
+        href: (s) => `/o/${s}/dashboard/budget-activity`,
+        label: COPY.nav_budget_activity,
+      },
     ],
   },
   {
@@ -40,9 +44,7 @@ const NAV: NavGroup[] = [
   },
   {
     title: 'Configure',
-    items: [
-      { href: (s) => `/o/${s}/dashboard/settings`, label: COPY.nav_settings },
-    ],
+    items: [{ href: (s) => `/o/${s}/dashboard/settings`, label: COPY.nav_settings }],
   },
 ];
 

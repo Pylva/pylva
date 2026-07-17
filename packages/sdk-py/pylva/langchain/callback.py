@@ -11,8 +11,10 @@ import asyncio
 import re
 import time
 import uuid
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 try:  # Optional dependency: provided by the ``pylva-sdk[langchain]`` extra.
     from langchain_core.callbacks import (  # type: ignore[import-not-found, unused-ignore]
@@ -29,8 +31,17 @@ except Exception:  # pragma: no cover - exercised by SDK tests without LangChain
 
 
 from ..core.budget_accumulator import init_accumulator as _init_accumulator
+from ..core.config import ControlConfig, get_config_generation
 from ..core.config import init as _init_config
 from ..core.context import current_context
+from ..core.control_ownership import (
+    ControlledAttemptContext,
+    ControlledCallbackLink,
+    _complete_controlled_callback,
+    _controlled_attempt_for_callback_start,
+    _controlled_callback_scope,
+    _register_controlled_callback,
+)
 from ..core.identifiers import clean_provider_model_identifier
 from ..core.non_llm_policy import (
     NonLlmConfig,
@@ -50,10 +61,22 @@ from ..core.telemetry import enqueue, flush, utc_now_iso
 _CUSTOMER_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,255}$")
 _STEP_RE = re.compile(r"[^a-zA-Z0-9 _\-.:/]")
 _METADATA_STEP_LABEL_RE = re.compile(r"^[A-Za-z0-9_.:/-]{1,100}$")
+_MAX_COMPLETED_RUN_TOMBSTONES = 10_000
+
+LlmTrackingMode = Literal["auto", "callback", "off"]
+
+
+@contextmanager
+def langgraph_control_scope() -> Iterator[None]:
+    """Bind one callback run to the controlled provider attempt inside it."""
+
+    with _controlled_callback_scope():
+        yield
 
 
 @dataclass
 class _RunState:
+    generation: int
     run_id: str
     parent_run_id: str | None
     trace_id: str
@@ -65,6 +88,8 @@ class _RunState:
     started_at: float
     metadata: dict[str, Any]
     kind: str
+    controlled_attempt: ControlledAttemptContext | None
+    controlled_callback: ControlledCallbackLink | None
     tool_input: Any | None = None
 
 
@@ -89,18 +114,20 @@ class _PylvaCallbackMixin:
         track_tool_calls: bool = False,
         non_llm: NonLlmConfig | dict[str, Any] | None = None,
         flush_on_chain_end: bool = False,
+        llm_tracking: LlmTrackingMode = "auto",
         batch_size: int = 100,
         flush_interval: float = 5.0,
         local_mode: bool = False,
+        control: ControlConfig | Mapping[str, Any] | None = None,
     ) -> None:
+        self.llm_tracking = _parse_llm_tracking_mode(llm_tracking)
         self.customer_id = _clean_customer_id(customer_id)
         self.non_llm_config = non_llm
         self.non_llm_mode: NonLlmMode = non_llm_mode(non_llm, track_tool_calls)
         self.track_tool_calls = self.non_llm_mode != "off"
         self.flush_on_chain_end = flush_on_chain_end
         self._runs: dict[str, _RunState] = {}
-        self._completed_tool_runs: set[str] = set()
-        configure_non_llm_policy(non_llm)
+        self._completed_runs: dict[str, int] = {}
         if self.non_llm_mode == "legacy_all":
             warn_legacy_tool_tracking_once()
 
@@ -113,12 +140,21 @@ class _PylvaCallbackMixin:
                     flush_interval=flush_interval,
                     local_mode=local_mode,
                     non_llm=non_llm,
+                    control=control,
                 )
+                configure_non_llm_policy(non_llm)
                 _init_accumulator()
                 if self.non_llm_mode == "policy":
                     schedule_non_llm_policy_refresh()
             except Exception:
                 raise
+        else:
+            configure_non_llm_policy(non_llm)
+        self._fallback_generation = get_config_generation()
+
+    @property
+    def ignore_llm(self) -> bool:
+        return self.llm_tracking == "off"
 
     def _handle_start(
         self,
@@ -136,17 +172,39 @@ class _PylvaCallbackMixin:
             run_id_str = _id(run_id)
             if run_id_str is None:
                 return
+            generation = get_config_generation()
+            self._completed_runs.pop(run_id_str, None)
+            previous = self._runs.get(run_id_str)
+            _complete_controlled_callback(
+                previous.controlled_callback if previous is not None else None
+            )
             parent_run_id_str = _id(parent_run_id)
             safe_metadata = _safe_run_metadata(metadata)
-            parent = self._runs.get(parent_run_id_str) if parent_run_id_str else None
+            parent_candidate = self._runs.get(parent_run_id_str) if parent_run_id_str else None
+            parent = (
+                parent_candidate
+                if parent_candidate is not None and parent_candidate.generation == generation
+                else None
+            )
             ctx = current_context()
             run_name = _resolve_run_name(serialized, name)
             customer_id = self._resolve_customer_id(safe_metadata)
             step_name = _resolve_step_name(safe_metadata, run_name)
             provider = _resolve_provider(serialized, safe_metadata, kwargs or {})
             model = _resolve_model(serialized, safe_metadata, kwargs or {})
+            controlled_attempt = (
+                _controlled_attempt_for_callback_start(cast(Literal["llm", "tool"], kind))
+                if kind in {"llm", "tool"}
+                else None
+            )
+            controlled_callback = (
+                _register_controlled_callback(cast(Literal["llm", "tool"], kind))
+                if controlled_attempt is None and kind in {"llm", "tool"}
+                else None
+            )
 
             self._runs[run_id_str] = _RunState(
+                generation=generation,
                 run_id=run_id_str,
                 parent_run_id=parent_run_id_str,
                 trace_id=(
@@ -162,22 +220,28 @@ class _PylvaCallbackMixin:
                 started_at=time.time(),
                 metadata=safe_metadata,
                 kind=kind,
+                controlled_attempt=controlled_attempt,
+                controlled_callback=controlled_callback,
                 tool_input=tool_input if kind == "tool" else None,
             )
         except Exception:
             pass
 
     def _handle_llm_end(self, *, response: Any, run_id: Any, parent_run_id: Any) -> None:
+        if self.llm_tracking == "off":
+            return
         try:
             run_id_str = _id(run_id)
             if run_id_str is None:
                 return
             parent_run_id_str = _id(parent_run_id)
-            state = self._runs.pop(run_id_str, None) or self._fallback_state(
+            state = self._take_terminal_state(
                 run_id=run_id_str,
                 parent_run_id=parent_run_id_str,
                 kind="llm",
             )
+            if state is None or self._callback_llm_is_wrapper_owned(state):
+                return
             usage = _extract_usage(response)
             metadata = dict(state.metadata)
             if usage.found:
@@ -200,16 +264,20 @@ class _PylvaCallbackMixin:
             pass
 
     def _handle_llm_error(self, *, error: BaseException, run_id: Any, parent_run_id: Any) -> None:
+        if self.llm_tracking == "off":
+            return
         try:
             run_id_str = _id(run_id)
             if run_id_str is None:
                 return
             parent_run_id_str = _id(parent_run_id)
-            state = self._runs.pop(run_id_str, None) or self._fallback_state(
+            state = self._take_terminal_state(
                 run_id=run_id_str,
                 parent_run_id=parent_run_id_str,
                 kind="llm",
             )
+            if state is None or self._callback_llm_is_wrapper_owned(state):
+                return
             metadata = dict(state.metadata)
             metadata["error_type"] = type(error).__name__
             enqueue(
@@ -240,15 +308,14 @@ class _PylvaCallbackMixin:
             run_id_str = _id(run_id)
             if run_id_str is None:
                 return
-            if run_id_str in self._completed_tool_runs:
-                return
-            self._completed_tool_runs.add(run_id_str)
             parent_run_id_str = _id(parent_run_id)
-            state = self._runs.pop(run_id_str, None) or self._fallback_state(
+            state = self._take_terminal_state(
                 run_id=run_id_str,
                 parent_run_id=parent_run_id_str,
                 kind="tool",
             )
+            if state is None or self._callback_tool_is_wrapper_owned(state):
+                return
             tool_name = _clean_step(name or state.run_name or state.step_name or "tool")
             if self.non_llm_mode == "policy":
                 self._handle_policy_tool(
@@ -290,15 +357,14 @@ class _PylvaCallbackMixin:
             run_id_str = _id(run_id)
             if run_id_str is None:
                 return
-            if run_id_str in self._completed_tool_runs:
-                return
-            self._completed_tool_runs.add(run_id_str)
             parent_run_id_str = _id(parent_run_id)
-            state = self._runs.pop(run_id_str, None) or self._fallback_state(
+            state = self._take_terminal_state(
                 run_id=run_id_str,
                 parent_run_id=parent_run_id_str,
                 kind="tool",
             )
+            if state is None or self._callback_tool_is_wrapper_owned(state):
+                return
             tool_name = _clean_step(name or state.run_name or state.step_name or "tool")
             metadata = dict(state.metadata)
             metadata["error_type"] = type(error).__name__
@@ -333,17 +399,19 @@ class _PylvaCallbackMixin:
         except Exception:
             pass
 
-    def _handle_chain_end(self, *, run_id: Any) -> None:
+    def _handle_chain_end(self, *, run_id: Any) -> int | None:
         try:
             run_id_str = _id(run_id)
-            if run_id_str is not None:
-                self._runs.pop(run_id_str, None)
+            if run_id_str is None:
+                return None
+            return self._take_terminal_generation(run_id_str)
         except Exception:
-            pass
+            return None
 
     def _fallback_state(self, *, run_id: str, parent_run_id: str | None, kind: str) -> _RunState:
         ctx = current_context()
         return _RunState(
+            generation=self._fallback_generation,
             run_id=run_id,
             parent_run_id=parent_run_id,
             trace_id=ctx.trace_id if ctx else (parent_run_id or run_id),
@@ -355,6 +423,80 @@ class _PylvaCallbackMixin:
             started_at=time.time(),
             metadata={},
             kind=kind,
+            controlled_attempt=None,
+            controlled_callback=None,
+        )
+
+    def _take_terminal_generation(self, run_id: str) -> int | None:
+        state = self._runs.pop(run_id, None)
+        if state is not None:
+            _complete_controlled_callback(state.controlled_callback)
+            self._remember_completed_run(run_id, state.generation)
+            return state.generation
+        if run_id in self._completed_runs:
+            return None
+        self._remember_completed_run(run_id, self._fallback_generation)
+        return self._fallback_generation
+
+    def _take_terminal_state(
+        self,
+        *,
+        run_id: str,
+        parent_run_id: str | None,
+        kind: str,
+    ) -> _RunState | None:
+        state = self._runs.pop(run_id, None)
+        if state is not None:
+            _complete_controlled_callback(state.controlled_callback)
+            self._remember_completed_run(run_id, state.generation)
+            return state if state.generation == get_config_generation() else None
+        if run_id in self._completed_runs:
+            return None
+        fallback = self._fallback_state(
+            run_id=run_id,
+            parent_run_id=parent_run_id,
+            kind=kind,
+        )
+        self._remember_completed_run(run_id, fallback.generation)
+        return fallback if fallback.generation == get_config_generation() else None
+
+    def _remember_completed_run(self, run_id: str, generation: int) -> None:
+        self._completed_runs.pop(run_id, None)
+        self._completed_runs[run_id] = generation
+        if len(self._completed_runs) <= _MAX_COMPLETED_RUN_TOMBSTONES:
+            return
+        oldest = next(iter(self._completed_runs))
+        del self._completed_runs[oldest]
+
+    def _callback_llm_is_wrapper_owned(self, state: _RunState) -> bool:
+        attempt = state.controlled_attempt or (
+            state.controlled_callback.controlled_attempt
+            if state.controlled_callback is not None
+            else None
+        )
+        no_dispatch = (
+            state.controlled_callback.controlled_no_dispatch
+            if state.controlled_callback is not None
+            else None
+        )
+        return self.llm_tracking == "auto" and (
+            (attempt is not None and attempt.kind == "llm")
+            or (no_dispatch is not None and no_dispatch.kind == "llm")
+        )
+
+    def _callback_tool_is_wrapper_owned(self, state: _RunState) -> bool:
+        attempt = state.controlled_attempt or (
+            state.controlled_callback.controlled_attempt
+            if state.controlled_callback is not None
+            else None
+        )
+        no_dispatch = (
+            state.controlled_callback.controlled_no_dispatch
+            if state.controlled_callback is not None
+            else None
+        )
+        return (attempt is not None and attempt.kind == "tool") or (
+            no_dispatch is not None and no_dispatch.kind == "tool"
         )
 
     def _handle_policy_tool(
@@ -523,6 +665,8 @@ class PylvaCallbackHandler(_PylvaCallbackMixin, BaseCallbackHandler):
         metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
+        if self.llm_tracking == "off":
+            return
         self._handle_start(
             run_id=run_id,
             parent_run_id=parent_run_id,
@@ -544,6 +688,8 @@ class PylvaCallbackHandler(_PylvaCallbackMixin, BaseCallbackHandler):
         metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
+        if self.llm_tracking == "off":
+            return
         self._handle_start(
             run_id=run_id,
             parent_run_id=parent_run_id,
@@ -631,8 +777,8 @@ class PylvaCallbackHandler(_PylvaCallbackMixin, BaseCallbackHandler):
         )
 
     def on_chain_end(self, outputs: dict[str, Any], *, run_id: Any, **kwargs: Any) -> None:
-        self._handle_chain_end(run_id=run_id)
-        if self.flush_on_chain_end:
+        owner_generation = self._handle_chain_end(run_id=run_id)
+        if self.flush_on_chain_end and owner_generation == get_config_generation():
             _flush_best_effort()
 
     def on_chain_error(
@@ -643,8 +789,8 @@ class PylvaCallbackHandler(_PylvaCallbackMixin, BaseCallbackHandler):
         parent_run_id: Any = None,
         **kwargs: Any,
     ) -> None:
-        self._handle_chain_end(run_id=run_id)
-        if self.flush_on_chain_end:
+        owner_generation = self._handle_chain_end(run_id=run_id)
+        if self.flush_on_chain_end and owner_generation == get_config_generation():
             _flush_best_effort()
 
 
@@ -683,6 +829,8 @@ class AsyncPylvaCallbackHandler(_PylvaCallbackMixin, AsyncCallbackHandler):
         metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
+        if self.llm_tracking == "off":
+            return
         self._handle_start(
             run_id=run_id,
             parent_run_id=parent_run_id,
@@ -704,6 +852,8 @@ class AsyncPylvaCallbackHandler(_PylvaCallbackMixin, AsyncCallbackHandler):
         metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
+        if self.llm_tracking == "off":
+            return
         self._handle_start(
             run_id=run_id,
             parent_run_id=parent_run_id,
@@ -791,8 +941,8 @@ class AsyncPylvaCallbackHandler(_PylvaCallbackMixin, AsyncCallbackHandler):
         )
 
     async def on_chain_end(self, outputs: dict[str, Any], *, run_id: Any, **kwargs: Any) -> None:
-        self._handle_chain_end(run_id=run_id)
-        if self.flush_on_chain_end:
+        owner_generation = self._handle_chain_end(run_id=run_id)
+        if self.flush_on_chain_end and owner_generation == get_config_generation():
             try:
                 await flush()
             except Exception:
@@ -806,12 +956,22 @@ class AsyncPylvaCallbackHandler(_PylvaCallbackMixin, AsyncCallbackHandler):
         parent_run_id: Any = None,
         **kwargs: Any,
     ) -> None:
-        self._handle_chain_end(run_id=run_id)
-        if self.flush_on_chain_end:
+        owner_generation = self._handle_chain_end(run_id=run_id)
+        if self.flush_on_chain_end and owner_generation == get_config_generation():
             try:
                 await flush()
             except Exception:
                 pass
+
+
+def _parse_llm_tracking_mode(value: object) -> LlmTrackingMode:
+    if value == "auto":
+        return "auto"
+    if value == "callback":
+        return "callback"
+    if value == "off":
+        return "off"
+    raise TypeError("[pylva] llm_tracking must be 'auto', 'callback', or 'off'")
 
 
 def _id(value: Any) -> str | None:

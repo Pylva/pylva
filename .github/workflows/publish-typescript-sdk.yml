@@ -6,6 +6,7 @@ on:
       - 'pylva-ts-v*'
 
 permissions:
+  actions: read
   contents: read
   id-token: write
 
@@ -14,6 +15,7 @@ jobs:
     name: Publish @pylva/sdk
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       id-token: write
     steps:
@@ -22,6 +24,7 @@ jobs:
           fetch-depth: 0
 
       - name: Verify release tag is on main
+        id: release_commit
         run: |
           git fetch --no-tags origin main:refs/remotes/origin/main
           TAG_COMMIT="$(git rev-parse "${GITHUB_SHA}^{commit}")"
@@ -29,6 +32,69 @@ jobs:
             echo "::error::Release tags must point at commits already merged to origin/main"
             exit 1
           fi
+          echo "sha=$TAG_COMMIT" >> "$GITHUB_OUTPUT"
+
+      - name: Require every release gate for the exact release commit
+        id: release_gates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.release_commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          for WORKFLOW in \
+            authoritative-budget-control-ci.yml \
+            ci-fast.yml \
+            ci-integration.yml \
+            ci-e2e-smoke.yml
+          do
+            RESPONSE_FILE="$(mktemp)"
+            curl \
+              --fail-with-body \
+              --silent \
+              --show-error \
+              --retry 3 \
+              --retry-all-errors \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW}/runs?head_sha=${RELEASE_SHA}&status=completed&per_page=100" \
+              > "$RESPONSE_FILE"
+            REQUIRED_WORKFLOW="$WORKFLOW" node - "$RESPONSE_FILE" <<'NODE'
+          const fs = require('node:fs');
+
+          const response = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const expectedSha = process.env.RELEASE_SHA;
+          const workflow = process.env.REQUIRED_WORKFLOW;
+          const acceptedEvents = new Set(['push', 'workflow_dispatch', 'schedule']);
+          const runs = Array.isArray(response.workflow_runs) ? response.workflow_runs : [];
+          const successful = runs
+            .filter(
+              (run) =>
+                run.head_sha === expectedSha &&
+                run.head_branch === 'main' &&
+                run.status === 'completed' &&
+                run.conclusion === 'success' &&
+                acceptedEvents.has(run.event),
+            )
+            .sort((left, right) => String(right.updated_at).localeCompare(String(left.updated_at)));
+          if (successful.length === 0) {
+            throw new Error(
+              `No successful ${workflow} run on main exists for exact release SHA ${expectedSha}`,
+            );
+          }
+          const attested = successful[0];
+          if (workflow === 'authoritative-budget-control-ci.yml') {
+            fs.appendFileSync(
+              process.env.GITHUB_OUTPUT,
+              `authoritative_run_id=${attested.id}\n`,
+            );
+          }
+          console.log(
+            `Attested ${workflow} run ${attested.id} for ${expectedSha}: ${attested.html_url}`,
+          );
+          NODE
+            rm -f "$RESPONSE_FILE"
+          done
 
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
 
@@ -87,69 +153,84 @@ jobs:
       - name: Size limit
         run: pnpm --filter @pylva/sdk size
 
-      # npm pack (NOT pnpm pack): the publish step below runs `npm publish`,
-      # which ships package.json verbatim — pnpm pack rewrites workspace:*
-      # specifiers and would mask an uninstallable manifest.
-      - name: Package artifact guard
-        working-directory: packages/sdk-ts
-        run: |
-          npm pack --pack-destination /tmp
-          node - <<'NODE'
-          const { execSync } = require('node:child_process');
-          const tarball = '/tmp/pylva-sdk-' + require('./package.json').version + '.tgz';
-          const manifest = JSON.parse(
-            execSync(`tar -xzOf ${tarball} package/package.json`, { encoding: 'utf8' }),
-          );
-          for (const field of ['dependencies', 'peerDependencies', 'optionalDependencies']) {
-            for (const [name, spec] of Object.entries(manifest[field] ?? {})) {
-              if (spec.startsWith('workspace:') || name.startsWith('@pylva/')) {
-                throw new Error(`${field}.${name}=${spec} would be uninstallable from npm`);
-              }
-            }
-          }
-          const files = execSync(`tar -tzf ${tarball}`, { encoding: 'utf8' }).split('\n');
-          if (!files.includes('package/dist/cli/validate.js')) {
-            throw new Error('CLI bin dist/cli/validate.js missing from tarball');
-          }
-          const bin = execSync(`tar -xzOf ${tarball} package/dist/cli/validate.js`, { encoding: 'utf8' });
-          if (!bin.startsWith('#!/usr/bin/env node')) {
-            throw new Error('CLI bin lost its shebang');
-          }
-          const dist = execSync(`tar -xzOf ${tarball} package/dist/index.js package/dist/index.cjs`, { encoding: 'utf8' });
-          if (dist.includes("'@pylva/shared'") || dist.includes('"@pylva/shared"')) {
-            throw new Error('dist still imports @pylva/shared — bundling broke');
-          }
-          console.log('package artifact guard passed');
-          NODE
+      - name: Download the exact attested TypeScript release artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: pylva-typescript-sdk-immutable
+          path: ${{ runner.temp }}/pylva-typescript-release
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.release_gates.outputs.authoritative_run_id }}
 
-      - name: Clean install smoke
+      # Every verification below and the publish step consume the artifact
+      # built by the exact-SHA authoritative workflow attested above.
+      - name: Verify and fingerprint immutable release artifact
         run: |
           set -euo pipefail
-          VERSION="$(node -p "require('./packages/sdk-ts/package.json').version")"
-          TARBALL="/tmp/pylva-sdk-${VERSION}.tgz"
-          test -f "$TARBALL"
+          ARTIFACT_DIR="$RUNNER_TEMP/pylva-typescript-release"
+          METADATA="$ARTIFACT_DIR/metadata.json"
+          mapfile -t TARBALLS < <(find "$ARTIFACT_DIR" -type f -name '*.tgz' -print)
+          test "${#TARBALLS[@]}" -eq 1
+          TARBALL="$(node -e "const p=require('node:path'),m=require(process.argv[1]);process.stdout.write(p.resolve(p.dirname(process.argv[1]),m.tarball))" "$METADATA")"
+          test "$(realpath "${TARBALLS[0]}")" = "$(realpath "$TARBALL")"
+          SHA256="$(node -e "const m=require(process.argv[1]);process.stdout.write(m.sha256)" "$METADATA")"
+          node scripts/ci/smoke-typescript-package.mjs \
+            --tarball "$TARBALL" \
+            --expected-sha256 "$SHA256" \
+            --artifact-only
+          echo "PYLVA_TYPESCRIPT_TARBALL=$TARBALL" >> "$GITHUB_ENV"
+          echo "PYLVA_TYPESCRIPT_TARBALL_SHA256=$SHA256" >> "$GITHUB_ENV"
 
-          SMOKE_DIR="$(mktemp -d)"
-          cd "$SMOKE_DIR"
-          npm init -y >/dev/null
-          npm install "$TARBALL" --ignore-scripts >/dev/null
+      - name: Verify optional-peer-free release artifact
+        run: >-
+          node scripts/ci/smoke-typescript-package.mjs
+          --tarball "$PYLVA_TYPESCRIPT_TARBALL"
+          --expected-sha256 "$PYLVA_TYPESCRIPT_TARBALL_SHA256"
+          --optional-peer-free
 
-          PACKAGE_VERSION="$VERSION" node -e 'const fail = (actual) => { throw new Error("ESM SDK_VERSION " + actual + " !== " + process.env.PACKAGE_VERSION); }; (async () => { const m = await import("@pylva/sdk"); if (m.SDK_VERSION !== process.env.PACKAGE_VERSION) fail(m.SDK_VERSION); })().catch((err) => { console.error(err); process.exit(1); })'
-          PACKAGE_VERSION="$VERSION" node -e 'const m = require("@pylva/sdk"); if (m.SDK_VERSION !== process.env.PACKAGE_VERSION) throw new Error("CJS SDK_VERSION " + m.SDK_VERSION + " !== " + process.env.PACKAGE_VERSION)'
+      - name: Verify strict-supported peer floors from release artifact
+        run: >-
+          node scripts/ci/smoke-typescript-package.mjs
+          --tarball "$PYLVA_TYPESCRIPT_TARBALL"
+          --expected-sha256 "$PYLVA_TYPESCRIPT_TARBALL_SHA256"
+          --peer-set scripts/ci/typescript-package-peers-floor.json
+          --profile full
 
-          npx pylva validate --help >/tmp/pylva-validate-help.txt
-          grep -q 'pylva validate' /tmp/pylva-validate-help.txt
-          npx pylva --help >/tmp/pylva-help.txt
-          grep -q 'pylva validate' /tmp/pylva-help.txt
+      - name: Verify repository-current peers from release artifact
+        run: >-
+          node scripts/ci/smoke-typescript-package.mjs
+          --tarball "$PYLVA_TYPESCRIPT_TARBALL"
+          --expected-sha256 "$PYLVA_TYPESCRIPT_TARBALL_SHA256"
+          --peer-set scripts/ci/typescript-package-peers-current.json
+          --profile full
+
+      - name: Verify actual unsupported AI SDK majors from release artifact
+        run: |
+          set -euo pipefail
+          for PEERS in \
+            scripts/ci/typescript-package-peers-ai3.json \
+            scripts/ci/typescript-package-peers-ai4.json \
+            scripts/ci/typescript-package-peers-ai5.json
+          do
+            node scripts/ci/smoke-typescript-package.mjs \
+              --tarball "$PYLVA_TYPESCRIPT_TARBALL" \
+              --expected-sha256 "$PYLVA_TYPESCRIPT_TARBALL_SHA256" \
+              --peer-set "$PEERS" \
+              --profile vercel-refuse
+          done
 
       # --ignore-scripts: prepublishOnly would re-run test+typecheck+build
       # (already explicit steps above) and the rebuild would replace dist
-      # AFTER the artifact guard audited it — publish exactly the bytes that
-      # were built and vetted. prepublishOnly remains the safety belt for
+      # after the immutable tarball was audited. Publishing that tarball keeps
+      # the built, hashed, installed, and published bytes identical.
+      # prepublishOnly remains the safety belt for
       # manual publishes outside CI.
       # The @pylva/sdk npm package uses Trusted Publishing for this exact
       # GitHub Actions workflow. npm exchanges the job OIDC token for a
       # short-lived publish credential and records provenance automatically.
-      - name: Publish
-        run: npm publish --access public --ignore-scripts
-        working-directory: packages/sdk-ts
+      - name: Publish exact verified artifact
+        run: |
+          set -euo pipefail
+          ACTUAL_SHA256="$(node -e "const fs=require('node:fs'),c=require('node:crypto');process.stdout.write(c.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex'))" "$PYLVA_TYPESCRIPT_TARBALL")"
+          test "$ACTUAL_SHA256" = "$PYLVA_TYPESCRIPT_TARBALL_SHA256"
+          NPM_DIST_TAG="$(node -e "const p=require('./packages/sdk-ts/package.json');process.stdout.write(p.version.includes('-')?'next':'latest')")"
+          npm publish "$PYLVA_TYPESCRIPT_TARBALL" --access public --ignore-scripts --tag "$NPM_DIST_TAG"

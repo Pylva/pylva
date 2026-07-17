@@ -50,8 +50,9 @@ async function getPendingGroups(): Promise<PendingGroup[]> {
              metric,
              min(timestamp) AS min_ts,
              max(timestamp) AS max_ts
-      FROM cost_events
-      WHERE pricing_status IN ('needs_input', 'pending')
+      FROM cost_events_with_control
+      WHERE event_origin = 'legacy'
+        AND pricing_status IN ('needs_input', 'pending')
       GROUP BY builder_id, provider, model, metric
       LIMIT ${MAX_GROUPS_PER_RUN}
     `,
@@ -226,9 +227,9 @@ async function findMetricPrices(
 
 function priceWindowClause(window: PriceWindow): string {
   return window.effective_to == null
-    ? 'AND timestamp >= parseDateTimeBestEffort({priceFrom:String})'
-    : `AND timestamp >= parseDateTimeBestEffort({priceFrom:String})
-             AND timestamp < parseDateTimeBestEffort({priceTo:String})`;
+    ? "AND timestamp >= parseDateTimeBestEffort({priceFrom:String}, 'UTC')"
+    : `AND timestamp >= parseDateTimeBestEffort({priceFrom:String}, 'UTC')
+             AND timestamp < parseDateTimeBestEffort({priceTo:String}, 'UTC')`;
 }
 
 function priceWindowParams(window: PriceWindow): { priceFrom: string; priceTo?: string } {
@@ -242,8 +243,9 @@ async function hasRemainingMetricPending(builderId: string, metric: string): Pro
   const result = await clickhouse.query({
     query: `
       SELECT count() AS c
-      FROM cost_events
+      FROM cost_events_with_control
       WHERE builder_id = {builder:String}
+        AND event_origin = 'legacy'
         AND metric = {metric:String}
         AND pricing_status IN ('needs_input','pending')
     `,
@@ -265,8 +267,9 @@ async function hasRemainingLlmPending(
   const result = await clickhouse.query({
     query: `
       SELECT count() AS c
-      FROM cost_events
+      FROM cost_events_with_control
       WHERE builder_id = {builder:String}
+        AND event_origin = 'legacy'
         AND provider = {provider:String}
         AND model = {model:String}
         AND isNull(metric)
@@ -354,6 +357,11 @@ export async function runBackfill(): Promise<{ groups: number; updated: number }
           },
           clickhouse_settings: {
             mutations_sync: '1',
+            // Mutation compilation has crashed ClickHouse 26.5 on macOS ARM64
+            // while validating repeated, same-shaped UPDATEs. Backfill is a
+            // control-plane job, so prefer deterministic interpreted execution
+            // across the supported 24.8/26.5 range.
+            compile_expressions: 0,
           },
         });
       }
@@ -404,6 +412,7 @@ export async function runBackfill(): Promise<{ groups: number; updated: number }
           },
           clickhouse_settings: {
             mutations_sync: '1',
+            compile_expressions: 0,
           },
         });
       }

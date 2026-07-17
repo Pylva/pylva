@@ -16,7 +16,7 @@ from typing import Literal
 
 import httpx
 
-from .config import get_config
+from .config import get_config, get_config_generation
 
 LRU_MAX = 50_000
 SYNC_INTERVAL_SEC = 5 * 60
@@ -48,7 +48,10 @@ class AccumulatorKey:
 # OrderedDict preserves insertion order for LRU semantics.
 _accum: OrderedDict[str, AccumulatorEntry] = OrderedDict()
 _lock = threading.Lock()
+_timer_lock = threading.Lock()
 _sync_timer: threading.Timer | None = None
+_cache_epoch = 0
+_accepted_config_generation: int | None = None
 _lru_warned_at: float = 0.0
 _sync_missing_period_start_warned: bool = False
 _sync_ambiguous_period_start_warned: bool = False
@@ -126,14 +129,25 @@ def get(k: AccumulatorKey) -> AccumulatorEntry:
         return entry if entry is not None else AccumulatorEntry()
 
 
-def add(k: AccumulatorKey, actual_usd: float) -> None:
+def add(
+    k: AccumulatorKey,
+    actual_usd: float,
+    *,
+    expected_config_generation: int | None = None,
+) -> None:
     """Bump the accumulator after a successful LLM call."""
     if actual_usd is None or actual_usd < 0:
         return
     key = _key_of(k)
     if key is None:
         return
+    current_config_generation = get_config_generation()
     with _lock:
+        if expected_config_generation is not None and (
+            current_config_generation != expected_config_generation
+            or not _local_context_is_current_locked(_cache_epoch, expected_config_generation)
+        ):
+            return
         entry = _ensure(key)
         entry.total_usd += actual_usd
         entry.event_count += 1
@@ -141,7 +155,12 @@ def add(k: AccumulatorKey, actual_usd: float) -> None:
 
 
 def mark_exceeded_from_backend(
-    *, rule_id: str, customer_id: str | None, limit_usd: float, period_start: str
+    *,
+    rule_id: str,
+    customer_id: str | None,
+    limit_usd: float,
+    period_start: str,
+    expected_config_generation: int | None = None,
 ) -> None:
     """Backend ingest flagged this key as exceeded — bump local to limit+1."""
     k = AccumulatorKey(
@@ -153,7 +172,13 @@ def mark_exceeded_from_backend(
     key = _key_of(k)
     if key is None:
         return
+    current_config_generation = get_config_generation()
     with _lock:
+        if expected_config_generation is not None and (
+            current_config_generation != expected_config_generation
+            or not _local_context_is_current_locked(_cache_epoch, expected_config_generation)
+        ):
+            return
         entry = _ensure(key)
         entry.total_usd = max(entry.total_usd, limit_usd + 1)
         entry.exceeded_source = "backend_ingest_flag"
@@ -168,6 +193,32 @@ def set_from_sync(k: AccumulatorKey, server_total_usd: float) -> None:
     if key is None:
         return
     with _lock:
+        entry = _ensure(key)
+        entry.total_usd = server_total_usd
+        entry.exceeded_source = None
+        _touch(key, entry)
+
+
+def _set_from_sync_if_current(
+    k: AccumulatorKey,
+    server_total_usd: float,
+    *,
+    expected_epoch: int,
+    expected_config_generation: int,
+) -> None:
+    """Apply reconciliation only while it still belongs to the active builder."""
+    if server_total_usd is None or server_total_usd < 0:
+        return
+    key = _key_of(k)
+    if key is None:
+        return
+    current_config_generation = get_config_generation()
+    with _lock:
+        if (
+            current_config_generation != expected_config_generation
+            or not _local_context_is_current_locked(expected_epoch, expected_config_generation)
+        ):
+            return
         entry = _ensure(key)
         entry.total_usd = server_total_usd
         entry.exceeded_source = None
@@ -218,31 +269,61 @@ def check(
 def start_sync_loop() -> None:
     """Start the 5-minute sync loop. Idempotent."""
     global _sync_timer
-    if _sync_timer is not None:
-        return
-
-    def tick() -> None:
-        try:
-            run_sync_now()
-        except Exception:  # R1 — never crash the host process
-            pass
-        finally:
-            _schedule_next()
+    config_generation = get_config_generation()
+    with _lock:
+        loop_epoch = _cache_epoch
+        if not _local_context_is_current_locked(loop_epoch, config_generation):
+            return
 
     def _schedule_next() -> None:
         global _sync_timer
-        _sync_timer = threading.Timer(SYNC_INTERVAL_SEC, tick)
-        _sync_timer.daemon = True
-        _sync_timer.start()
+        current_config_generation = get_config_generation()
+        with _lock:
+            current = (
+                current_config_generation == config_generation
+                and _local_context_is_current_locked(loop_epoch, config_generation)
+            )
+        if not current:
+            return
+        with _timer_lock:
+            with _lock:
+                if (
+                    current_config_generation != config_generation
+                    or not _local_context_is_current_locked(loop_epoch, config_generation)
+                ):
+                    return
+            if _sync_timer is not None:
+                return
+
+            timer: threading.Timer
+
+            def tick() -> None:
+                global _sync_timer
+                with _timer_lock:
+                    if _sync_timer is not timer:
+                        return
+                    _sync_timer = None
+                try:
+                    _run_sync_now(loop_epoch, config_generation)
+                except Exception:  # R1 — never crash the host process
+                    pass
+                finally:
+                    _schedule_next()
+
+            timer = threading.Timer(SYNC_INTERVAL_SEC, tick)
+            timer.daemon = True
+            _sync_timer = timer
+            timer.start()
 
     _schedule_next()
 
 
 def stop_sync_loop() -> None:
     global _sync_timer
-    if _sync_timer is not None:
-        _sync_timer.cancel()
-        _sync_timer = None
+    with _timer_lock:
+        if _sync_timer is not None:
+            _sync_timer.cancel()
+            _sync_timer = None
 
 
 def _warn_missing_period_start_fallback() -> None:
@@ -297,10 +378,23 @@ def _matching_sync_snapshot(
 
 def run_sync_now() -> None:
     """POST current accumulator state to /api/v1/budget/sync, overwrite local."""
+    expected_config_generation = get_config_generation()
+    with _lock:
+        expected_epoch = _cache_epoch
+    _run_sync_now(expected_epoch, expected_config_generation)
+
+
+def _run_sync_now(expected_epoch: int, expected_config_generation: int) -> None:
     cfg = get_config()
     if cfg is None:
         return
+    current_config_generation = get_config_generation()
     with _lock:
+        if (
+            current_config_generation != expected_config_generation
+            or not _local_context_is_current_locked(expected_epoch, expected_config_generation)
+        ):
+            return
         if not _accum:
             return
         snapshot: list[dict[str, object]] = []
@@ -346,7 +440,7 @@ def run_sync_now() -> None:
                     snap_period_start = snap["period_start"]
                     if not isinstance(snap_period_start, str):
                         continue
-                    set_from_sync(
+                    _set_from_sync_if_current(
                         AccumulatorKey(
                             rule_id=r["rule_id"],
                             scope=r["scope"],
@@ -354,6 +448,8 @@ def run_sync_now() -> None:
                             period_start=snap_period_start,
                         ),
                         r["server_total_usd"],
+                        expected_epoch=expected_epoch,
+                        expected_config_generation=expected_config_generation,
                     )
     except httpx.RequestError:
         return
@@ -370,9 +466,40 @@ def init_accumulator() -> None:
         pass
 
 
-def _reset_accumulator_for_tests() -> None:
-    global _lru_warned_at, _sync_missing_period_start_warned, _sync_ambiguous_period_start_warned
+def _local_context_is_current_locked(expected_epoch: int, expected_config_generation: int) -> bool:
+    return expected_epoch == _cache_epoch and (
+        _accepted_config_generation is None
+        or expected_config_generation == _accepted_config_generation
+    )
+
+
+def _invalidate_accumulator_for_config_change(
+    next_config_generation: int | None = None,
+) -> None:
+    """Drop tenant-scoped totals and stop the old builder's reconciliation loop.
+
+    ``next_config_generation`` lets config pause sync work when this hook is
+    invoked immediately before installing the replacement identity.
+    """
+    global _accepted_config_generation, _cache_epoch
+    global _lru_warned_at, _sync_missing_period_start_warned
+    global _sync_ambiguous_period_start_warned
     with _lock:
+        _cache_epoch += 1
+        _accepted_config_generation = next_config_generation
+        _accum.clear()
+        _lru_warned_at = 0.0
+        _sync_missing_period_start_warned = False
+        _sync_ambiguous_period_start_warned = False
+    stop_sync_loop()
+
+
+def _reset_accumulator_for_tests() -> None:
+    global _accepted_config_generation, _cache_epoch, _lru_warned_at
+    global _sync_missing_period_start_warned, _sync_ambiguous_period_start_warned
+    with _lock:
+        _cache_epoch += 1
+        _accepted_config_generation = None
         _accum.clear()
         _lru_warned_at = 0.0
         _sync_missing_period_start_warned = False

@@ -1,9 +1,4 @@
-import {
-  createApiError,
-  ErrorCode,
-  type ApiErrorResponse,
-  type ErrorType,
-} from '@pylva/shared';
+import { createApiError, ErrorCode, type ApiErrorResponse, type ErrorType } from '@pylva/shared';
 
 export interface PublicHttpResponse {
   status: number;
@@ -82,6 +77,41 @@ export function rateLimitErrorResponse(retryAfterSeconds: number): PublicHttpRes
 
 export function internalErrorResponse(message = 'An internal error occurred'): PublicHttpResponse {
   return apiErrorResponse(500, 'api_error', ErrorCode.INTERNAL_ERROR, message);
+}
+
+export function serviceUnavailableErrorResponse(
+  message = 'Budget control is temporarily unavailable',
+): PublicHttpResponse {
+  return apiErrorResponse(503, 'api_error', ErrorCode.INTERNAL_ERROR, message);
+}
+
+export function resourceNotFoundErrorResponse(
+  message = 'Reservation not found',
+): PublicHttpResponse {
+  return apiErrorResponse(404, 'invalid_request_error', ErrorCode.RESOURCE_NOT_FOUND, message);
+}
+
+export function idempotencyConflictErrorResponse(
+  message = 'operation_id was reused with a different request',
+): PublicHttpResponse {
+  return apiErrorResponse(409, 'invalid_request_error', ErrorCode.IDEMPOTENCY_CONFLICT, message);
+}
+
+export function reservationStateConflictErrorResponse(
+  message = 'reservation state conflicts with this operation',
+): PublicHttpResponse {
+  return apiErrorResponse(
+    409,
+    'invalid_request_error',
+    ErrorCode.RESERVATION_STATE_CONFLICT,
+    message,
+  );
+}
+
+/** Public control decisions and errors are live tenant state and never cacheable. */
+export function withNoStore(response: PublicHttpResponse): PublicHttpResponse {
+  response.headers = { ...response.headers, 'Cache-Control': 'no-store' };
+  return response;
 }
 
 export function toNextResponse(response: PublicHttpResponse): Response {

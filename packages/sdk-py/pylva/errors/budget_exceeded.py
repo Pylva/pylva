@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 PYLVA_BUDGET_EXCEEDED_CODE = "budget_exceeded"
 
@@ -17,6 +17,7 @@ PYLVA_BUDGET_EXCEEDED_CODE = "budget_exceeded"
 class BudgetExceededSource(str, Enum):
     SDK_PRECALL = "sdk_precall"
     BACKEND_INGEST_FLAG = "backend_ingest_flag"
+    AUTHORITATIVE_CONTROL = "authoritative_control"
 
 
 Period = Literal["hour", "day", "week", "month"]
@@ -53,6 +54,10 @@ class PylvaBudgetExceeded(Exception):
         limit_usd: float,
         accumulated_usd: float,
         estimated_usd: float,
+        authoritative_denial: Any | None = None,
+        limit_usd_exact: str | None = None,
+        accumulated_usd_exact: str | None = None,
+        estimated_usd_exact: str | None = None,
     ) -> None:
         self.source = source
         self.rule_id = rule_id
@@ -62,6 +67,15 @@ class PylvaBudgetExceeded(Exception):
         self.limit_usd = limit_usd
         self.accumulated_usd = accumulated_usd
         self.estimated_usd = estimated_usd
+        # Additive exact evidence for authoritative denials. Existing callers
+        # and catch paths retain every legacy float field above unchanged.
+        self.authoritative_denial = authoritative_denial
+        # Internal compatibility alias used during the additive client rollout.
+        # ``authoritative_denial`` is the documented public evidence field.
+        self.control_decision = authoritative_denial
+        self.limit_usd_exact = limit_usd_exact
+        self.accumulated_usd_exact = accumulated_usd_exact
+        self.estimated_usd_exact = estimated_usd_exact
         super().__init__(self._format_message())
 
     def _format_message(self) -> str:

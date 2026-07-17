@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { CostSourceTrackingStatus, CostSourceType, type PricingTier } from '@pylva/shared';
 import {
   CostSourcesControlTable,
@@ -22,6 +22,7 @@ function row(overrides: Partial<CostSourceControlRow>): CostSourceControlRow {
     last_discovered_at: overrides.last_discovered_at ?? '2026-07-08T00:00:00.000Z',
     discovery_count: overrides.discovery_count ?? 1,
     has_pricing: overrides.has_pricing ?? false,
+    protection_state: overrides.protection_state ?? 'unpriced_uncontrolled',
   };
 }
 
@@ -38,6 +39,7 @@ const rows: CostSourceControlRow[] = [
     last_discovered_at: null,
     discovery_count: 0,
     has_pricing: true,
+    protection_state: 'protected',
   }),
   row({
     id: 'pending-tavily',
@@ -53,6 +55,7 @@ const rows: CostSourceControlRow[] = [
     metric: 'elevenlabs_characters',
     unit: 'character',
     has_pricing: true,
+    protection_state: 'ready_to_protect',
   }),
   row({
     id: 'ignored-grep',
@@ -71,6 +74,9 @@ describe('<CostSourcesControlTable>', () => {
     expect(screen.getByText('Tavily Search')).toBeInTheDocument();
     expect(screen.getByText('ElevenLabs')).toBeInTheDocument();
     expect(screen.getByText('Grep')).toBeInTheDocument();
+    expect(screen.getByText('✓ Protected')).toBeInTheDocument();
+    expect(screen.getByText('+ Ready to protect')).toBeInTheDocument();
+    expect(screen.getAllByText('⊘ Unpriced/uncontrolled').length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole('button', { name: 'Pending' }));
     expect(screen.getByText('Tavily Search')).toBeInTheDocument();
@@ -103,6 +109,9 @@ describe('<CostSourcesControlTable>', () => {
       ),
     );
     await waitFor(() => expect(screen.getAllByText('Ignored').length).toBeGreaterThanOrEqual(2));
+    const tavilyRow = screen.getByText('Tavily Search').closest('tr');
+    expect(tavilyRow).not.toBeNull();
+    expect(within(tavilyRow!).getByText('⊘ Unpriced/uncontrolled')).toBeInTheDocument();
 
     rerender(<CostSourcesControlTable slug="acme" sources={rows} canMutate={false} />);
     expect(screen.queryByRole('button', { name: 'Ignore' })).not.toBeInTheDocument();
