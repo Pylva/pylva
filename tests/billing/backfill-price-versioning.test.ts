@@ -77,8 +77,12 @@ describe('pricing backfill version windows', () => {
     const [january, february] = mocks.clickhouseCommand.mock.calls.map(
       (call) => call[0] as { query: string; query_params: Record<string, unknown> },
     );
-    expect(january?.query).toContain('timestamp >= parseDateTimeBestEffort({priceFrom:String})');
-    expect(january?.query).toContain('timestamp < parseDateTimeBestEffort({priceTo:String})');
+    expect(january?.query).toContain(
+      "timestamp >= parseDateTimeBestEffort({priceFrom:String}, 'UTC')",
+    );
+    expect(january?.query).toContain(
+      "timestamp < parseDateTimeBestEffort({priceTo:String}, 'UTC')",
+    );
     expect(january?.query_params).toMatchObject({
       ppuUsd: 0.01,
       priceFrom: '2026-01-01T00:00:00.000Z',

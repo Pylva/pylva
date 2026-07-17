@@ -508,23 +508,23 @@ describe('db-migrate core and CLI', () => {
   });
 
   it('validates db-migrate environment values', () => {
-    expect(() => parseDbMigrateEnv({})).toThrow('DATABASE_URL environment variable is required');
-    expect(() => parseDbMigrateEnv({ DATABASE_URL: '' })).toThrow(
-      'DATABASE_URL environment variable is required',
+    expect(() => parseDbMigrateEnv({})).toThrow('MIGRATION_DATABASE_URL is required');
+    expect(() => parseDbMigrateEnv({ MIGRATION_DATABASE_URL: '' })).toThrow(
+      'MIGRATION_DATABASE_URL is required',
     );
     expect(() =>
       parseDbMigrateEnv({
-        DATABASE_URL: 'postgresql://localhost/pylva',
+        MIGRATION_DATABASE_URL: 'postgresql://localhost/pylva',
         MIGRATE_LOCK_TIMEOUT: '30s; DROP TABLE x',
       }),
     ).toThrow('MIGRATE_LOCK_TIMEOUT must match /^[0-9]+(ms|s|min)?$/');
 
-    expect(parseDbMigrateEnv({ DATABASE_URL: 'postgresql://localhost/pylva' })).toEqual({
+    expect(parseDbMigrateEnv({ MIGRATION_DATABASE_URL: 'postgresql://localhost/pylva' })).toEqual({
       databaseUrl: 'postgresql://localhost/pylva',
     });
     expect(
       parseDbMigrateEnv({
-        DATABASE_URL: 'postgresql://localhost/pylva',
+        MIGRATION_DATABASE_URL: 'postgresql://localhost/pylva',
         MIGRATE_LOCK_TIMEOUT: '30s',
       }),
     ).toEqual({ databaseUrl: 'postgresql://localhost/pylva', lockTimeout: '30s' });

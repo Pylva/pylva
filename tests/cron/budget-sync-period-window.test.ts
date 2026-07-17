@@ -99,7 +99,7 @@ describe('budget sync period window', () => {
 
     expect(queryParams().from).toBe('2026-06-10 13:00:00');
     expect(queryParams().to).toBe('2026-06-10 14:00:00');
-    expect(querySql()).toContain('timestamp < {to:DateTime}');
+    expect(querySql()).toContain("timestamp < parseDateTime64BestEffort({to:String}, 3, 'UTC')");
     expect(result[0]?.period_start).toBe('2026-06-10T13:00:00.000Z');
     expect(result[0]?.server_total_usd).toBe(4.5);
   });

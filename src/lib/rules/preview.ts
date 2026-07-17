@@ -196,8 +196,8 @@ export async function previewRule(rule: Rule, now: Date = new Date()): Promise<R
   // is_demo = 0 mirrors the dashboard-queries default: previews compute
   // impact on REAL traffic, not seeded demo events.
   const baseWhere = `WHERE builder_id = {builder_id:String}
-    AND timestamp >= {from:DateTime}
-    AND timestamp <= {to:DateTime}
+    AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
+    AND timestamp <= parseDateTime64BestEffort({to:String}, 3, 'UTC')
     AND is_demo = 0
     ${scope.sql}`;
 
@@ -211,7 +211,7 @@ export async function previewRule(rule: Rule, now: Date = new Date()): Promise<R
     queryCostEvents(
       rule.builder_id,
       `SELECT customer_id, count() AS event_count, sum(cost_usd) AS total_cost_usd
-       FROM cost_events
+       FROM cost_events_with_control
        ${baseWhere}
        GROUP BY customer_id
        ORDER BY event_count DESC
@@ -221,7 +221,7 @@ export async function previewRule(rule: Rule, now: Date = new Date()): Promise<R
     queryCostEvents(
       rule.builder_id,
       `SELECT step_name, count() AS event_count
-       FROM cost_events
+       FROM cost_events_with_control
        ${baseWhere}
        GROUP BY step_name
        ORDER BY event_count DESC
@@ -231,7 +231,7 @@ export async function previewRule(rule: Rule, now: Date = new Date()): Promise<R
     queryCostEvents(
       rule.builder_id,
       `SELECT provider, model, count() AS event_count
-       FROM cost_events
+       FROM cost_events_with_control
        ${baseWhere}
        GROUP BY provider, model
        ORDER BY event_count DESC
@@ -247,7 +247,7 @@ export async function previewRule(rule: Rule, now: Date = new Date()): Promise<R
       `SELECT count() AS total_event_count,
               sum(cost_usd) AS total_cost_usd,
               uniqExact(customer_id) AS matched_customers
-       FROM cost_events
+       FROM cost_events_with_control
        ${baseWhere}`,
       params,
     ),
@@ -258,10 +258,10 @@ export async function previewRule(rule: Rule, now: Date = new Date()): Promise<R
       ? queryCostEvents(
           rule.builder_id,
           `SELECT uniqExact(customer_id) AS total_customers
-           FROM cost_events
+           FROM cost_events_with_control
            WHERE builder_id = {builder_id:String}
-             AND timestamp >= {from:DateTime}
-             AND timestamp <= {to:DateTime}
+             AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
+             AND timestamp <= parseDateTime64BestEffort({to:String}, 3, 'UTC')
              AND is_demo = 0`,
           { from: params['from'], to: params['to'] },
         )
@@ -274,9 +274,7 @@ export async function previewRule(rule: Rule, now: Date = new Date()): Promise<R
   };
   const matchedCustomers = Number(totals.matched_customers ?? affectedCustomersLengthFallback());
   const totalCustomers = denominatorRows
-    ? Number(
-        (denominatorRows[0] as { total_customers?: string } | undefined)?.total_customers ?? 0,
-      )
+    ? Number((denominatorRows[0] as { total_customers?: string } | undefined)?.total_customers ?? 0)
     : matchedCustomers;
 
   function affectedCustomersLengthFallback(): number {

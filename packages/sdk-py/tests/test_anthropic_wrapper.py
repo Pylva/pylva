@@ -1,8 +1,8 @@
 """B3-T1 — Anthropic wrapper coverage.
 
-Mirror of test_openai_wrapper.py for the Anthropic surface. Uses an injected
-fake `anthropic.resources.messages` module so the wrapper can be exercised
-without the real SDK installed.
+Mirror of test_openai_wrapper.py for the Anthropic surface. It injects a fake
+``anthropic.resources.messages`` module so the legacy wrapper remains
+deterministic even when provider compatibility dependencies are installed.
 """
 
 from __future__ import annotations
@@ -66,6 +66,7 @@ def _install_fake_anthropic(raise_exc: Exception | None = None) -> Any:
     sys.modules["anthropic"] = anthropic_pkg
     sys.modules["anthropic.resources"] = resources_pkg
     sys.modules["anthropic.resources.messages"] = messages_mod
+    anthropic_wrapper._reset_anthropic_patch_for_tests()  # type: ignore[attr-defined]
     return Messages
 
 
@@ -93,7 +94,9 @@ def test_wrapper_does_not_capture_prompt_or_response() -> None:
     anthropic_wrapper.try_patch_anthropic()
 
     prompt = "ANTHROPIC SECRET PROMPT"
-    Messages().create(model="claude-3-5-sonnet-20241022", messages=[{"role": "user", "content": prompt}])
+    Messages().create(
+        model="claude-3-5-sonnet-20241022", messages=[{"role": "user", "content": prompt}]
+    )
 
     event = telemetry._state.buffer[0]  # type: ignore[attr-defined]
     for forbidden_key in ("prompt", "response", "messages", "completion", "content"):

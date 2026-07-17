@@ -28,7 +28,14 @@ import { stripeFor } from '../stripe/client.js';
 import { ensureStripeCustomer } from '../stripe/ensure-customer.js';
 import { applyFormula } from './formulas.js';
 import { billingCycleIdFor, detectBoundary, type SplitSlice } from './auto-split.js';
-import { getUsageForPeriod } from './clickhouse-usage.js';
+import {
+  assertAuthoritativeProjectionReady,
+  BillingPeriodOpenError,
+  BudgetProjectionPendingError,
+  BudgetUsageAggregateError,
+  getUsageForPeriod,
+} from './clickhouse-usage.js';
+import type { UsageAggregate } from './formulas.js';
 import { getVersionsInPeriod, rowToCustomerPricing } from './pricing-versioning.js';
 import { logger } from '../logger.js';
 
@@ -43,7 +50,14 @@ interface StripeInvoiceLine {
 
 export class BillingError extends Error {
   constructor(
-    public code: 'pricing_not_configured' | 'stripe_not_connected' | 'stripe_capabilities_pending',
+    public code:
+      | 'pricing_not_configured'
+      | 'stripe_not_connected'
+      | 'stripe_capabilities_pending'
+      | 'projection_pending'
+      | 'period_not_closed'
+      | 'usage_unbillable'
+      | 'invalid_period',
     message: string,
   ) {
     super(message);
@@ -107,7 +121,9 @@ function normalizeStripeInvoiceLines(
     );
   }
   if (stripeLines.length > 250) {
-    throw new Error(`Stripe invoice item count ${stripeLines.length} exceeds Stripe's 250 item cap`);
+    throw new Error(
+      `Stripe invoice item count ${stripeLines.length} exceeds Stripe's 250 item cap`,
+    );
   }
   return stripeLines;
 }
@@ -177,6 +193,7 @@ interface GenerateInput {
 async function persistOneDraft(
   input: GenerateInput,
   slice: SplitSlice,
+  usage: UsageAggregate,
   stripeAccountId: string,
   billingCycleId: string | null,
   sliceIdx: number,
@@ -242,24 +259,6 @@ async function persistOneDraft(
     }
   }
 
-  // PR #84 review (bug_024) — getUsageForPeriod queries ClickHouse
-  // cost_events.customer_id which ingest writes as `${builder}:${external}`,
-  // not the internal customers.id UUID. Resolve once here so usage SUMs
-  // actually match the events. Without this, monthly-drafts silently
-  // creates $0 Stripe invoices for every pay-as-you-go builder.
-  const compositeCustomerId = await resolveCustomerComposite(input.builderId, input.customerId);
-  if (!compositeCustomerId) {
-    throw new BillingError(
-      'pricing_not_configured',
-      `customer ${input.customerId} not found or missing external_id`,
-    );
-  }
-  const usage = await getUsageForPeriod({
-    builderId: input.builderId,
-    customerId: compositeCustomerId,
-    from: slice.slice_start,
-    to: slice.slice_end,
-  });
   const formula = applyFormula(pricing, usage);
   const stripeLineItems = normalizeStripeInvoiceLines(formula.line_items, formula.amount_usd);
 
@@ -471,6 +470,14 @@ async function persistOneDraft(
  * (length === 1 normally; length > 1 when auto-split fires).
  */
 export async function generateInvoice(input: GenerateInput): Promise<InvoiceGenerateResponse[]> {
+  if (
+    !Number.isFinite(input.period.start.getTime()) ||
+    !Number.isFinite(input.period.end.getTime()) ||
+    input.period.start.getTime() >= input.period.end.getTime()
+  ) {
+    throw new BillingError('invalid_period', 'Invoice period must have valid start < end');
+  }
+
   const connect = await loadStripeConnect(input.builderId);
   if (!connect)
     throw new BillingError('stripe_not_connected', 'Builder has no Stripe account connected');
@@ -496,6 +503,49 @@ export async function generateInvoice(input: GenerateInput): Promise<InvoiceGene
     );
   }
 
+  // Resolve the external customer identity and read every slice before the
+  // first Stripe or invoice-table write. This makes auto-split generation an
+  // all-preflight operation: a projection gap, open period, malformed usage,
+  // or ClickHouse read failure in any later slice cannot leave earlier drafts.
+  const compositeCustomerId = await resolveCustomerComposite(input.builderId, input.customerId);
+  if (!compositeCustomerId) {
+    throw new BillingError(
+      'pricing_not_configured',
+      `customer ${input.customerId} not found or missing external_id`,
+    );
+  }
+  try {
+    await assertAuthoritativeProjectionReady(input.builderId, input.period.end);
+  } catch (error) {
+    if (error instanceof BillingPeriodOpenError) {
+      throw new BillingError('period_not_closed', error.message);
+    }
+    if (error instanceof BudgetProjectionPendingError) {
+      throw new BillingError('projection_pending', error.message);
+    }
+    throw error;
+  }
+
+  let sliceUsages: UsageAggregate[];
+  try {
+    sliceUsages = await Promise.all(
+      plan.slices.map((slice) =>
+        getUsageForPeriod({
+          builderId: input.builderId,
+          customerId: compositeCustomerId,
+          from: slice.slice_start,
+          to: slice.slice_end,
+          useAuthoritativeBillingFacts: true,
+        }),
+      ),
+    );
+  } catch (error) {
+    if (error instanceof BudgetUsageAggregateError) {
+      throw new BillingError('usage_unbillable', error.message);
+    }
+    throw error;
+  }
+
   // Auto-split cycle id. For the monthly-cron / dedupe path (draftKeyBase set)
   // derive it deterministically from the dedupe namespace so concurrent pods
   // and same-window re-runs assign the *same* billing_cycle_id to every slice
@@ -515,6 +565,7 @@ export async function generateInvoice(input: GenerateInput): Promise<InvoiceGene
       const result = await persistOneDraft(
         input,
         slice,
+        sliceUsages[i]!,
         connect.stripe_account_id,
         billingCycleId,
         i,

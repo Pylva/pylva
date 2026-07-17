@@ -18,12 +18,24 @@ Usage::
         providers={"openrouter": openrouter_client},
     )
 """
+
 from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
 
 from .core.client_registry import register_provider_client, register_provider_clients
+from .core.config import ControlConfig
+from .core.control_schema import (
+    BudgetCommitRequest,
+    BudgetCommitResponse,
+    BudgetExtendRequest,
+    BudgetExtendResponse,
+    BudgetReleaseRequest,
+    BudgetReleaseResponse,
+    BudgetReservationRequest,
+    BudgetReservationResponse,
+)
 
 
 class Pylva:
@@ -38,6 +50,7 @@ class Pylva:
         flush_interval: float = 5.0,
         local_mode: bool = False,
         non_llm: dict[str, Any] | None = None,
+        control: ControlConfig | Mapping[str, Any] | None = None,
         openai: Any | None = None,
         anthropic: Any | None = None,
         providers: Mapping[str, Any] | None = None,
@@ -53,6 +66,7 @@ class Pylva:
             flush_interval=flush_interval,
             local_mode=local_mode,
             non_llm=non_llm,
+            control=control,
         )
 
         if openai is not None:
@@ -64,3 +78,83 @@ class Pylva:
 
         self.has_openai = openai is not None
         self.has_anthropic = anthropic is not None
+
+    async def ready(self) -> bool:
+        from .core.control_client import ready
+
+        return await ready()
+
+    def ready_sync(self) -> bool:
+        from .core.control_client import ready_sync
+
+        return ready_sync()
+
+    async def reserve_usage(
+        self,
+        request: BudgetReservationRequest | Mapping[str, Any],
+    ) -> BudgetReservationResponse:
+        from .core.control_client import reserve_usage
+
+        return await reserve_usage(request)
+
+    def reserve_usage_sync(
+        self,
+        request: BudgetReservationRequest | Mapping[str, Any],
+    ) -> BudgetReservationResponse:
+        from .core.control_client import reserve_usage_sync
+
+        return reserve_usage_sync(request)
+
+    async def commit_usage(
+        self,
+        reservation_id: str,
+        request: BudgetCommitRequest | Mapping[str, Any],
+    ) -> BudgetCommitResponse:
+        from .core.control_client import commit_usage
+
+        return await commit_usage(reservation_id, request)
+
+    def commit_usage_sync(
+        self,
+        reservation_id: str,
+        request: BudgetCommitRequest | Mapping[str, Any],
+    ) -> BudgetCommitResponse:
+        from .core.control_client import commit_usage_sync
+
+        return commit_usage_sync(reservation_id, request)
+
+    async def release_usage(
+        self,
+        reservation_id: str,
+        request: BudgetReleaseRequest | Mapping[str, Any],
+    ) -> BudgetReleaseResponse:
+        from .core.control_client import release_usage
+
+        return await release_usage(reservation_id, request)
+
+    def release_usage_sync(
+        self,
+        reservation_id: str,
+        request: BudgetReleaseRequest | Mapping[str, Any],
+    ) -> BudgetReleaseResponse:
+        from .core.control_client import release_usage_sync
+
+        return release_usage_sync(reservation_id, request)
+
+    async def extend_usage(
+        self,
+        reservation_id: str,
+        request: BudgetExtendRequest | Mapping[str, Any],
+    ) -> BudgetExtendResponse:
+        from .core.control_client import extend_usage
+
+        return await extend_usage(reservation_id, request)
+
+    def extend_usage_sync(
+        self,
+        reservation_id: str,
+        request: BudgetExtendRequest | Mapping[str, Any],
+    ) -> BudgetExtendResponse:
+        from .core.control_client import extend_usage_sync
+
+        return extend_usage_sync(reservation_id, request)

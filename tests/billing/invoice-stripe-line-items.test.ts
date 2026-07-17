@@ -75,9 +75,20 @@ vi.mock('../../src/lib/clickhouse/customer-id.js', () => ({
 }));
 
 let usageByMetric: Record<string, number> = {};
+let usageCalls: Array<Record<string, unknown>> = [];
+let projectionReadyCalls: Array<{ builderId: string; periodEnd: Date }> = [];
 vi.mock('../../src/lib/billing/clickhouse-usage.js', () => ({
-  getUsageForPeriod: () =>
-    Promise.resolve({ by_model: {}, by_metric: usageByMetric, has_unpriced: false }),
+  BillingPeriodOpenError: class BillingPeriodOpenError extends Error {},
+  BudgetProjectionPendingError: class BudgetProjectionPendingError extends Error {},
+  BudgetUsageAggregateError: class BudgetUsageAggregateError extends Error {},
+  assertAuthoritativeProjectionReady: (builderId: string, periodEnd: Date) => {
+    projectionReadyCalls.push({ builderId, periodEnd });
+    return Promise.resolve();
+  },
+  getUsageForPeriod: (params: Record<string, unknown>) => {
+    usageCalls.push(params);
+    return Promise.resolve({ by_model: {}, by_metric: usageByMetric, has_unpriced: false });
+  },
 }));
 
 vi.mock('../../src/lib/stripe/ensure-customer.js', () => ({
@@ -239,6 +250,8 @@ beforeEach(() => {
   hideNextDraftKeySelect = false;
   markupPct = 10;
   usageByMetric = { credits: 10_000 };
+  usageCalls = [];
+  projectionReadyCalls = [];
   perUnitRates = { credits: 0.01 };
 });
 
@@ -262,6 +275,13 @@ describe('generateInvoice — pushes computed line items onto the Stripe invoice
     expect(amounts).toEqual([1_000, 10_000]);
     expect(stripeTotalCents() / 100).toBe(results[0]!.amount_usd);
     expect(store[0]!.line_items).toHaveLength(2);
+    expect(usageCalls).toHaveLength(1);
+    expect(usageCalls[0]).toMatchObject({
+      builderId: BUILDER_ID,
+      customerId: `${BUILDER_ID}:ext-1`,
+      useAuthoritativeBillingFacts: true,
+    });
+    expect(projectionReadyCalls).toEqual([{ builderId: BUILDER_ID, periodEnd: PERIOD.end }]);
   });
 
   it('creates Stripe drafts as manual-send invoices with 30-day payment terms', async () => {

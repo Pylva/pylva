@@ -12,7 +12,9 @@
 // every SYNC_INTERVAL_MS re-reconciles. server_total REPLACES local (I-T3-3).
 
 import { getConfig } from './config.js';
-import type { BudgetExceededFlag } from '@pylva/shared';
+import type { BudgetExceededFlag } from '@pylva/shared/budget-errors';
+import { registerIdentityResetter } from './identity_registry.js';
+import { AuthenticatedRoute, coreRuntime } from '../internal/core-runtime-state.js';
 
 const LRU_MAX = 50_000;
 const SYNC_INTERVAL_MS = 5 * 60 * 1000;
@@ -46,6 +48,8 @@ let lruWarnedAt = 0;
 let syncInFlight: Promise<void> | null = null;
 let syncMissingPeriodStartWarned = false;
 let syncAmbiguousPeriodStartWarned = false;
+let accumulatorEpoch = 0;
+const activeControllers = new Set<AbortController>();
 
 function keyOf(k: AccumulatorKey): string | null {
   if (k.scope === 'pooled') return `${k.rule_id}:__pooled__:${k.period_start}`;
@@ -273,15 +277,17 @@ function findSnapshotForSyncEntry(
  */
 export async function runSyncNow(): Promise<void> {
   if (syncInFlight) return syncInFlight;
-  syncInFlight = doSync().finally(() => {
-    syncInFlight = null;
+  const owner = accumulatorEpoch;
+  const promise = doSync(owner);
+  const wrapped = promise.finally(() => {
+    if (syncInFlight === wrapped) syncInFlight = null;
   });
+  syncInFlight = wrapped;
   return syncInFlight;
 }
 
-async function doSync(): Promise<void> {
-  const cfg = getConfig();
-  if (!cfg) return;
+async function doSync(owner: number): Promise<void> {
+  if (!getConfig()) return;
   if (accumulator.size === 0) return;
 
   const snapshot: BudgetSyncSnapshotEntry[] = [...accumulator.entries()].map(
@@ -312,22 +318,25 @@ async function doSync(): Promise<void> {
   );
 
   for (let offset = 0; offset < snapshot.length; offset += SYNC_BATCH_SIZE) {
+    if (owner !== accumulatorEpoch) return;
     const batch = snapshot.slice(offset, offset + SYNC_BATCH_SIZE);
+    const controller = new AbortController();
+    activeControllers.add(controller);
     try {
-      const res = await fetch(`${cfg.endpoint}/api/v1/budget/sync`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Pylva-Key': cfg.apiKey,
-        },
+      const res = await coreRuntime.authenticatedRequest({
+        route: AuthenticatedRoute.BUDGET_SYNC,
         body: JSON.stringify({ entries: batch }),
+        signal: controller.signal,
       });
+      if (owner !== accumulatorEpoch) return;
       if (!res.ok) continue; // R5 passthrough — reconcile other batches if possible
-      const body = (await res.json()) as {
+      const body = JSON.parse(res.bodyText) as {
         entries?: BudgetSyncResponseEntry[];
       };
+      if (owner !== accumulatorEpoch) return;
       const entries = body.entries ?? [];
       for (const r of entries) {
+        if (owner !== accumulatorEpoch) return;
         const snap = findSnapshotForSyncEntry(batch, r);
         if (!snap) continue;
         setFromSync(
@@ -345,6 +354,8 @@ async function doSync(): Promise<void> {
       // Stop here so a large snapshot cannot turn one outage into up to 100
       // sequential retries (R1/R5). The next scheduled sync retries everything.
       return;
+    } finally {
+      activeControllers.delete(controller);
     }
   }
 }
@@ -361,9 +372,23 @@ export async function initAccumulator(): Promise<void> {
 
 // Test helper: drains local state so tests don't leak between runs.
 export function _resetAccumulatorForTests(): void {
+  resetAccumulator();
+}
+
+function resetAccumulator(): void {
+  accumulatorEpoch += 1;
+  for (const controller of activeControllers) controller.abort();
+  activeControllers.clear();
   accumulator.clear();
   lruWarnedAt = 0;
   syncMissingPeriodStartWarned = false;
   syncAmbiguousPeriodStartWarned = false;
+  syncInFlight = null;
   stopSyncLoop();
 }
+
+export function _resetAccumulatorForIdentityChange(): void {
+  resetAccumulator();
+}
+
+registerIdentityResetter(_resetAccumulatorForIdentityChange);

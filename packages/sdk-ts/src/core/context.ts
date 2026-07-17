@@ -4,7 +4,7 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
-import { Framework, type Framework as FrameworkType } from '@pylva/shared';
+import { Framework, type Framework as FrameworkType } from '@pylva/shared/telemetry-values';
 
 export interface TrackContext {
   customer_id: string;
@@ -17,6 +17,8 @@ export interface TrackContext {
   parent_run_id: string | null;
 }
 
+// Published entrypoints import this one physical canonical CJS module. Its
+// module cache owns the ALS; no discoverable global rendezvous is involved.
 const als = new AsyncLocalStorage<TrackContext>();
 
 export function currentContext(): TrackContext | undefined {
@@ -66,9 +68,7 @@ export function track<T>(
   } else {
     options = optsOrCb;
     if (!cb) {
-      throw new Error(
-        '[pylva] track(customerId, opts, cb): cb is required when opts is provided',
-      );
+      throw new Error('[pylva] track(customerId, opts, cb): cb is required when opts is provided');
     }
     callback = cb;
   }

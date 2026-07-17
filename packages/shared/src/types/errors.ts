@@ -19,6 +19,8 @@ export const ErrorCode = {
   NOT_FOUND: 'NOT_FOUND',
   DUPLICATE_RESOURCE: 'DUPLICATE_RESOURCE',
   INSUFFICIENT_PERMISSIONS: 'INSUFFICIENT_PERMISSIONS',
+  IDEMPOTENCY_CONFLICT: 'IDEMPOTENCY_CONFLICT',
+  RESERVATION_STATE_CONFLICT: 'RESERVATION_STATE_CONFLICT',
   /** A tenant dashboard request omitted or contradicted its page-bound context. */
   DASHBOARD_CONTEXT_REQUIRED: 'DASHBOARD_CONTEXT_REQUIRED',
   /** The browser session user no longer matches the user that rendered the page. */

@@ -158,7 +158,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       try {
         await releaseClaim({ builderId: ctx.builderId, key: idempotencyKey, bodyHash });
       } catch (releaseErr) {
-        const releaseMessage = releaseErr instanceof Error ? releaseErr.message : String(releaseErr);
+        const releaseMessage =
+          releaseErr instanceof Error ? releaseErr.message : String(releaseErr);
         log.warn(
           { builder_id: ctx.builderId, error: releaseMessage },
           'failed to release invoice idempotency claim after billing preflight error',
@@ -166,6 +167,27 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       }
       if (isStripeConfigurationError(err)) {
         return apiError(503, 'api_error', ErrorCode.INTERNAL_ERROR, err.message, 'stripe');
+      }
+      if (err.code === 'projection_pending') {
+        return apiError(503, 'api_error', ErrorCode.INTERNAL_ERROR, err.message, err.code);
+      }
+      if (err.code === 'period_not_closed') {
+        return apiError(
+          409,
+          'invalid_request_error',
+          ErrorCode.VALIDATION_ERROR,
+          err.message,
+          err.code,
+        );
+      }
+      if (err.code === 'usage_unbillable') {
+        return apiError(
+          422,
+          'invalid_request_error',
+          ErrorCode.VALIDATION_ERROR,
+          err.message,
+          err.code,
+        );
       }
       return apiError(
         400,

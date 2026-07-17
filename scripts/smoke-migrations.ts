@@ -5,11 +5,10 @@
 import postgres from 'postgres';
 import fs from 'node:fs';
 import path from 'node:path';
+import { parseMigrationDatabaseEnv } from './migration-database-env.js';
 
 async function main() {
-  const baseUrl =
-    process.env['DATABASE_URL'] ??
-    'postgresql://pylva:pylva_dev@localhost:5432/pylva';
+  const { databaseUrl: baseUrl } = parseMigrationDatabaseEnv(process.env);
   const sql = postgres(baseUrl);
   const dbName = `pylva_m_smoke_${Date.now().toString(36)}`;
   console.log('Creating test DB:', dbName);

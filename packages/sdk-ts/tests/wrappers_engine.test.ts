@@ -21,9 +21,9 @@ vi.mock('../src/core/budget_accumulator.js', () => ({
 const { runWithEngine, attachPylvaMetadata } = await import('../src/wrappers/_engine.js');
 const { _resetEngineForTests } = await import('../src/core/rules_engine.js');
 const { check } = await import('../src/core/budget_accumulator.js');
-const { _resetFailoverForTests, ensureState, recordOutcome } = await import(
-  '../src/core/failover.js'
-);
+const { init, _resetConfigForTests } = await import('../src/core/config.js');
+const { _resetFailoverForTests, ensureState, recordOutcome } =
+  await import('../src/core/failover.js');
 const { PylvaBudgetExceeded } = await import('../src/errors/budget_exceeded.js');
 
 const FALLBACK = {
@@ -42,6 +42,7 @@ beforeEach(() => {
   vi.mocked(check).mockReturnValue({ over_limit: false, accumulated_usd: 0, projected_usd: 0 });
   _resetEngineForTests();
   _resetFailoverForTests();
+  _resetConfigForTests();
 });
 
 describe('runWithEngine — pass-through (no rules)', () => {
@@ -297,6 +298,40 @@ describe('runWithEngine — failover outcome recording', () => {
     expect(samples[0]?.ok).toBe(false);
   });
 
+  it('does not record a late old-identity provider failure in the new tenant state', async () => {
+    pushFailoverRule();
+    init({ apiKey: `pv_live_aabbccdd_${'a'.repeat(32)}`, localMode: true });
+    let rejectProvider!: (error: Error) => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const providerCall = new Promise<never>((_resolve, reject) => {
+      rejectProvider = reject;
+    });
+    const pending = runWithEngine({
+      request: { model: 'gpt-4o' },
+      providerId: Provider.OPENAI,
+      ctx: {
+        customer_id: 'cust_old',
+        step_name: null,
+        provider: Provider.OPENAI,
+        model: 'gpt-4o',
+      },
+      call: async () => {
+        markStarted();
+        return providerCall;
+      },
+    });
+    await started;
+
+    init({ apiKey: `pv_live_bbccddee_${'b'.repeat(32)}`, localMode: true });
+    rejectProvider(new Error('late tenant-A failure'));
+
+    await expect(pending).rejects.toThrow('late tenant-A failure');
+    expect(ensureState(FAILOVER_CFG).samples).toHaveLength(0);
+  });
+
   it('mentions the Pylva alias in missing-backup warnings', async () => {
     pushFailoverRule();
     recordOutcome(FAILOVER_CFG, false, 0);
@@ -311,9 +346,7 @@ describe('runWithEngine — failover outcome recording', () => {
     const warning = out.metadata.warnings?.find(
       (w) => w.code === RuleWarningCode.FAILOVER_MISSING_BACKUP,
     );
-    expect(warning?.message).toContain(
-      'new Pylva({ providers: { "anthropic": client } })',
-    );
+    expect(warning?.message).toContain('new Pylva({ providers: { "anthropic": client } })');
     expect(warning?.message).not.toContain('constructor alias');
   });
 });

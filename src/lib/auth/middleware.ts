@@ -227,6 +227,10 @@ export interface RateLimitConfig {
 
 export const RATE_LIMIT_PRESETS = {
   telemetry: { maxRequests: 1000, windowMs: 60_000 } satisfies RateLimitConfig,
+  // Authoritative reserve + one settlement is at least two requests per paid
+  // attempt. Keep this data-plane bucket separate from lower-volume dashboard
+  // configuration traffic and leave headroom for idempotent transport retries.
+  budgetControl: { maxRequests: 600, windowMs: 60_000 } satisfies RateLimitConfig,
   controlPlane: { maxRequests: 100, windowMs: 60_000 } satisfies RateLimitConfig,
   // B2a D39 — dashboard reads generous, writes restricted
   dashboardRead: { maxRequests: 120, windowMs: 60_000 } satisfies RateLimitConfig,

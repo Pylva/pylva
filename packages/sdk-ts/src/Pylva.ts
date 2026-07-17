@@ -25,14 +25,31 @@
 // that use reliability_failover rules should use this explicit-client
 // constructor so backup-provider clients can be registered.
 
-import { init as initSdk, type InitConfig } from './core/config.js';
+import { type InitConfig } from './core/config.js';
+import { installSdkConfig } from './core/identity.js';
 import { applyAllPatches } from './wrappers/_patch.js';
 import { initAccumulator } from './core/budget_accumulator.js';
 import { ensurePricingCache } from './core/pricing_cache.js';
 import { ensureRulesCache, getCachedRules } from './core/rules_cache.js';
 import { validateFailoverWrappers } from './wrappers/_init_validation.js';
-import { registerProviderClient, registerProviderClients } from './core/client_registry.js';
-import { configureNonLlmPolicy } from './core/non_llm_policy.js';
+import { registerProviderClient } from './core/client_registry.js';
+import {
+  ready,
+  controlStatus,
+  reserveUsage,
+  commitUsage,
+  releaseUsage,
+  extendUsage,
+  type CommitUsageInput,
+  type CommitUsageResult,
+  type ControlReadyResult,
+  type ExtendUsageInput,
+  type ExtendUsageResult,
+  type ReleaseUsageInput,
+  type ReleaseUsageResult,
+  type ReserveUsageInput,
+  type ReserveUsageResult,
+} from './core/control_client.js';
 
 export interface PylvaOptions extends InitConfig {
   /** Builder-instantiated OpenAI client used for failover-targeted calls. */
@@ -49,8 +66,13 @@ export class Pylva {
 
   constructor(options: PylvaOptions) {
     const { openai, anthropic, providers, ...initConfig } = options;
-    initSdk(initConfig);
-    configureNonLlmPolicy(initConfig.nonLlm);
+    // Materialize arbitrary provider objects before publishing a new SDK
+    // identity. Object.entries can execute Proxy traps or property getters;
+    // registration from this detached list is total after installation.
+    const providerEntries = providers
+      ? Object.entries(providers).map(([provider, client]) => ({ provider, client }))
+      : [];
+    installSdkConfig(initConfig);
     try {
       applyAllPatches();
     } catch {
@@ -58,7 +80,10 @@ export class Pylva {
     }
     if (openai) registerProviderClient('openai', openai);
     if (anthropic) registerProviderClient('anthropic', anthropic);
-    if (providers) registerProviderClients(providers);
+    for (let index = 0; index < providerEntries.length; index += 1) {
+      const entry = providerEntries[index];
+      if (entry) registerProviderClient(entry.provider, entry.client);
+    }
     this.hasOpenAi = openai != null;
     this.hasAnthropic = anthropic != null;
 
@@ -76,4 +101,30 @@ export class Pylva {
         /* R1 */
       });
   }
+
+  ready(): Promise<boolean> {
+    return ready();
+  }
+
+  controlStatus(): Promise<ControlReadyResult> {
+    return controlStatus();
+  }
+
+  reserveUsage(input: ReserveUsageInput): Promise<ReserveUsageResult> {
+    return reserveUsage(input);
+  }
+
+  commitUsage(input: CommitUsageInput): Promise<CommitUsageResult> {
+    return commitUsage(input);
+  }
+
+  releaseUsage(input: ReleaseUsageInput): Promise<ReleaseUsageResult> {
+    return releaseUsage(input);
+  }
+
+  extendUsage(input: ExtendUsageInput): Promise<ExtendUsageResult> {
+    return extendUsage(input);
+  }
 }
+
+Object.defineProperty(Pylva, 'name', { value: 'Pylva' });

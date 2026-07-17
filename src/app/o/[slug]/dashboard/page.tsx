@@ -15,7 +15,7 @@ import { AnomalyContextPanel } from '@/components/anomalies/AnomalyContextPanel'
 import { PageHeader } from '@/components/dashboard/PageHeader';
 import { COPY } from '@/lib/copy';
 import { env } from '@/lib/config';
-import { formatUsd, formatInt } from '@/lib/formatting';
+import { formatTelemetryUsd, formatInt } from '@/lib/formatting';
 import { logger } from '@/lib/logger';
 
 export const metadata: Metadata = { title: 'Overview' };
@@ -106,7 +106,7 @@ export default async function OverviewPage({
         />
       ) : (
         <section className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <Kpi label="Total spend" value={formatUsd(data.kpis.total_spend_usd)} />
+          <Kpi label="Total spend" value={formatTelemetryUsd(data.kpis.total_spend_usd)} />
           <Kpi label="Events" value={formatInt(data.kpis.event_count)} />
           <Kpi label={COPY.end_user_plural} value={formatInt(data.kpis.customer_count)} />
         </section>
@@ -127,7 +127,7 @@ export default async function OverviewPage({
               >
                 <span className="truncate font-medium">{row.customer_id}</span>
                 <span className="text-sm tabular-nums text-[color:var(--muted-foreground)]">
-                  {formatUsd(row.total_spend_usd)}
+                  {formatTelemetryUsd(row.total_spend_usd)}
                 </span>
               </li>
             ))}

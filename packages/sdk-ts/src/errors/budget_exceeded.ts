@@ -15,7 +15,47 @@ import {
   PYLVA_BUDGET_EXCEEDED_CODE,
   BudgetExceededSource,
   type BudgetExceededSource as BudgetExceededSourceType,
-} from '@pylva/shared';
+} from '@pylva/shared/budget-errors';
+
+export interface AuthoritativeBudgetRuleSnapshot {
+  ruleId: string;
+  scope: 'per_customer' | 'pooled';
+  customerId: string | null;
+  period: 'hour' | 'day' | 'week' | 'month';
+  periodStart: string;
+  periodEnd: string;
+}
+
+export interface AuthoritativeBudgetWarning {
+  code: 'advisory_budget_exceeded';
+  ruleId: string;
+  limitUsd: string;
+  projectedUsd: string;
+}
+
+/**
+ * Exact, schema-validated denial evidence from authoritative control.
+ *
+ * The legacy numeric fields on `PylvaBudgetExceeded` remain available for
+ * compatibility. This additive object preserves every exact decimal string
+ * so callers never have to rely on a binary floating-point projection.
+ */
+export interface AuthoritativeBudgetDenial {
+  schemaVersion: '1.0';
+  decision: 'denied';
+  allowed: false;
+  decisionId: string;
+  operationId: string;
+  state: 'refused';
+  decidingRule: AuthoritativeBudgetRuleSnapshot;
+  committedUsd: string;
+  reservedUsd: string;
+  unresolvedUsd: string;
+  requestedUsd: string;
+  limitUsd: string;
+  remainingUsd: string;
+  warnings: AuthoritativeBudgetWarning[];
+}
 
 export interface PylvaBudgetExceededInit {
   source: BudgetExceededSourceType;
@@ -26,10 +66,11 @@ export interface PylvaBudgetExceededInit {
   limit_usd: number;
   accumulated_usd: number;
   estimated_usd: number; // 0 when we can't estimate (e.g. report_usage)
+  authoritativeDenial?: AuthoritativeBudgetDenial;
 }
 
-export class PylvaBudgetExceeded extends Error {
-  readonly code = PYLVA_BUDGET_EXCEEDED_CODE;
+export interface PylvaBudgetExceeded extends Error {
+  readonly code: typeof PYLVA_BUDGET_EXCEEDED_CODE;
   readonly source: BudgetExceededSourceType;
   readonly rule_id: string;
   readonly customer_id: string | null;
@@ -38,6 +79,30 @@ export class PylvaBudgetExceeded extends Error {
   readonly limit_usd: number;
   readonly accumulated_usd: number;
   readonly estimated_usd: number;
+  readonly authoritativeDenial: AuthoritativeBudgetDenial | undefined;
+}
+
+interface PylvaBudgetExceededConstructor extends Function {
+  new (init: PylvaBudgetExceededInit): PylvaBudgetExceeded;
+  readonly prototype: PylvaBudgetExceeded;
+}
+
+// The published package routes every entrypoint through one physical error
+// module, so ordinary module identity provides the cross-format constructor.
+export const PylvaBudgetExceeded = class PylvaBudgetExceeded
+  extends Error
+  implements PylvaBudgetExceeded
+{
+  readonly code = PYLVA_BUDGET_EXCEEDED_CODE;
+  declare readonly source: BudgetExceededSourceType;
+  declare readonly rule_id: string;
+  declare readonly customer_id: string | null;
+  declare readonly period: 'hour' | 'day' | 'week' | 'month';
+  declare readonly period_start: string;
+  declare readonly limit_usd: number;
+  declare readonly accumulated_usd: number;
+  declare readonly estimated_usd: number;
+  declare readonly authoritativeDenial: AuthoritativeBudgetDenial | undefined;
 
   constructor(init: PylvaBudgetExceededInit) {
     const msg = formatMessage(init);
@@ -51,8 +116,10 @@ export class PylvaBudgetExceeded extends Error {
     this.limit_usd = init.limit_usd;
     this.accumulated_usd = init.accumulated_usd;
     this.estimated_usd = init.estimated_usd;
+    this.authoritativeDenial = init.authoritativeDenial;
   }
-}
+} as PylvaBudgetExceededConstructor;
+Object.defineProperty(PylvaBudgetExceeded, 'name', { value: 'PylvaBudgetExceeded' });
 
 function formatMessage(init: PylvaBudgetExceededInit): string {
   const who = init.customer_id ?? 'pooled';

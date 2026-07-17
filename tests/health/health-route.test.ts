@@ -5,9 +5,47 @@
 
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import {
+  REQUIRED_AUTHORITATIVE_TABLE_CONTRACTS,
+  REQUIRED_BUDGET_COST_EVENT_COLUMNS,
   REQUIRED_CLICKHOUSE_TABLES,
+  REQUIRED_COST_EVENTS_COLUMN_TYPES,
   REQUIRED_COST_EVENTS_COLUMNS,
 } from '../../src/lib/clickhouse/readiness.js';
+
+function healthyClickHouseRows(): Array<Record<string, unknown>> {
+  return [
+    ...REQUIRED_CLICKHOUSE_TABLES.map((name) => {
+      const contract =
+        REQUIRED_AUTHORITATIVE_TABLE_CONTRACTS[
+          name as keyof typeof REQUIRED_AUTHORITATIVE_TABLE_CONTRACTS
+        ];
+      return {
+        kind: 'table',
+        name,
+        ...(contract
+          ? {
+              engine: contract.engine,
+              sorting_key: contract.sortingKey,
+              primary_key: contract.primaryKey,
+              definition: contract.definitionFragments.join(' '),
+            }
+          : {}),
+      };
+    }),
+    ...REQUIRED_COST_EVENTS_COLUMNS.map((name) => ({
+      kind: 'column',
+      name,
+      type: REQUIRED_COST_EVENTS_COLUMN_TYPES[
+        name as keyof typeof REQUIRED_COST_EVENTS_COLUMN_TYPES
+      ],
+    })),
+    ...Object.entries(REQUIRED_BUDGET_COST_EVENT_COLUMNS).map(([name, type]) => ({
+      kind: 'budget_column',
+      name,
+      type,
+    })),
+  ];
+}
 
 type TestSchemaStatus = {
   expected_head: string;
@@ -57,10 +95,7 @@ const { GET } = await import('../../src/app/api/v1/health/route.js');
 
 describe('GET /api/v1/health', () => {
   beforeEach(() => {
-    mocks.clickhouseRows.value = [
-      ...REQUIRED_CLICKHOUSE_TABLES.map((name) => ({ kind: 'table', name })),
-      ...REQUIRED_COST_EVENTS_COLUMNS.map((name) => ({ kind: 'column', name })),
-    ];
+    mocks.clickhouseRows.value = healthyClickHouseRows();
     mocks.redisUp.value = true;
     mocks.schemaStatus.value = {
       expected_head: '003_test.sql',
@@ -200,7 +235,13 @@ describe('GET /api/v1/health', () => {
   it('marks ClickHouse down when the required cost_events table is missing', async () => {
     mocks.clickhouseRows.value = [
       { kind: 'table', name: 'cost_daily_agg_v2' },
-      ...REQUIRED_COST_EVENTS_COLUMNS.map((name) => ({ kind: 'column', name })),
+      ...REQUIRED_COST_EVENTS_COLUMNS.map((name) => ({
+        kind: 'column',
+        name,
+        type: REQUIRED_COST_EVENTS_COLUMN_TYPES[
+          name as keyof typeof REQUIRED_COST_EVENTS_COLUMN_TYPES
+        ],
+      })),
     ];
     const response = await GET();
     expect(response.status).toBe(503);
@@ -222,8 +263,9 @@ describe('GET /api/v1/health', () => {
 
   it('marks ClickHouse down when required launch columns are missing', async () => {
     mocks.clickhouseRows.value = [
-      ...REQUIRED_CLICKHOUSE_TABLES.map((name) => ({ kind: 'table', name })),
+      ...healthyClickHouseRows().filter((row) => row.kind === 'table'),
       { kind: 'column', name: 'builder_id' },
+      ...healthyClickHouseRows().filter((row) => row.kind === 'budget_column'),
     ];
     const response = await GET();
     expect(response.status).toBe(503);
@@ -244,8 +286,7 @@ describe('GET /api/v1/health', () => {
 
   it('marks ClickHouse down when model aggregate backfill is unverified and raw events exist', async () => {
     mocks.clickhouseRows.value = [
-      ...REQUIRED_CLICKHOUSE_TABLES.map((name) => ({ kind: 'table', name })),
-      ...REQUIRED_COST_EVENTS_COLUMNS.map((name) => ({ kind: 'column', name })),
+      ...healthyClickHouseRows(),
       { kind: 'cost_events_presence', name: 'present' },
       { kind: 'model_agg_status', name: 'untrusted' },
     ];

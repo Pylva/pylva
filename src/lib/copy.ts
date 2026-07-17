@@ -23,6 +23,7 @@ export const COPY = {
   nav_end_users: 'End-users',
   nav_models: 'Models',
   nav_traces: 'Traces',
+  nav_budget_activity: 'Budget activity',
   nav_rules: 'Rules',
   nav_settings: 'Settings',
   nav_billing: 'Billing', // populated in B2b; sidebar link placeholder in T1

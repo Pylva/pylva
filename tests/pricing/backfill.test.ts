@@ -89,7 +89,13 @@ describe('pricing backfill Decimal(10,6) guards', () => {
 
     await expect(runBackfill()).resolves.toEqual({ groups: 1, updated: 1 });
 
+    const discovery = mocks.clickhouseQuery.mock.calls[0]?.[0] as { query: string };
+    const remaining = mocks.clickhouseQuery.mock.calls[1]?.[0] as { query: string };
+    expect(discovery.query).toContain("event_origin = 'legacy'");
+    expect(remaining.query).toContain("event_origin = 'legacy'");
+
     const command = mocks.clickhouseCommand.mock.calls[0]?.[0] as {
+      clickhouse_settings: Record<string, unknown>;
       query: string;
       query_params: Record<string, unknown>;
     };
@@ -100,6 +106,10 @@ describe('pricing backfill Decimal(10,6) guards', () => {
       maxCostUsd: MAX_STORABLE_COST_USD,
       metric: 'search_query',
       ppuUsd: 0.2,
+    });
+    expect(command.clickhouse_settings).toEqual({
+      mutations_sync: '1',
+      compile_expressions: 0,
     });
     expect(sqlText(0)).toContain('FROM custom_pricing');
     expect(sqlText(0)).toContain('builder_id =');
@@ -158,6 +168,7 @@ describe('pricing backfill Decimal(10,6) guards', () => {
     await expect(runBackfill()).resolves.toEqual({ groups: 1, updated: 1 });
 
     const command = mocks.clickhouseCommand.mock.calls[0]?.[0] as {
+      clickhouse_settings: Record<string, unknown>;
       query: string;
       query_params: Record<string, unknown>;
     };
@@ -176,6 +187,10 @@ describe('pricing backfill Decimal(10,6) guards', () => {
       model: 'gpt-4o',
       outUsd: 1000,
       provider: 'openai',
+    });
+    expect(command.clickhouse_settings).toEqual({
+      mutations_sync: '1',
+      compile_expressions: 0,
     });
     expect(sqlText(0)).toContain('FROM custom_pricing');
     expect(sqlText(0)).toContain('builder_id =');

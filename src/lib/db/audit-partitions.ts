@@ -23,25 +23,47 @@ export const AUDIT_PARTITION_MONTHS_AHEAD = 12;
 export interface AuditPartitionSpec {
   /** Partition table name, e.g. `audit_log_y2026m07`. */
   name: string;
-  /** Inclusive lower bound, `YYYY-MM-DD` (first day of the month, UTC). */
+  /** Logical lower-bound month, `YYYY-MM-DD` (first day, selected in UTC). */
   from: string;
-  /** Exclusive upper bound, `YYYY-MM-DD` (first day of the next month, UTC). */
+  /** Logical upper-bound month, `YYYY-MM-DD` (first day of the next month). */
   to: string;
 }
 
-// Validated-by-construction shapes. The ensure-audit-partitions cron
-// interpolates these into DDL (Postgres cannot bind identifiers or partition
-// bounds as parameters), so it re-checks each spec against these patterns
-// before building SQL — defense in depth against any future caller that feeds
-// untrusted input into a spec.
+// Validated-by-construction shapes. The ensure-audit-partitions cron passes the
+// lower-bound date to a bounded database function, which independently derives
+// the identifier and upper bound. Re-checking the complete semantic spec here
+// is defense in depth against a future caller feeding inconsistent values into
+// the route.
 const PARTITION_NAME_RE = /^audit_log_y\d{4}m\d{2}$/;
 const PARTITION_DATE_RE = /^\d{4}-\d{2}-01$/;
 
 export function isValidPartitionSpec(spec: AuditPartitionSpec): boolean {
+  if (
+    !PARTITION_NAME_RE.test(spec.name) ||
+    !PARTITION_DATE_RE.test(spec.from) ||
+    !PARTITION_DATE_RE.test(spec.to)
+  ) {
+    return false;
+  }
+
+  const [fromYearText, fromMonthText] = spec.from.split('-');
+  const fromYear = Number(fromYearText);
+  const fromMonth = Number(fromMonthText);
+  if (
+    !Number.isInteger(fromYear) ||
+    !Number.isInteger(fromMonth) ||
+    fromMonth < 1 ||
+    fromMonth > 12
+  ) {
+    return false;
+  }
+
+  const normalizedFrom = isoDate(fromYear, fromMonth - 1);
+  const expectedTo = isoDate(fromYear, fromMonth);
   return (
-    PARTITION_NAME_RE.test(spec.name) &&
-    PARTITION_DATE_RE.test(spec.from) &&
-    PARTITION_DATE_RE.test(spec.to)
+    spec.from === normalizedFrom &&
+    spec.to === expectedTo &&
+    spec.name === `audit_log_y${fromYearText}m${fromMonthText}`
   );
 }
 
@@ -56,10 +78,11 @@ function isoDate(year: number, monthIndex0: number): string {
 }
 
 /**
- * Monthly partition specs covering the month containing `now` plus the next
- * `monthsAhead` months (UTC). Pure and deterministic — the cron route turns
- * each spec into `CREATE TABLE IF NOT EXISTS ... PARTITION OF audit_log`, so
- * re-runs are idempotent.
+ * Monthly partition specs covering the UTC month containing `now` plus the
+ * next `monthsAhead` months. Pure and deterministic — the cron route supplies
+ * each lower bound to the bounded partition function. PostgreSQL interprets
+ * those DATE boundaries in the historical migration calendar zone captured by
+ * migration 054, which keeps old and new partitions contiguous.
  *
  * The naming and bounds match migration 001/032 exactly (`audit_log_yYYYYmMM`,
  * `[first-of-month, first-of-next-month)`) so the manager never collides with,

@@ -1,7 +1,7 @@
 import * as v from 'valibot';
+import { parseMigrationDatabaseEnv } from './migration-database-env.js';
 
 const DbMigrateEnvSchema = v.object({
-  DATABASE_URL: v.pipe(v.string(), v.minLength(1)),
   MIGRATE_LOCK_TIMEOUT: v.optional(v.pipe(v.string(), v.regex(/^[0-9]+(ms|s|min)?$/))),
 });
 
@@ -11,12 +11,9 @@ export interface DbMigrateEnv {
 }
 
 export function parseDbMigrateEnv(source: Record<string, string | undefined>): DbMigrateEnv {
-  if (!source['DATABASE_URL']) {
-    throw new Error('DATABASE_URL environment variable is required');
-  }
+  const migrationDatabase = parseMigrationDatabaseEnv(source);
 
   const parsed = v.safeParse(DbMigrateEnvSchema, {
-    DATABASE_URL: source['DATABASE_URL'],
     MIGRATE_LOCK_TIMEOUT: source['MIGRATE_LOCK_TIMEOUT'],
   });
 
@@ -25,11 +22,11 @@ export function parseDbMigrateEnv(source: Record<string, string | undefined>): D
   }
 
   if (parsed.output.MIGRATE_LOCK_TIMEOUT === undefined) {
-    return { databaseUrl: parsed.output.DATABASE_URL };
+    return { databaseUrl: migrationDatabase.databaseUrl };
   }
 
   return {
-    databaseUrl: parsed.output.DATABASE_URL,
+    databaseUrl: migrationDatabase.databaseUrl,
     lockTimeout: parsed.output.MIGRATE_LOCK_TIMEOUT,
   };
 }

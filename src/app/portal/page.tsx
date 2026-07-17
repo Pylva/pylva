@@ -26,6 +26,7 @@ import {
   resolvePortalRange,
   type PortalTrendPoint,
 } from '@/lib/portal/data';
+import { formatTelemetryUsd } from '@/lib/formatting';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -80,12 +81,7 @@ export default async function PortalPage({
         ? "This portal is not available on the builder's current plan."
         : 'This portal is currently unavailable.';
 
-    return (
-      <PortalError
-        title="Portal unavailable"
-        body={body}
-      />
-    );
+    return <PortalError title="Portal unavailable" body={body} />;
   }
 
   const [config, range] = await Promise.all([
@@ -116,8 +112,6 @@ export default async function PortalPage({
   const logo = cfg?.logo_url ?? null;
   const primaryColor = cfg?.primary_color ?? '#4f46e5';
 
-  const formatUsd = (n: number): string => `$${n.toFixed(2)}`;
-
   return (
     <main data-portal className="min-h-screen px-4 py-8 md:py-12">
       <div className="mx-auto w-full max-w-3xl">
@@ -132,7 +126,7 @@ export default async function PortalPage({
           </div>
           <div className="mt-2 flex items-baseline gap-3">
             <span className="text-3xl font-semibold" style={{ color: primaryColor }}>
-              {formatUsd(overview.total_cost_usd)}
+              {formatTelemetryUsd(overview.total_cost_usd)}
             </span>
             <span className="text-sm text-[color:var(--portal-muted)]">spent</span>
           </div>
@@ -146,7 +140,7 @@ export default async function PortalPage({
             <h2 className="text-xs font-semibold uppercase tracking-wider text-[color:var(--portal-muted)]">
               Daily trend
             </h2>
-            <Sparkbars points={trend} primary={primaryColor} formatUsd={formatUsd} />
+            <Sparkbars points={trend} primary={primaryColor} />
           </section>
         ) : null}
 
@@ -160,7 +154,7 @@ export default async function PortalPage({
                 <li key={row.key} className="flex items-center justify-between py-2 text-sm">
                   <span className="truncate font-medium">{row.key}</span>
                   <span className="ml-3 shrink-0 tabular-nums text-[color:var(--portal-muted)]">
-                    {formatUsd(row.cost_usd)}
+                    {formatTelemetryUsd(row.cost_usd)}
                   </span>
                 </li>
               ))}
@@ -178,7 +172,7 @@ export default async function PortalPage({
                 <li key={row.key} className="flex items-center justify-between py-2 text-sm">
                   <span className="truncate font-medium">{row.key}</span>
                   <span className="ml-3 shrink-0 tabular-nums text-[color:var(--portal-muted)]">
-                    {formatUsd(row.cost_usd)}
+                    {formatTelemetryUsd(row.cost_usd)}
                   </span>
                 </li>
               ))}
@@ -212,15 +206,7 @@ function PortalError({ title, body }: { title: string; body: string }) {
  * client-side JS, no SVG dep. Tooltips via title attribute keep the
  * mobile-first contract: tap-and-hold reveals the per-day amount.
  */
-function Sparkbars({
-  points,
-  primary,
-  formatUsd,
-}: {
-  points: PortalTrendPoint[];
-  primary: string;
-  formatUsd: (n: number) => string;
-}) {
+function Sparkbars({ points, primary }: { points: PortalTrendPoint[]; primary: string }) {
   const max = Math.max(...points.map((p) => p.cost_usd), 0.0001);
   return (
     <div className="mt-3 flex h-24 items-end gap-1">
@@ -229,14 +215,14 @@ function Sparkbars({
         return (
           <div
             key={p.day}
-            title={`${p.day} — ${formatUsd(p.cost_usd)} (${p.event_count} events)`}
+            title={`${p.day} — ${formatTelemetryUsd(p.cost_usd)} (${p.event_count} events)`}
             className="flex-1 rounded-sm"
             style={{
               height: `${pct}%`,
               backgroundColor: primary,
               opacity: p.cost_usd > 0 ? 0.85 : 0.25,
             }}
-            aria-label={`${p.day} ${formatUsd(p.cost_usd)}`}
+            aria-label={`${p.day} ${formatTelemetryUsd(p.cost_usd)}`}
           />
         );
       })}

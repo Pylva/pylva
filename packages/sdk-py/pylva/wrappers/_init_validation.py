@@ -64,8 +64,7 @@ def validate_failover_wrappers(raw_rules: list[Any]) -> None:
         # cache shouldn't crash init. Include the error type so operators
         # can pin down whether it's schema drift, encoding issues, etc.
         print(
-            f"[pylva] failover validation skipped: malformed cache "
-            f"({type(err).__name__})",
+            f"[pylva] failover validation skipped: malformed cache ({type(err).__name__})",
             flush=True,
         )
         return
@@ -94,7 +93,7 @@ def validate_failover_wrappers(raw_rules: list[Any]) -> None:
             f"{primary} → {backup}, but the {backup} SDK is neither "
             f"auto-patched nor passed to the Pylva constructor. "
             f"Either import the {backup} SDK or pass an instantiated "
-            f"client via `Pylva(..., providers={{\"{backup}\": client}})` "
+            f'client via `Pylva(..., providers={{"{backup}": client}})` '
             f"so failover can route there; otherwise calls continue on the primary and "
             f"the wrapper logs failover_missing_backup per call.",
             flush=True,

@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
+      actions: read
       contents: read
       id-token: write
     steps:
@@ -22,6 +23,7 @@ jobs:
           fetch-depth: 0
 
       - name: Verify release tag is on main
+        id: release_commit
         run: |
           git fetch --no-tags origin main:refs/remotes/origin/main
           TAG_COMMIT="$(git rev-parse "${GITHUB_SHA}^{commit}")"
@@ -29,6 +31,54 @@ jobs:
             echo "::error::Release tags must point at commits already merged to origin/main"
             exit 1
           fi
+          echo "sha=$TAG_COMMIT" >> "$GITHUB_OUTPUT"
+
+      - name: Require successful authoritative-control CI for the exact release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.release_commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          RESPONSE_FILE="$(mktemp)"
+          trap 'rm -f "$RESPONSE_FILE"' EXIT
+          curl \
+            --fail-with-body \
+            --silent \
+            --show-error \
+            --retry 3 \
+            --retry-all-errors \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/authoritative-budget-control-ci.yml/runs?head_sha=${RELEASE_SHA}&status=completed&per_page=100" \
+            > "$RESPONSE_FILE"
+          node - "$RESPONSE_FILE" <<'NODE'
+          const fs = require('node:fs');
+
+          const response = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const expectedSha = process.env.RELEASE_SHA;
+          const acceptedEvents = new Set(['push', 'workflow_dispatch', 'schedule']);
+          const runs = Array.isArray(response.workflow_runs) ? response.workflow_runs : [];
+          const successful = runs
+            .filter(
+              (run) =>
+                run.head_sha === expectedSha &&
+                run.head_branch === 'main' &&
+                run.status === 'completed' &&
+                run.conclusion === 'success' &&
+                acceptedEvents.has(run.event),
+            )
+            .sort((left, right) => String(right.updated_at).localeCompare(String(left.updated_at)));
+          if (successful.length === 0) {
+            throw new Error(
+              `No successful Authoritative Budget Control CI run on main exists for exact release SHA ${expectedSha}`,
+            );
+          }
+          const attested = successful[0];
+          console.log(
+            `Attested Authoritative Budget Control CI run ${attested.id} for ${expectedSha}: ${attested.html_url}`,
+          );
+          NODE
 
       - uses: actions/setup-python@v5
         with:
@@ -63,132 +113,108 @@ jobs:
           )
           PY
 
+      - name: Release harness unit tests
+        run: python tests/scripts/test_smoke_python_package.py
+
       - name: Test
         run: python -m pytest packages/sdk-py/tests
 
       - name: Ruff
-        run: python -m ruff check packages/sdk-py/pylva packages/sdk-py/tests
+        run: >-
+          python -m ruff check
+          packages/sdk-py/pylva
+          packages/sdk-py/tests
+          scripts/ci/smoke-python-package.py
+          tests/scripts/test_smoke_python_package.py
 
       - name: Mypy
         run: python -m mypy packages/sdk-py/pylva
 
-      - name: Build wheel and sdist
+      - name: Build wheel and sdist exactly once
         run: |
           rm -rf packages/sdk-py/dist
-          python -m build packages/sdk-py
+          python -m build --outdir packages/sdk-py/dist packages/sdk-py
 
-      - name: Inspect artifacts
+      - name: Derive exact artifact identities and hashes
+        id: artifacts
         run: |
           python - <<'PY'
+          import hashlib
+          import os
           import pathlib
-          import re
+          import tarfile
           import tomllib
           import zipfile
+          from email.parser import Parser
 
           pyproject = tomllib.loads(pathlib.Path("packages/sdk-py/pyproject.toml").read_text())
           project_name = pyproject["project"]["name"]
-          dist_stem = re.sub(r"[-_.]+", "_", project_name).lower()
           version = pyproject["project"]["version"]
           dist = pathlib.Path("packages/sdk-py/dist")
-          wheels = sorted(dist.glob(f"{dist_stem}-{version}-*.whl"))
-          sdists = sorted(dist.glob(f"{dist_stem}-{version}.tar.gz"))
-          assert len(wheels) == 1, sorted(p.name for p in dist.iterdir())
-          assert len(sdists) == 1, sorted(p.name for p in dist.iterdir())
-          with zipfile.ZipFile(wheels[0]) as zf:
-              names = set(zf.namelist())
-              assert "pylva/__init__.py" in names
-              assert "pylva/langchain/__init__.py" in names
-              assert "pylva/langchain/callback.py" in names
-              assert any(name.endswith(".dist-info/METADATA") for name in names)
-              assert any(name.endswith(".dist-info/licenses/LICENSE") for name in names)
-              metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
-              metadata = zf.read(metadata_name).decode()
-              assert f"Name: {project_name}" in metadata
-              assert f"Version: {version}" in metadata
-              assert "Provides-Extra: langchain" in metadata
-              assert "Requires-Dist: langchain<2.0,>=1.0; extra == 'langchain'" in metadata
-              assert "Requires-Dist: langgraph<2.0,>=1.0; extra == 'langchain'" in metadata
+          files = sorted(path for path in dist.iterdir() if path.is_file())
+          wheels = [path for path in files if path.suffix == ".whl"]
+          sdists = [path for path in files if path.name.endswith(".tar.gz")]
+          assert len(files) == 2 and len(wheels) == 1 and len(sdists) == 1, [
+              path.name for path in files
+          ]
+
+          with zipfile.ZipFile(wheels[0]) as archive:
+              metadata_names = [
+                  name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
+              ]
+              assert len(metadata_names) == 1, metadata_names
+              wheel_metadata = Parser().parsestr(archive.read(metadata_names[0]).decode())
+          with tarfile.open(sdists[0], mode="r:gz") as archive:
+              metadata_members = [
+                  member
+                  for member in archive.getmembers()
+                  if member.isfile()
+                  and member.name.count("/") == 1
+                  and member.name.endswith("/PKG-INFO")
+              ]
+              assert len(metadata_members) == 1, [member.name for member in metadata_members]
+              metadata_file = archive.extractfile(metadata_members[0])
+              assert metadata_file is not None
+              sdist_metadata = Parser().parsestr(metadata_file.read().decode())
+
+          for artifact_metadata in (wheel_metadata, sdist_metadata):
+              assert artifact_metadata["Name"] == project_name
+              assert artifact_metadata["Version"] == version
+
+          def sha256(path):
+              digest = hashlib.sha256()
+              with path.open("rb") as artifact:
+                  for chunk in iter(lambda: artifact.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+          outputs = {
+              "name": project_name,
+              "version": version,
+              "wheel": str(wheels[0].resolve()),
+              "sdist": str(sdists[0].resolve()),
+              "wheel_sha256": sha256(wheels[0]),
+              "sdist_sha256": sha256(sdists[0]),
+          }
+          with pathlib.Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              for key, value in outputs.items():
+                  assert "\n" not in value and "\r" not in value
+                  output.write(f"{key}={value}\n")
+          print(
+              f"Built {project_name}@{version}: "
+              f"{wheels[0].name} ({outputs['wheel_sha256']}), "
+              f"{sdists[0].name} ({outputs['sdist_sha256']})"
+          )
           PY
 
-      - name: Clean install smoke
-        run: |
-          python -m venv /tmp/pylva-smoke
-          /tmp/pylva-smoke/bin/python -m pip install --upgrade pip
-          WHEEL=$(ls packages/sdk-py/dist/pylva_sdk-*.whl | head -1)
-          /tmp/pylva-smoke/bin/python -m pip install "$WHEEL"
-          /tmp/pylva-smoke/bin/python - <<'PY'
-          import pathlib
-          import sys
-          import tomllib
-          import types
-
-          import pylva
-          from pylva.langchain import PylvaCallbackHandler
-          from pylva.core import telemetry
-          from pylva.wrappers import anthropic_wrapper, openai_wrapper
-
-          expected = tomllib.loads(pathlib.Path("packages/sdk-py/pyproject.toml").read_text())["project"]["version"]
-          assert pylva.__version__ == expected, f"{pylva.__version__!r} != {expected!r}"
-          assert PylvaCallbackHandler.__name__ == "PylvaCallbackHandler"
-          pylva.init("pv_live_12345678_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", local_mode=True)
-
-          class OpenAIUsage:
-              prompt_tokens = 11
-              completion_tokens = 7
-
-          class OpenAIResponse:
-              model = "gpt-4o-mini"
-              usage = OpenAIUsage()
-
-          class Completions:
-              def create(self, **kwargs):
-                  assert kwargs["messages"][0]["content"] == "hello"
-                  return OpenAIResponse()
-
-          openai_pkg = types.ModuleType("openai")
-          resources_pkg = types.ModuleType("openai.resources")
-          chat_pkg = types.ModuleType("openai.resources.chat")
-          completions_mod = types.ModuleType("openai.resources.chat.completions")
-          completions_mod.Completions = Completions
-          sys.modules["openai"] = openai_pkg
-          sys.modules["openai.resources"] = resources_pkg
-          sys.modules["openai.resources.chat"] = chat_pkg
-          sys.modules["openai.resources.chat.completions"] = completions_mod
-          openai_wrapper._reset_openai_patch_for_tests()
-          openai_wrapper.try_patch_openai()
-          Completions().create(model="gpt-4o-mini", messages=[{"role": "user", "content": "hello"}])
-
-          class AnthropicUsage:
-              input_tokens = 13
-              output_tokens = 5
-
-          class AnthropicResponse:
-              model = "claude-3-5-sonnet-20241022"
-              usage = AnthropicUsage()
-
-          class Messages:
-              def create(self, **kwargs):
-                  assert kwargs["messages"][0]["content"] == "hello"
-                  return AnthropicResponse()
-
-          anthropic_pkg = types.ModuleType("anthropic")
-          anthropic_resources_pkg = types.ModuleType("anthropic.resources")
-          messages_mod = types.ModuleType("anthropic.resources.messages")
-          messages_mod.Messages = Messages
-          sys.modules["anthropic"] = anthropic_pkg
-          sys.modules["anthropic.resources"] = anthropic_resources_pkg
-          sys.modules["anthropic.resources.messages"] = messages_mod
-          anthropic_wrapper._reset_anthropic_patch_for_tests()
-          anthropic_wrapper.try_patch_anthropic()
-          Messages().create(model="claude-3-5-sonnet-20241022", messages=[{"role": "user", "content": "hello"}])
-
-          assert telemetry.buffer_size() == 2
-          providers = {event["provider"] for event in telemetry._state.buffer}
-          assert providers == {"openai", "anthropic"}
-          for event in telemetry._state.buffer:
-              assert "messages" not in event
-              assert "prompt" not in event
-          PY
+      - name: Inspect and clean-install both immutable artifacts
+        run: >-
+          python scripts/ci/smoke-python-package.py packages/sdk-py
+          --verify-existing
+          --wheel '${{ steps.artifacts.outputs.wheel }}'
+          --sdist '${{ steps.artifacts.outputs.sdist }}'
+          --wheel-sha256 '${{ steps.artifacts.outputs.wheel_sha256 }}'
+          --sdist-sha256 '${{ steps.artifacts.outputs.sdist_sha256 }}'
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1

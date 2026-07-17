@@ -10,9 +10,9 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { apiFetch, orgEventSource } from '@/lib/dashboard/api-client';
+import { formatLiveInteger } from '@/lib/live-number-formatting';
 import { LiveCounter } from './LiveCounter';
 import { Kpi } from './Kpi';
-import { formatInt } from '@/lib/formatting';
 
 type FeedStatus = 'connecting' | 'live' | 'reconnecting' | 'fallback';
 
@@ -198,7 +198,7 @@ export function LiveCostFeed(props: LiveCostFeedProps): React.ReactElement {
           <LiveCounter value={eventCount} format="int" />
         </Kpi>
         <Kpi label={customerLabelPlural}>
-          <span aria-label={`${endUserLabel} count`}>{formatInt(customerCount)}</span>
+          <span aria-label={`${endUserLabel} count`}>{formatLiveInteger(customerCount)}</span>
         </Kpi>
       </div>
     </section>

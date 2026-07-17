@@ -11,13 +11,10 @@ import {
   Provider,
   TokenCountSource,
 } from '@pylva/shared';
-import { _resetConfigForTests } from '../src/core/config.js';
+import { _resetConfigForTests, getConfig } from '../src/core/config.js';
 import { track } from '../src/core/context.js';
 import { enqueue } from '../src/core/telemetry.js';
-import {
-  PylvaCallbackHandler,
-  AsyncPylvaCallbackHandler,
-} from '../src/langgraph.js';
+import { PylvaCallbackHandler, AsyncPylvaCallbackHandler } from '../src/langgraph.js';
 import { PylvaCallbackHandler as LangChainPylvaCallbackHandler } from '../src/langchain.js';
 
 const mocks = vi.hoisted(() => ({
@@ -36,6 +33,7 @@ vi.mock('../src/core/budget_accumulator.js', () => ({
 }));
 
 const VALID_KEY = 'pv_live_aabbccdd_' + 'a'.repeat(32);
+const SECOND_KEY = 'pv_live_bbccddee_' + 'b'.repeat(32);
 const PROMPT_SECRET = 'PROMPT SECRET SHOULD NOT LEAVE PROCESS';
 const COMPLETION_SECRET = 'COMPLETION SECRET SHOULD NOT LEAVE PROCESS';
 const TOOL_SECRET = 'TOOL SECRET SHOULD NOT LEAVE PROCESS';
@@ -114,6 +112,59 @@ describe('PylvaCallbackHandler', () => {
 
   afterEach(() => {
     _resetConfigForTests();
+  });
+
+  it('passes authoritative-control configuration through callback initialization', () => {
+    new PylvaCallbackHandler({
+      apiKey: VALID_KEY,
+      control: { mode: 'enforce', onUnavailable: 'deny', timeoutMs: 1_500 },
+    });
+
+    expect(getConfig()?.control).toEqual({
+      mode: 'enforce',
+      onUnavailable: 'deny',
+      timeoutMs: 1_500,
+    });
+  });
+
+  it('drops an old-identity LLM completion and stale chain-end flush after reinit', async () => {
+    const rootRunId = runId(900);
+    const llmRunId = runId(901);
+    const handler = new PylvaCallbackHandler({
+      apiKey: VALID_KEY,
+      endpoint: 'https://same.test',
+      flushOnChainEnd: true,
+    });
+    handler.handleChainStart({ name: 'graph' }, {}, rootRunId);
+    handler.handleLLMStart({ name: 'ChatOpenAI' }, ['private prompt'], llmRunId, rootRunId, {
+      invocation_params: { model: 'gpt-4o-mini', provider: 'openai' },
+    });
+
+    new PylvaCallbackHandler({ apiKey: SECOND_KEY, endpoint: 'https://same.test' });
+    handler.handleLLMEnd(successOutput(3, 2), llmRunId, rootRunId);
+    // Framework retries can deliver the same terminal callback after the
+    // stale state was already removed. It must not fall back to tenant B.
+    handler.handleLLMEnd(successOutput(3, 2), llmRunId, rootRunId);
+    handler.handleLLMEnd(successOutput(3, 2), runId(902), rootRunId);
+    await handler.handleChainEnd({}, rootRunId);
+    await handler.handleChainEnd({}, rootRunId);
+
+    expect(mocks.enqueue).not.toHaveBeenCalled();
+    expect(mocks.flush).not.toHaveBeenCalled();
+  });
+
+  it('bounds completed-run tombstones for long-lived callback handlers', () => {
+    const handler = new PylvaCallbackHandler();
+    const first = runId(20_000);
+    void handler.handleChainEnd({}, first);
+    for (let index = 1; index <= 10_000; index += 1) {
+      void handler.handleChainEnd({}, runId(20_000 + index));
+    }
+
+    const tombstones = (handler as unknown as { completedRuns: Map<string, number> }).completedRuns;
+    expect(tombstones.size).toBe(10_000);
+    expect(tombstones.has(first)).toBe(false);
+    expect(tombstones.has(runId(30_000))).toBe(true);
   });
 
   it('records LangGraph run attribution from AIMessage usage metadata without capturing content', () => {
@@ -611,9 +662,7 @@ describe('PylvaCallbackHandler', () => {
     ).rejects.toThrow('SECRET graph failure details');
 
     expect(internals.runs.size).toBe(0);
-    expect(JSON.stringify(mocks.enqueue.mock.calls)).not.toContain(
-      'SECRET graph failure details',
-    );
+    expect(JSON.stringify(mocks.enqueue.mock.calls)).not.toContain('SECRET graph failure details');
   });
 
   it('receives metadata from a real LangGraph.js StateGraph invocation', async () => {
@@ -646,8 +695,7 @@ describe('PylvaCallbackHandler', () => {
       startSpy.mock.calls.some((call) => {
         const metadata = call[5] as Record<string, unknown> | undefined;
         return (
-          metadata?.pylva_customer_id === 'cust_graph' &&
-          metadata?.langgraph_node === 'call_model'
+          metadata?.pylva_customer_id === 'cust_graph' && metadata?.langgraph_node === 'call_model'
         );
       }),
     ).toBe(true);

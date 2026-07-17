@@ -3,6 +3,7 @@
 // post-call evaluator.
 
 import { and, eq, ne, desc, exists, sql as drizzleSql } from 'drizzle-orm';
+import type postgres from 'postgres';
 import { rules, ruleAlertChannels, webhookConfigs } from '../db/schema.js';
 import { withRLS, type DrizzleTransaction } from '../db/rls.js';
 import { LIVE_TRAFFIC_RULE_TYPES } from './categories.js';
@@ -16,6 +17,14 @@ import {
   type RuleType as RuleTypeType,
   type RuleStatus as RuleStatusType,
 } from '@pylva/shared';
+import {
+  reconcileBudgetRuleRevisionInTransaction,
+  withBudgetRuleRevisionMutation,
+} from '../budget-control/rule-revisions.js';
+import {
+  pgJsonbParameterText,
+  withBudgetBuilderTransaction,
+} from '../budget-control/transaction.js';
 
 const log = logger.child({ module: 'rules.repository' });
 
@@ -34,6 +43,61 @@ export interface ListRulesOptions {
   excludeDrafts?: boolean;
   excludeDisabled?: boolean;
   enforcement?: RuleEnforcementType;
+}
+
+type RuleRow = typeof rules.$inferSelect;
+type TransactionRuleRow = Omit<
+  RuleRow,
+  'config' | 'activated_at' | 'last_triggered_at' | 'created_at' | 'updated_at'
+> & {
+  config: unknown;
+  activated_at: Date | string | null;
+  last_triggered_at: Date | string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+};
+
+function transactionDate(value: Date | string, field: string): Date {
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(parsed.getTime())) {
+    throw new Error(`rule mutation returned an invalid ${field}`);
+  }
+  return parsed;
+}
+
+function transactionNullableDate(value: Date | string | null, field: string): Date | null {
+  return value === null ? null : transactionDate(value, field);
+}
+
+function transactionRuleConfig(value: unknown): Record<string, unknown> {
+  const parsed = typeof value === 'string' ? (JSON.parse(value) as unknown) : value;
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('rule mutation returned an invalid config');
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function serializedRuleConfig(value: Record<string, unknown>): string {
+  return pgJsonbParameterText(value as postgres.JSONValue);
+}
+
+/**
+ * Drizzle's postgres-js driver requires a pool-level `Sql` object carrying
+ * parser/serializer options. A postgres.js `TransactionSql` intentionally
+ * does not expose those options, so wrapping it with `drizzle(transaction)`
+ * crashes before issuing a query. Keep authoritative writes on the exact raw
+ * transaction that owns the builder lock and normalize its timestamp rows at
+ * this boundary.
+ */
+function normalizeTransactionRuleRow(row: TransactionRuleRow): RuleRow {
+  return {
+    ...row,
+    config: transactionRuleConfig(row.config),
+    activated_at: transactionNullableDate(row.activated_at, 'activated_at'),
+    last_triggered_at: transactionNullableDate(row.last_triggered_at, 'last_triggered_at'),
+    created_at: transactionDate(row.created_at, 'created_at'),
+    updated_at: transactionDate(row.updated_at, 'updated_at'),
+  };
 }
 
 export async function listRules(builderId: string, opts?: ListRulesOptions): Promise<Rule[]> {
@@ -98,23 +162,39 @@ export async function createRule(input: CreateRuleInput): Promise<Rule> {
   // sees — dead routing the builder believes is live.
   const enforcement =
     input.enforcement ??
-    (LIVE_TRAFFIC_RULE_TYPES.has(input.type) ? RuleEnforcement.PRE_CALL : RuleEnforcement.POST_CALL);
-  const inserted = await withRLS(input.builder_id, async (tx) => {
-    const rows = await tx
-      .insert(rules)
-      .values({
-        builder_id: input.builder_id,
-        type: input.type,
-        enforcement,
-        name: input.name,
-        enabled: input.enabled ?? true,
-        config: input.config,
-        customer_id: input.customer_id ?? null,
-        status: input.status ?? RuleStatus.ACTIVE,
-      })
-      .returning();
-    return rows[0]!;
-  });
+    (LIVE_TRAFFIC_RULE_TYPES.has(input.type)
+      ? RuleEnforcement.PRE_CALL
+      : RuleEnforcement.POST_CALL);
+  const inserted = await withBudgetBuilderTransaction(
+    input.builder_id,
+    'exclusive',
+    async (transaction) => {
+      const rows = await transaction<TransactionRuleRow[]>`
+        INSERT INTO public.rules (
+          builder_id, type, enforcement, name, enabled, config,
+          customer_id, status
+        )
+        VALUES (
+          ${input.builder_id}::UUID,
+          ${input.type},
+          ${enforcement},
+          ${input.name},
+          ${input.enabled ?? true},
+          ${serializedRuleConfig(input.config)}::TEXT::JSONB,
+          ${input.customer_id ?? null},
+          ${input.status ?? RuleStatus.ACTIVE}
+        )
+        RETURNING id, builder_id, type, enforcement, name, enabled, config,
+                  customer_id, status, activated_at, last_triggered_at,
+                  last_error, created_at, updated_at
+      `;
+      const rawRow = rows[0];
+      if (!rawRow) throw new Error('rule insert returned no row');
+      const row = normalizeTransactionRuleRow(rawRow);
+      await reconcileBudgetRuleRevisionInTransaction(transaction, input.builder_id, row.id);
+      return row;
+    },
+  );
   log.info(
     { builder_id: input.builder_id, rule_id: inserted.id, type: inserted.type },
     'rule created',
@@ -127,33 +207,55 @@ export async function updateRule(
   ruleId: string,
   // `enforcement` is repository-internal (activation's legacy-draft heal);
   // the PATCH route's body schema never exposes it.
-  patch: Partial<Pick<CreateRuleInput, 'name' | 'enabled' | 'customer_id' | 'config' | 'enforcement'>>,
+  patch: Partial<
+    Pick<CreateRuleInput, 'name' | 'enabled' | 'customer_id' | 'config' | 'enforcement'>
+  >,
 ): Promise<Rule | null> {
-  const updated = await withRLS(builderId, async (tx) => {
-    const setClause: Record<string, unknown> = { updated_at: new Date() };
-    if (patch.name !== undefined) setClause['name'] = patch.name;
-    if (patch.enabled !== undefined) setClause['enabled'] = patch.enabled;
-    if (patch.customer_id !== undefined) setClause['customer_id'] = patch.customer_id;
-    if (patch.config !== undefined) setClause['config'] = patch.config;
-    if (patch.enforcement !== undefined) setClause['enforcement'] = patch.enforcement;
-    const rows = await tx
-      .update(rules)
-      .set(setClause)
-      .where(and(eq(rules.id, ruleId), eq(rules.builder_id, builderId)))
-      .returning();
-    return rows[0] ?? null;
-  });
+  const { value: updated } = await withBudgetRuleRevisionMutation(
+    builderId,
+    ruleId,
+    async (transaction) => {
+      const rows = await transaction<TransactionRuleRow[]>`
+        UPDATE public.rules
+        SET name = CASE WHEN ${patch.name !== undefined}::BOOLEAN
+              THEN ${patch.name ?? ''}::VARCHAR(200) ELSE name END,
+            enabled = CASE WHEN ${patch.enabled !== undefined}::BOOLEAN
+              THEN ${patch.enabled ?? false}::BOOLEAN ELSE enabled END,
+            customer_id = CASE WHEN ${patch.customer_id !== undefined}::BOOLEAN
+              THEN ${patch.customer_id ?? null}::VARCHAR(255) ELSE customer_id END,
+            config = CASE WHEN ${patch.config !== undefined}::BOOLEAN
+              THEN ${serializedRuleConfig(patch.config ?? {})}::TEXT::JSONB ELSE config END,
+            enforcement = CASE WHEN ${patch.enforcement !== undefined}::BOOLEAN
+              THEN ${patch.enforcement ?? RuleEnforcement.PRE_CALL}::VARCHAR(20)
+              ELSE enforcement END,
+            updated_at = pg_catalog.transaction_timestamp()
+        WHERE id = ${ruleId}::UUID AND builder_id = ${builderId}::UUID
+        RETURNING id, builder_id, type, enforcement, name, enabled, config,
+                  customer_id, status, activated_at, last_triggered_at,
+                  last_error, created_at, updated_at
+      `;
+      return {
+        kind: 'upsert',
+        value: rows[0] ? normalizeTransactionRuleRow(rows[0]) : null,
+      };
+    },
+  );
   return updated ? mapRow(updated) : null;
 }
 
 export async function deleteRule(builderId: string, ruleId: string): Promise<boolean> {
-  const rowsAffected = await withRLS(builderId, async (tx) => {
-    const rows = await tx
-      .delete(rules)
-      .where(and(eq(rules.id, ruleId), eq(rules.builder_id, builderId)))
-      .returning({ id: rules.id });
-    return rows.length;
-  });
+  const { value: rowsAffected } = await withBudgetRuleRevisionMutation(
+    builderId,
+    ruleId,
+    async (transaction) => {
+      const rows = await transaction<{ id: string }[]>`
+        DELETE FROM public.rules
+        WHERE id = ${ruleId}::UUID AND builder_id = ${builderId}::UUID
+        RETURNING id::TEXT AS id
+      `;
+      return { kind: 'delete', value: rows.length };
+    },
+  );
   return rowsAffected > 0;
 }
 
@@ -174,22 +276,29 @@ export async function promoteRuleStatus(
   ruleId: string,
   nextStatus: (typeof RuleStatus)[keyof typeof RuleStatus],
 ): Promise<Rule | null> {
-  const updated = await withRLS(builderId, async (tx) => {
-    const setClause: Record<string, unknown> = {
-      status: nextStatus,
-      updated_at: new Date(),
-    };
-    if (nextStatus === RuleStatus.ACTIVE) {
-      setClause['activated_at'] = new Date();
-      setClause['last_error'] = null;
-    }
-    const rows = await tx
-      .update(rules)
-      .set(setClause)
-      .where(and(eq(rules.id, ruleId), eq(rules.builder_id, builderId)))
-      .returning();
-    return rows[0] ?? null;
-  });
+  const { value: updated } = await withBudgetRuleRevisionMutation(
+    builderId,
+    ruleId,
+    async (transaction) => {
+      const activate = nextStatus === RuleStatus.ACTIVE;
+      const rows = await transaction<TransactionRuleRow[]>`
+        UPDATE public.rules
+        SET status = ${nextStatus},
+            activated_at = CASE WHEN ${activate}::BOOLEAN
+              THEN pg_catalog.transaction_timestamp() ELSE activated_at END,
+            last_error = CASE WHEN ${activate}::BOOLEAN THEN NULL ELSE last_error END,
+            updated_at = pg_catalog.transaction_timestamp()
+        WHERE id = ${ruleId}::UUID AND builder_id = ${builderId}::UUID
+        RETURNING id, builder_id, type, enforcement, name, enabled, config,
+                  customer_id, status, activated_at, last_triggered_at,
+                  last_error, created_at, updated_at
+      `;
+      return {
+        kind: 'upsert',
+        value: rows[0] ? normalizeTransactionRuleRow(rows[0]) : null,
+      };
+    },
+  );
   if (updated) {
     log.info(
       { builder_id: builderId, rule_id: ruleId, status: nextStatus },

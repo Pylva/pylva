@@ -64,8 +64,8 @@ export async function runSimulation(
          sum(event_count) AS event_count
        FROM cost_daily_agg_v2
        WHERE builder_id = {builder_id:String}
-         AND day >= toDate({from:DateTime})
-         AND day <= toDate({to:DateTime})
+         AND day >= toDate(parseDateTime64BestEffort({from:String}, 3, 'UTC'))
+         AND day <= toDate(parseDateTime64BestEffort({to:String}, 3, 'UTC'))
          ${customerFilter}
        GROUP BY customer_id, provider, model, step_name`,
       params,

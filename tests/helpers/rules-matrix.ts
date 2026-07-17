@@ -34,7 +34,10 @@ export async function seedCustomers(
   n: number,
   prefix = 'cust',
 ): Promise<string[]> {
-  const externalIds = Array.from({ length: n }, (_, i) => `${prefix}_${String(i).padStart(4, '0')}`);
+  const externalIds = Array.from(
+    { length: n },
+    (_, i) => `${prefix}_${String(i).padStart(4, '0')}`,
+  );
   // One multi-row INSERT per 1k rows keeps the seed fast at N=1000+.
   for (let i = 0; i < externalIds.length; i += 1000) {
     const chunk = externalIds.slice(i, i + 1000);
@@ -275,12 +278,18 @@ export async function insertDemoCostEvents(
 
 // --- cleanup ---
 
-/** Drop the builder (PG CASCADE) + its ClickHouse rows (synchronous mutation). */
-export async function cleanupMatrixBuilder(sql: Sql, builderId: string): Promise<void> {
+/**
+ * Remove the mutable ClickHouse fixture rows synchronously.
+ *
+ * PostgreSQL authority fixtures intentionally survive until the disposable
+ * integration database is torn down. Rule creation now records immutable
+ * budget-rule revisions whose builder foreign key is RESTRICT, so deleting
+ * the builder would invalidate the authority history this suite created.
+ */
+export async function cleanupMatrixBuilder(_sql: Sql, builderId: string): Promise<void> {
   await clickhouse.command({
     query: 'ALTER TABLE cost_events DELETE WHERE builder_id = {builder:String}',
     query_params: { builder: builderId },
     clickhouse_settings: { mutations_sync: '1' },
   });
-  await sql`DELETE FROM builders WHERE id = ${builderId}`;
 }

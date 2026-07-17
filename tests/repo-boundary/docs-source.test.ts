@@ -19,7 +19,16 @@ const internalDocsSourcePaths = [
   'tests/docs',
 ] as const;
 
-const allowedPublicDocsPaths = ['docs/assets'] as const;
+const allowedPublicDocsPaths = [
+  'docs/assets',
+  'docs/authoritative-all-cost-control-decisions.md',
+  'docs/authoritative-all-cost-control-plan.md',
+  'docs/authoritative-budget-control-operations.md',
+  'docs/authoritative-budget-control-release-readiness.md',
+  'docs/authoritative-budget-control-rollout.md',
+  'docs/langgraph-authoritative-control.md',
+  'docs/sdk-1.2-authoritative-control-release-notes.md',
+] as const;
 
 function exists(relativePath: string): boolean {
   return fs.existsSync(path.join(repoRoot, relativePath));

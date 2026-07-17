@@ -12,14 +12,24 @@
 import { createRequire } from 'node:module';
 
 export function loadPeer<T>(specifier: string): T | undefined {
-  let url = `file://${process.cwd()}/`;
   try {
-    url = import.meta.url ?? url;
-  } catch {
-    // import.meta unavailable in this runtime — keep the cwd fallback.
-  }
-  try {
-    return createRequire(url)(specifier) as T;
+    const peerRequire = createRequire(import.meta.url);
+    switch (specifier) {
+      case 'openai':
+        return peerRequire('openai') as T;
+      case 'openai/resources/chat/completions':
+        return peerRequire('openai/resources/chat/completions') as T;
+      case '@anthropic-ai/sdk':
+        return peerRequire('@anthropic-ai/sdk') as T;
+      case '@anthropic-ai/sdk/resources/messages':
+        return peerRequire('@anthropic-ai/sdk/resources/messages') as T;
+      case 'ai':
+        return peerRequire('ai') as T;
+      case 'ai/package.json':
+        return peerRequire('ai/package.json') as T;
+      default:
+        return undefined;
+    }
   } catch {
     return undefined;
   }

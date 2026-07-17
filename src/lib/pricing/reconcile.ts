@@ -1,5 +1,6 @@
-// Daily ClickHouse MV drift check.
-// Compares sum(cost_usd) in cost_events vs cost_daily_agg_v2 for the previous day.
+// Daily ClickHouse projection drift check.
+// Compares the canonical mixed event view with legacy aggregates plus the
+// deduplicated authoritative projection for the previous day.
 // Drift > 0.1% → Pino error + Slack alert.
 
 import { clickhouse } from '../clickhouse/client.js';
@@ -25,7 +26,7 @@ export async function runReconcile(dayIso?: string): Promise<ReconcileResult> {
   const eventsRes = await clickhouse.query({
     query: `
       SELECT coalesce(sum(cost_usd), 0) AS total
-      FROM cost_events
+      FROM cost_events_with_control
       WHERE timestamp >= {day:String}::Date AND timestamp < {next:String}::Date
     `,
     query_params: { day, next: nextDay },
@@ -36,11 +37,19 @@ export async function runReconcile(dayIso?: string): Promise<ReconcileResult> {
 
   const mvRes = await clickhouse.query({
     query: `
-      SELECT coalesce(sum(total_cost_usd), 0) AS total
-      FROM cost_daily_agg_v2
-      WHERE day = {day:String}::Date
+      SELECT coalesce(sum(total), 0) AS total
+      FROM (
+        SELECT coalesce(sum(total_cost_usd), 0) AS total
+        FROM cost_daily_agg_v2
+        WHERE day = {day:String}::Date
+        UNION ALL
+        SELECT coalesce(sum(cost_usd), 0) AS total
+        FROM budget_cost_events_final
+        WHERE payload_hash_count = 1
+          AND timestamp >= {day:String}::Date AND timestamp < {next:String}::Date
+      )
     `,
-    query_params: { day },
+    query_params: { day, next: nextDay },
     format: 'JSONEachRow',
   });
   const [mvRow] = (await mvRes.json()) as Array<{ total: number | string }>;

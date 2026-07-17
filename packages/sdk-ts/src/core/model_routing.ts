@@ -13,7 +13,7 @@
 // shape — wrappers pass a `call(model)` callback and the helper either
 // returns the result or invokes the fallback path.
 
-import { RuleWarningCode, type ModelRoutingFallback } from '@pylva/shared';
+import { RuleWarningCode, type ModelRoutingFallback } from '@pylva/shared/rules';
 
 export interface ProviderError {
   status?: number | undefined;

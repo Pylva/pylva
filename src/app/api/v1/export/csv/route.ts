@@ -87,7 +87,7 @@ export async function GET(request: NextRequest): Promise<Response> {
       try {
         while (true) {
           const cursorFilter = cursor
-            ? 'AND (timestamp, span_id) < ({cursor_ts:DateTime}, {cursor_span:UUID})'
+            ? "AND (timestamp, span_id) < (parseDateTime64BestEffort({cursor_ts:String}, 3, 'UTC'), {cursor_span:UUID})"
             : '';
           const customerFilter = customerId ? 'AND customer_id = {customer_id:String}' : '';
 
@@ -96,10 +96,10 @@ export async function GET(request: NextRequest): Promise<Response> {
             `SELECT timestamp, trace_id, span_id, parent_span_id, customer_id,
                     provider, model, operation, step_name,
                     tokens_in, tokens_out, cost_usd, latency_ms, status, is_demo
-             FROM cost_events
+             FROM cost_events_with_control
              WHERE builder_id = {builder_id:String}
-               AND timestamp >= {from:DateTime}
-               AND timestamp <= {to:DateTime}
+               AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
+               AND timestamp <= parseDateTime64BestEffort({to:String}, 3, 'UTC')
                ${customerFilter}
                ${cursorFilter}
              ORDER BY timestamp DESC, span_id DESC

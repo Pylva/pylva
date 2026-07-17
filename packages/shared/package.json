@@ -9,6 +9,34 @@
     ".": {
       "import": "./src/index.ts",
       "types": "./src/index.ts"
+    },
+    "./telemetry": {
+      "import": "./src/types/telemetry.ts",
+      "types": "./src/types/telemetry.ts"
+    },
+    "./telemetry-values": {
+      "import": "./src/types/telemetry-values.ts",
+      "types": "./src/types/telemetry-values.ts"
+    },
+    "./budget-errors": {
+      "import": "./src/errors/budget.ts",
+      "types": "./src/errors/budget.ts"
+    },
+    "./budget-control": {
+      "import": "./src/types/budget-control.ts",
+      "types": "./src/types/budget-control.ts"
+    },
+    "./errors": {
+      "import": "./src/types/errors.ts",
+      "types": "./src/types/errors.ts"
+    },
+    "./rules": {
+      "import": "./src/types/rules.ts",
+      "types": "./src/types/rules.ts"
+    },
+    "./cost-sources": {
+      "import": "./src/types/cost-sources.ts",
+      "types": "./src/types/cost-sources.ts"
     }
   },
   "dependencies": {

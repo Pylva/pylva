@@ -19,7 +19,7 @@ env:
   JWT_PRIVATE_KEY: /tmp/pylva-ci-private.pem
   JWT_PUBLIC_KEY: /tmp/pylva-ci-public.pem
   STRIPE_WEBHOOK_SECRET: whsec_test_connect
-  CRON_SECRET: "12345678901234567890123456789012"
+  CRON_SECRET: '12345678901234567890123456789012'
 
 jobs:
   ci-external-egress-live:
@@ -94,7 +94,7 @@ jobs:
           --health-retries 5
 
     env:
-      DATABASE_URL: postgresql://pylva:pylva_test@localhost:5432/pylva_test
+      DATABASE_URL: postgresql://pylva_app_ci:pylva_app_ci_test@localhost:5432/pylva_test
       CLICKHOUSE_URL: http://default:test@localhost:8123
       REDIS_URL: redis://localhost:6379
 
@@ -110,8 +110,22 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      - name: Bootstrap isolated non-superuser migration principal
+        env:
+          CI_POSTGRES_ADMIN_URL: postgresql://pylva:pylva_test@localhost:5432/pylva_test
+          MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
+        run: pnpm exec tsx scripts/ci/bootstrap-authoritative-budget-migration-role.ts
+
       - name: Run migrations
+        env:
+          MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
         run: pnpm db:setup
+
+      - name: Provision ordinary general-app runtime login
+        env:
+          MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
+          GENERAL_APP_DATABASE_URL: postgresql://pylva_app_ci:pylva_app_ci_test@localhost:5432/pylva_test
+        run: pnpm exec tsx scripts/ci/provision-general-app-runtime.ts
 
       - name: Verify ClickHouse readiness
         run: pnpm clickhouse:doctor
@@ -119,8 +133,24 @@ jobs:
       - name: Seed test data
         run: pnpm db:seed
 
-      - name: DB security and integration tests
-        run: pnpm exec vitest run --config vitest.integration.config.ts
+      - name: Prove the ordinary general-app runtime boundary
+        env:
+          MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
+          GENERAL_APP_DATABASE_URL: postgresql://pylva_app_ci:pylva_app_ci_test@localhost:5432/pylva_test
+        run: >-
+          pnpm exec vitest run --config vitest.integration.config.ts
+          tests/integration/general-app-runtime-owner-boundary.test.ts
+
+      - name: Legacy DB security and integration tests
+        env:
+          PYLVA_TEST_DATABASE_ADMIN_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/postgres
+        run: >-
+          pnpm exec vitest run --config vitest.integration.config.ts
+          --exclude 'tests/integration/authoritative-*.test.ts'
+          --exclude 'tests/integration/langgraph-*.test.ts'
+          --exclude 'tests/integration/migration-runner.test.ts'
+          --exclude 'tests/integration/provision-authoritative-budget-runtime.test.ts'
+          --exclude 'tests/integration/provision-general-app-runtime.test.ts'
 
       - name: Live ClickHouse suite (validates DDL on CI-pinned 24.8)
         run: pnpm exec vitest run tests/clickhouse
@@ -172,7 +202,9 @@ jobs:
           --health-retries 5
 
     env:
-      DATABASE_URL: postgresql://pylva:pylva_test@localhost:5432/pylva_test
+      DATABASE_URL: postgresql://pylva_app_ci:pylva_app_ci_test@localhost:5432/pylva_test
+      BUDGET_CONTROL_DATABASE_URL: postgresql://pylva_budget_control_ci:pylva_budget_control_ci_test@localhost:5432/pylva_test
+      ALLOW_BUDGET_CONTROL_DATABASE_URL_FALLBACK: 'false'
       CLICKHOUSE_URL: http://default:test@localhost:8123
       REDIS_URL: redis://localhost:6379
 
@@ -188,8 +220,27 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      - name: Bootstrap isolated non-superuser migration principal
+        env:
+          CI_POSTGRES_ADMIN_URL: postgresql://pylva:pylva_test@localhost:5432/pylva_test
+          MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
+        run: pnpm exec tsx scripts/ci/bootstrap-authoritative-budget-migration-role.ts
+
       - name: Run migrations
+        env:
+          MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
         run: pnpm db:setup
+
+      - name: Provision ordinary general-app runtime login
+        env:
+          MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
+          GENERAL_APP_DATABASE_URL: postgresql://pylva_app_ci:pylva_app_ci_test@localhost:5432/pylva_test
+        run: pnpm exec tsx scripts/ci/provision-general-app-runtime.ts
+
+      - name: Provision dedicated budget-control runtime login
+        env:
+          MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
+        run: pnpm exec tsx scripts/ci/provision-authoritative-budget-runtime.ts
 
       - name: Verify ClickHouse readiness
         run: pnpm clickhouse:doctor
@@ -197,5 +248,39 @@ jobs:
       - name: Seed test data
         run: pnpm db:seed
 
-      - name: Full-service integration tests
-        run: pnpm exec vitest run --config vitest.integration.config.ts
+      - name: Prove the ordinary general-app runtime boundary
+        env:
+          MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
+          GENERAL_APP_DATABASE_URL: postgresql://pylva_app_ci:pylva_app_ci_test@localhost:5432/pylva_test
+        run: >-
+          pnpm exec vitest run --config vitest.integration.config.ts
+          tests/integration/general-app-runtime-owner-boundary.test.ts
+
+      - name: Prove general-app provisioner atomicity and fail-closed drift handling
+        env:
+          CI_POSTGRES_ADMIN_URL: postgresql://pylva:pylva_test@localhost:5432/pylva_test
+          MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
+          GENERAL_APP_DATABASE_URL: postgresql://pylva_app_ci:pylva_app_ci_test@localhost:5432/pylva_test
+        run: >-
+          pnpm exec vitest run --config vitest.integration.config.ts
+          tests/integration/provision-general-app-runtime.test.ts
+
+      - name: Prove budget-runtime provisioner atomicity and fail-closed ACL handling
+        env:
+          MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
+          GENERAL_APP_DATABASE_URL: postgresql://pylva_app_ci:pylva_app_ci_test@localhost:5432/pylva_test
+        run: >-
+          pnpm exec vitest run --config vitest.integration.config.ts
+          tests/integration/provision-authoritative-budget-runtime.test.ts
+
+      - name: Full-service integration tests (immutable SDK gates delegated)
+        env:
+          PYLVA_TEST_DATABASE_ADMIN_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/postgres
+        run: >-
+          pnpm exec vitest run --config vitest.integration.config.ts
+          --exclude 'tests/integration/authoritative-budget-chaos.test.ts'
+          --exclude 'tests/integration/authoritative-budget-control-runtime-roles-migration.test.ts'
+          --exclude 'tests/integration/langgraph-authoritative-sdk-e2e.test.ts'
+          --exclude 'tests/integration/migration-runner.test.ts'
+          --exclude 'tests/integration/provision-authoritative-budget-runtime.test.ts'
+          --exclude 'tests/integration/provision-general-app-runtime.test.ts'

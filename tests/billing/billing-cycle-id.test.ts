@@ -83,8 +83,20 @@ vi.mock('../../src/lib/clickhouse/customer-id.js', () => ({
   resolveCustomerComposite: () => Promise.resolve(`${BUILDER_ID}:ext-1`),
 }));
 
+let usageCalls = 0;
+let failUsageAt: number | null = null;
 vi.mock('../../src/lib/billing/clickhouse-usage.js', () => ({
-  getUsageForPeriod: () => Promise.resolve({ by_model: {}, by_metric: {}, has_unpriced: false }),
+  BillingPeriodOpenError: class BillingPeriodOpenError extends Error {},
+  BudgetProjectionPendingError: class BudgetProjectionPendingError extends Error {},
+  BudgetUsageAggregateError: class BudgetUsageAggregateError extends Error {},
+  assertAuthoritativeProjectionReady: () => Promise.resolve(),
+  getUsageForPeriod: () => {
+    usageCalls += 1;
+    if (failUsageAt === usageCalls) {
+      return Promise.reject(new Error('usage preflight failure (simulated)'));
+    }
+    return Promise.resolve({ by_model: {}, by_metric: {}, has_unpriced: false });
+  },
 }));
 
 vi.mock('../../src/lib/stripe/ensure-customer.js', () => ({
@@ -203,6 +215,8 @@ beforeEach(() => {
   idSeq = 0;
   stripeCreateCalls = 0;
   failOnCreateCall = null;
+  usageCalls = 0;
+  failUsageAt = null;
 });
 
 describe('billingCycleIdFor()', () => {
@@ -266,5 +280,22 @@ describe('generateInvoice — auto-split billing_cycle_id stability', () => {
     });
     expect(results).toHaveLength(2);
     expect(store[0]!.billing_cycle_id).toBe(store[1]!.billing_cycle_id);
+  });
+
+  it('preflights every slice before creating any Stripe draft or invoice row', async () => {
+    failUsageAt = 2;
+
+    await expect(
+      generateInvoice({
+        builderId: BUILDER_ID,
+        customerId: 'cust-1',
+        period: PERIOD,
+        draftKeyBase: DRAFT_KEY_BASE,
+      }),
+    ).rejects.toThrow(/usage preflight failure/);
+
+    expect(usageCalls).toBe(2);
+    expect(stripeCreateCalls).toBe(0);
+    expect(store).toHaveLength(0);
   });
 });

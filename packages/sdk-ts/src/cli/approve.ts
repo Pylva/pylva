@@ -26,7 +26,7 @@ import {
   CostSourceType,
   type CostSourceType as CostSourceTypeT,
   type PricingTier,
-} from '@pylva/shared';
+} from '@pylva/shared/cost-sources';
 import { slugify } from './slugify.js';
 import type { ApprovedSource, Detection } from './ci-check.js';
 
@@ -71,12 +71,10 @@ export async function runApprove(
   opts: ApproveOptions = {},
 ): Promise<ApproveResult> {
   const cwd = opts.cwd ?? process.cwd();
-  const endpoint =
-    opts.endpoint ?? process.env['PYLVA_ENDPOINT'] ?? 'https://api.pylva.com';
+  const endpoint = opts.endpoint ?? process.env['PYLVA_ENDPOINT'] ?? 'https://api.pylva.com';
   // One universal key: PYLVA_API_KEY is preferred; PYLVA_CLI_KEY remains as a
   // legacy fallback so existing CI configurations keep working.
-  const cliKey =
-    opts.cliKey ?? process.env['PYLVA_API_KEY'] ?? process.env['PYLVA_CLI_KEY'] ?? '';
+  const cliKey = opts.cliKey ?? process.env['PYLVA_API_KEY'] ?? process.env['PYLVA_CLI_KEY'] ?? '';
 
   if (!/^pv_(?:live|cli)_[a-f0-9]{8}_[a-f0-9]{32}$/.test(cliKey)) {
     throw new Error(

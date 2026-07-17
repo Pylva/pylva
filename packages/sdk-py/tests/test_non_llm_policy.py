@@ -54,7 +54,9 @@ class _FakeClient:
         return _FakeResponse(200, {"accepted": 1, "rejected": 0})
 
 
-def _policy_response(sources: list[dict[str, Any]], refresh_after_ms: int = 60_000) -> _FakeResponse:
+def _policy_response(
+    sources: list[dict[str, Any]], refresh_after_ms: int = 60_000
+) -> _FakeResponse:
     return _FakeResponse(
         200,
         {
@@ -132,7 +134,8 @@ def test_policy_fetch_caches_dedupes_and_skips_malformed_sources(
 
 
 def test_policy_keeps_stale_data_on_backend_failure(
-    monkeypatch, capsys  # type: ignore[no-untyped-def]
+    monkeypatch,
+    capsys,  # type: ignore[no-untyped-def]
 ) -> None:
     init_config(VALID_KEY, endpoint="http://mock")
     fake = _FakeClient(
@@ -226,8 +229,14 @@ def test_usage_extractor_defaults_invalid_values_and_warning_once(
 
     assert policy.metric_value_for_source(source, _ctx(), None) == 1
     assert policy.metric_value_for_source(source, _ctx(), {"tavily": lambda _ctx: 7}) == 7
-    assert policy.metric_value_for_source(source, _ctx(), {"tavily": lambda _ctx: float("nan")}) is None
-    assert policy.metric_value_for_source(source, _ctx(), {"tavily": lambda _ctx: float("inf")}) is None
+    assert (
+        policy.metric_value_for_source(source, _ctx(), {"tavily": lambda _ctx: float("nan")})
+        is None
+    )
+    assert (
+        policy.metric_value_for_source(source, _ctx(), {"tavily": lambda _ctx: float("inf")})
+        is None
+    )
     assert policy.metric_value_for_source(source, _ctx(), {"tavily": lambda _ctx: -1}) is None
 
     def raises(_ctx: policy.NonLlmToolContext) -> float:
