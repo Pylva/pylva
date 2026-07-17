@@ -14,8 +14,8 @@ import { invoiceIdempotency } from '../db/schema.js';
 export { hashBody } from './hash-body.js';
 
 export type ClaimResult =
-  | { status: 'new' }
-  | { status: 'replay'; invoiceId: string | null }
+  | { status: 'new'; claimCreatedAt: Date }
+  | { status: 'replay'; invoiceId: string | null; claimCreatedAt: Date }
   | { status: 'conflict' };
 
 /**
@@ -45,15 +45,19 @@ export async function checkOrClaim(params: {
         request_hash: params.bodyHash,
       })
       .onConflictDoNothing()
-      .returning({ key: invoiceIdempotency.idempotency_key });
+      .returning({ claimCreatedAt: invoiceIdempotency.created_at });
 
-    if (inserted.length === 1) return { status: 'new' } as const;
+    const insertedClaim = inserted[0];
+    if (insertedClaim) {
+      return { status: 'new', claimCreatedAt: insertedClaim.claimCreatedAt } as const;
+    }
 
     // Row already existed. Load it + decide.
     const existing = await tx
       .select({
         request_hash: invoiceIdempotency.request_hash,
         invoice_id: invoiceIdempotency.invoice_id,
+        claim_created_at: invoiceIdempotency.created_at,
       })
       .from(invoiceIdempotency)
       .where(
@@ -65,9 +69,18 @@ export async function checkOrClaim(params: {
       .limit(1);
 
     const row = existing[0];
-    if (!row) return { status: 'new' } as const; // RLS must have matched someone else's key? unlikely
+    if (!row) {
+      // The composite conflict key includes builder_id, so a conflict must be
+      // visible through the same builder-scoped transaction. Proceeding as a
+      // fresh claim here would create invoices without an idempotency record.
+      throw new Error('invoice idempotency claim disappeared after insert conflict');
+    }
     if (row.request_hash !== params.bodyHash) return { status: 'conflict' } as const;
-    return { status: 'replay', invoiceId: row.invoice_id } as const;
+    return {
+      status: 'replay',
+      invoiceId: row.invoice_id,
+      claimCreatedAt: row.claim_created_at,
+    } as const;
   });
 }
 

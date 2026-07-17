@@ -105,12 +105,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (!parsed.success) return validationError(parsed.issues[0]?.message ?? 'Invalid body', 'body');
 
   const bodyHash = hashBody(parsed.output);
-  // Give manual invoice generation the same resumable per-slice dedupe rail
-  // as the monthly cron. If an auto-split request persists slice 1 and then
-  // fails on slice 2, retrying the same Idempotency-Key must reuse slice 1
-  // instead of creating a duplicate Stripe draft. Hash the key before storing
-  // it in invoices.draft_key so caller-supplied key material is not persisted.
-  const draftKeyBase = `oneoff:${hashBody({ key: idempotencyKey, bodyHash })}`;
   const claim = await checkOrClaim({ builderId: ctx.builderId, key: idempotencyKey, bodyHash });
 
   if (claim.status === 'conflict') {
@@ -130,6 +124,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     // only some auto-split slices. Resume with the deterministic draft keys;
     // persistOneDraft returns existing winners and creates only missing slices.
   }
+
+  // Give manual invoice generation the same resumable per-slice dedupe rail
+  // as the monthly cron. The persisted claim timestamp keeps retries inside
+  // one 24-hour claim on the same namespace, while a key legitimately reused
+  // after the claim is purged gets a new namespace. Hash before storing so
+  // caller-supplied key material is never persisted in invoices.draft_key.
+  const draftKeyBase = `oneoff:${hashBody({
+    key: idempotencyKey,
+    bodyHash,
+    claimCreatedAt: claim.claimCreatedAt.toISOString(),
+  })}`;
 
   try {
     const results = await generateInvoice({
@@ -159,7 +164,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       try {
         await releaseClaim({ builderId: ctx.builderId, key: idempotencyKey, bodyHash });
       } catch (releaseErr) {
-        const releaseMessage = releaseErr instanceof Error ? releaseErr.message : String(releaseErr);
+        const releaseMessage =
+          releaseErr instanceof Error ? releaseErr.message : String(releaseErr);
         log.warn(
           { builder_id: ctx.builderId, error: releaseMessage },
           'failed to release invoice idempotency claim after billing preflight error',

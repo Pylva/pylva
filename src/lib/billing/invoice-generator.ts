@@ -107,7 +107,9 @@ function normalizeStripeInvoiceLines(
     );
   }
   if (stripeLines.length > 250) {
-    throw new Error(`Stripe invoice item count ${stripeLines.length} exceeds Stripe's 250 item cap`);
+    throw new Error(
+      `Stripe invoice item count ${stripeLines.length} exceeds Stripe's 250 item cap`,
+    );
   }
   return stripeLines;
 }
@@ -167,9 +169,9 @@ interface GenerateInput {
    * (builder_id, draft_key) WHERE draft_key IS NOT NULL — re-running
    * the cron the same day is a no-op.
    *
-   * Single-customer invoice POSTs (one-off generations from the
-   * dashboard) leave this null — they rely on the existing
-   * `Idempotency-Key` header path instead.
+   * Single-customer invoice POSTs derive an attempt-scoped base from the
+   * persisted idempotency claim. That lets an interrupted auto-split resume
+   * without extending the public key's 24-hour idempotency window forever.
    */
   draftKeyBase?: string;
 }
@@ -496,7 +498,7 @@ export async function generateInvoice(input: GenerateInput): Promise<InvoiceGene
     );
   }
 
-  // Auto-split cycle id. For the monthly-cron / dedupe path (draftKeyBase set)
+  // Auto-split cycle id. For deduplicated generation (draftKeyBase set)
   // derive it deterministically from the dedupe namespace so concurrent pods
   // and same-window re-runs assign the *same* billing_cycle_id to every slice
   // of the cycle — otherwise two invocations that each win the INSERT for a
