@@ -61,11 +61,24 @@ async def _refresh(age: float) -> None:
             _passthrough = True
             return
         body = resp.json()
-        _rules = body.get("rules", [])
+        rules = body.get("rules") if isinstance(body, dict) else None
+        if not isinstance(rules, list):
+            if not _warned_passthrough:
+                print(
+                    "[pylva] rules cache stale — backend returned malformed rules; "
+                    "passthrough mode",
+                    flush=True,
+                )
+            _warned_passthrough = True
+            _passthrough = True
+            return
+        _rules = rules
         _fetched_at = time.time()
         _passthrough = False
         _warned_passthrough = False
-    except httpx.RequestError:
+    except Exception:
+        # R1: JSON decoding and response-shape failures are SDK failures just
+        # like transport errors. They must never escape a background refresh.
         if age > RULES_CACHE_TTL_SEC and not _warned_passthrough:
             print(
                 "[pylva] rules cache stale — passthrough mode (backend unreachable > 60s)",

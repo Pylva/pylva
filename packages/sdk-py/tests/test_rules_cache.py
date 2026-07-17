@@ -46,12 +46,12 @@ def test_cached_rules_empty_by_default() -> None:
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int, payload: dict[str, Any]) -> None:
+    def __init__(self, status_code: int, payload: Any) -> None:
         self.status_code = status_code
         self._payload = payload
         self.is_success = 200 <= status_code < 300
 
-    def json(self) -> dict[str, Any]:
+    def json(self) -> Any:
         return self._payload
 
 
@@ -180,4 +180,17 @@ async def test_non_success_response_enters_passthrough(
     )
     rules_cache._fetched_at -= rules_cache.RULES_CACHE_TTL_SEC + 1  # type: ignore[attr-defined]
     await rules_cache.ensure_rules_cache()
+    assert rules_cache.is_passthrough() is True
+
+
+async def test_malformed_rules_field_enters_passthrough(
+    patched_httpx: dict[str, _FakeAsyncClient],
+) -> None:
+    patched_httpx["client"] = _FakeAsyncClient(
+        response=_FakeResponse(200, {"rules": {"id": "not-a-list"}}),
+    )
+
+    await rules_cache.ensure_rules_cache()
+
+    assert rules_cache.get_cached_rules() == []
     assert rules_cache.is_passthrough() is True

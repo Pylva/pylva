@@ -48,8 +48,20 @@ async function refresh(now: number, age: number): Promise<void> {
       state.passthrough = true;
       return;
     }
-    const body = (await res.json()) as { rules?: unknown[] };
-    state = { rules: body.rules ?? [], fetchedAt: now, passthrough: false };
+    const body: unknown = await res.json();
+    const rules =
+      typeof body === 'object' && body !== null ? (body as { rules?: unknown }).rules : undefined;
+    if (!Array.isArray(rules)) {
+      if (!warnedPassthrough) {
+        console.warn(
+          '[pylva] rules cache stale — backend returned malformed rules; passthrough mode',
+        );
+      }
+      warnedPassthrough = true;
+      state.passthrough = true;
+      return;
+    }
+    state = { rules, fetchedAt: now, passthrough: false };
     warnedPassthrough = false;
   } catch {
     if (age > RULES_CACHE_TTL_MS && !warnedPassthrough) {
