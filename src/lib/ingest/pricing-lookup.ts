@@ -8,8 +8,9 @@
 // into the SQL text.
 //
 // Caching: in-process LRU keyed per-builder for custom rows and shared for
-// llm_pricing rows, 5-min TTL. Keeps hot-path batches fast without staleness
-// that would outlast a typical pricing rollout.
+// llm_pricing rows, 5-min TTL. Each cache entry contains the complete version
+// chain for its key so a later batch with older timestamps cannot fall through
+// from a historical custom override to the global catalog price.
 
 import { type TelemetryEvent, InstrumentationTier } from '@pylva/shared';
 import { type SQL, sql as drizzleSql } from 'drizzle-orm';
@@ -88,15 +89,7 @@ export async function lookupPricing(
   const llmPairs = new Set<string>(); // `provider|model`
   const metricNames = new Set<string>();
 
-  let minTs = Number.POSITIVE_INFINITY;
-  let maxTs = Number.NEGATIVE_INFINITY;
-
   for (const ev of events) {
-    const ts = new Date(ev.timestamp).getTime();
-    if (Number.isFinite(ts)) {
-      if (ts < minTs) minTs = ts;
-      if (ts > maxTs) maxTs = ts;
-    }
     if (ev.instrumentation_tier === InstrumentationTier.SDK_WRAPPER && ev.provider && ev.model) {
       llmPairs.add(`${ev.provider}|${ev.model}`);
     } else if (ev.instrumentation_tier === InstrumentationTier.REPORTED && ev.metric) {
@@ -105,9 +98,6 @@ export async function lookupPricing(
   }
 
   if (llmPairs.size === 0 && metricNames.size === 0) return map;
-
-  const fromIso = new Date(Number.isFinite(minTs) ? minTs : Date.now()).toISOString();
-  const toIso = new Date(Number.isFinite(maxTs) ? maxTs : Date.now()).toISOString();
 
   // --- Serve everything we can from cache ---
   const uncachedLlmPairs: Array<{ provider: string; model: string }> = [];
@@ -203,8 +193,6 @@ export async function lookupPricing(
             FROM custom_pricing
             WHERE builder_id = ${builderId}
               AND (provider, model) IN (${pairList})
-              AND effective_from <= ${toIso}::timestamptz
-              AND (effective_to IS NULL OR effective_to > ${fromIso}::timestamptz)
           `),
           tx.execute<{
             provider: string;
@@ -220,8 +208,6 @@ export async function lookupPricing(
                    effective_from, effective_to
             FROM llm_pricing
             WHERE (provider, model) IN (${pairList})
-              AND effective_from <= ${toIso}::timestamptz
-              AND (effective_to IS NULL OR effective_to > ${fromIso}::timestamptz)
           `),
         ]);
         const customRows = unwrapRows<{
@@ -298,8 +284,6 @@ export async function lookupPricing(
           FROM custom_pricing
           WHERE builder_id = ${builderId}
             AND metric IN (${metricList})
-            AND effective_from <= ${toIso}::timestamptz
-            AND (effective_to IS NULL OR effective_to > ${fromIso}::timestamptz)
         `);
         const metricRows = unwrapRows<{
           metric: string;
