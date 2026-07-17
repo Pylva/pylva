@@ -149,8 +149,8 @@ importers:
         specifier: ^29.1.1
         version: 29.1.1
       lucide-react:
-        specifier: ^0.400.0
-        version: 0.400.0(react@19.2.7)
+        specifier: ^1.25.0
+        version: 1.25.0(react@19.2.7)
       msw:
         specifier: ^2.15.0
         version: 2.15.0(@types/node@25.6.0)(typescript@6.0.2)
@@ -3330,8 +3330,8 @@ packages:
   keyv@4.5.4:
     resolution: {integrity: sha512-oxVHkHR/EJf2CNXnWxRLW6mg7JyCCUcG0DtEGmL2ctUo1PNTin1PUil+r/+4r5MpVgC/fn1kjsx7mjSujKqIpw==}
 
-  langsmith@0.8.1:
-    resolution: {integrity: sha512-Y48oSj51aLvehAVwy+VU2i9COlCFmLi9T5REFyL4pWT2npcIKiBSiSlnyjxdkNXOdZ0YYz7Lud8aiZPjkjkXvA==}
+  langsmith@0.8.3:
+    resolution: {integrity: sha512-3y1PRTmY24wiN8NiMb0CcNI2LwgovsKAz+ymVmBSmUx4nXL+GlmPY6Ju7FGeaPV1DMfQs9SjceNZHIfY2XYMKQ==}
     peerDependencies:
       '@opentelemetry/api': '*'
       '@opentelemetry/exporter-trace-otlp-proto': '*'
@@ -3470,8 +3470,8 @@ packages:
   lru-cache@5.1.1:
     resolution: {integrity: sha512-KpNARQA3Iwv+jTA0utUVVbrh+Jlrr1Fv0e56GGzAFOXN7dk/FviaDW8LHmK52DlcH4WP2n6gI8vN1aesBFgo9w==}
 
-  lucide-react@0.400.0:
-    resolution: {integrity: sha512-rpp7pFHh3Xd93KHixNgB0SqThMHpYNzsGUu69UaQbSZ75Q/J3m5t6EhKyMT3m4w2WOxmJ2mY0tD3vebnXqQryQ==}
+  lucide-react@1.25.0:
+    resolution: {integrity: sha512-/mdJTRbiwcLOQ1NZZK1amZF9rIZyvO18D6r9TngE6TG1NmqHgFuT4eE7Xrkm9UsXMbBJD1NlfwHVltCDWHrOTw==}
     peerDependencies:
       react: ^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0
 
@@ -5716,7 +5716,7 @@ snapshots:
       '@cfworker/json-schema': 4.1.1
       '@standard-schema/spec': 1.1.0
       js-tiktoken: 1.0.21
-      langsmith: 0.8.1(@opentelemetry/api@1.9.1)(@opentelemetry/sdk-trace-base@2.9.0(@opentelemetry/api@1.9.1))(openai@5.23.2(zod@3.25.76))
+      langsmith: 0.8.3(@opentelemetry/api@1.9.1)(@opentelemetry/sdk-trace-base@2.9.0(@opentelemetry/api@1.9.1))(openai@5.23.2(zod@3.25.76))
       mustache: 4.2.0
       p-queue: 6.6.2
       zod: 3.25.76
@@ -7831,7 +7831,7 @@ snapshots:
     dependencies:
       json-buffer: 3.0.1
 
-  langsmith@0.8.1(@opentelemetry/api@1.9.1)(@opentelemetry/sdk-trace-base@2.9.0(@opentelemetry/api@1.9.1))(openai@5.23.2(zod@3.25.76)):
+  langsmith@0.8.3(@opentelemetry/api@1.9.1)(@opentelemetry/sdk-trace-base@2.9.0(@opentelemetry/api@1.9.1))(openai@5.23.2(zod@3.25.76)):
     dependencies:
       p-queue: 6.6.2
     optionalDependencies:
@@ -7921,7 +7921,7 @@ snapshots:
     dependencies:
       yallist: 3.1.1
 
-  lucide-react@0.400.0(react@19.2.7):
+  lucide-react@1.25.0(react@19.2.7):
     dependencies:
       react: 19.2.7
 
