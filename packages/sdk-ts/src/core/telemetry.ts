@@ -20,6 +20,7 @@ import {
   type TelemetryEvent,
 } from '@pylva/shared';
 import { getConfig } from './config.js';
+import type { ResolvedConfig } from './config.js';
 import { markExceededFromBackend } from './budget_accumulator.js';
 import { recordLlmSpend } from './budget_rules.js';
 
@@ -32,6 +33,7 @@ let sentSpanIds: Set<string> = new Set();
 let sentSpanIdsQueue: string[] = []; // FIFO order for LRU eviction
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 let degraded = false;
+let degradedConfig: ResolvedConfig | null = null;
 let warnedOverflow = false;
 let warnedEstimatedUsage = false;
 const warnedUnknownModel = new Set<string>(); // keys: `${provider}|${model}` or `metric:${metric}`
@@ -64,7 +66,7 @@ const SCHEMA_VERSION = '1.6';
 const SDK_VERSION = '1.1.0';
 
 export function enqueue(event: Omit<TelemetryEvent, 'schema_version' | 'sdk_version'>): void {
-  if (degraded) return;
+  if (isCurrentConfigDegraded()) return;
 
   const full: TelemetryEvent = {
     ...event,
@@ -138,11 +140,11 @@ export function bufferSize(): number {
 }
 
 export function isDegraded(): boolean {
-  return degraded;
+  return isCurrentConfigDegraded();
 }
 
 export async function flush(): Promise<void> {
-  if (degraded) return;
+  if (isCurrentConfigDegraded()) return;
   const cfg = getConfig();
   if (!cfg) return;
   if (cfg.localMode) {
@@ -178,7 +180,7 @@ export async function flush(): Promise<void> {
         body: JSON.stringify(body),
       });
       if (response.status === 401) {
-        enterDegraded();
+        enterDegraded(cfg);
         return;
       }
       if (response.status >= 500) {
@@ -260,15 +262,28 @@ export async function flush(): Promise<void> {
   }
 }
 
-function enterDegraded(): void {
+function enterDegraded(cfg: ResolvedConfig): void {
   degraded = true;
+  degradedConfig = cfg;
   buffer = [];
   clearFlushTimer();
 
   console.warn(
     '[pylva] API key was rejected. Check it at https://pylva.com/settings/keys. ' +
-      'Telemetry is now disabled for this process.',
+      'Telemetry is disabled for the current SDK configuration.',
   );
+}
+
+function isCurrentConfigDegraded(): boolean {
+  if (!degraded) return false;
+  // A 401 disables only the config object that made the rejected request.
+  // init() is explicitly re-entrant for key rotation / HMR, so a subsequent
+  // config instance must be allowed to retry instead of dropping forever.
+  const cfg = getConfig();
+  if (!cfg || cfg === degradedConfig) return true;
+  degraded = false;
+  degradedConfig = null;
+  return false;
 }
 
 function recordSent(spanId: string): void {
@@ -307,6 +322,7 @@ export function _resetTelemetryForTests(): void {
   sentSpanIdsQueue = [];
   clearFlushTimer();
   degraded = false;
+  degradedConfig = null;
   warnedOverflow = false;
   warnedEstimatedUsage = false;
   warnedUnknownModel.clear();
