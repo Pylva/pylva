@@ -70,7 +70,7 @@
   "devDependencies": {
     "@axe-core/playwright": "^4.12.1",
     "@langchain/langgraph": "^1.4.7",
-    "@opennextjs/aws": "3.9.16",
+    "@opennextjs/aws": "4.0.3",
     "@playwright/test": "^1.61.1",
     "@size-limit/preset-small-lib": "^11.1.6",
     "@tailwindcss/postcss": "^4.3.2",
