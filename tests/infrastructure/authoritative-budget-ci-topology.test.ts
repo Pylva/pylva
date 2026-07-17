@@ -23,8 +23,11 @@ const RUNTIME_PROVISIONER_TRANSACTION_SUITE =
 const CI_POSTGRES_ADMIN_URL = 'postgresql://pylva:pylva_test@localhost:5432/pylva_test';
 const MIGRATION_DATABASE_URL =
   'postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test';
-const TEST_DATABASE_ADMIN_URL =
+const SCRATCH_DATABASE_ADMIN_URL =
   'postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/postgres';
+const FIXTURE_DATABASE_ADMIN_URL =
+  'postgresql://pylva:pylva_test@localhost:5432/postgres';
+const FIXTURE_DATABASE_URL = 'postgresql://pylva:pylva_test@localhost:5432/pylva_test';
 const GENERAL_APP_DATABASE_URL =
   'postgresql://pylva_app_ci:pylva_app_ci_test@localhost:5432/pylva_test';
 const RUNTIME_DATABASE_URL =
@@ -200,7 +203,9 @@ describe('authoritative budget-control CI topology', () => {
       expect(
         effective,
         `${file}:${job} must not serve through the bootstrap superuser`,
-      ).not.toContain('DATABASE_URL: postgresql://pylva:pylva_test@localhost:5432/pylva_test');
+      ).not.toMatch(
+        /^\s+DATABASE_URL: postgresql:\/\/pylva:pylva_test@localhost:5432\/pylva_test\s*$/mu,
+      );
       expect(generalProvisionIndex).toBeGreaterThan(dbSetupIndex);
       if (budgetProvisionIndex >= 0) {
         expect(budgetProvisionIndex).toBeGreaterThan(generalProvisionIndex);
@@ -225,7 +230,7 @@ describe('authoritative budget-control CI topology', () => {
       'tests/integration/langgraph-authoritative-sdk-e2e.test.ts',
     ]) {
       expect(stepContaining(authoritativeBlock, testPath), testPath).toContain(
-        `PYLVA_TEST_DATABASE_ADMIN_URL: ${TEST_DATABASE_ADMIN_URL}`,
+        `PYLVA_TEST_DATABASE_ADMIN_URL: ${SCRATCH_DATABASE_ADMIN_URL}`,
       );
     }
 
@@ -276,7 +281,10 @@ describe('authoritative budget-control CI topology', () => {
       "--exclude 'tests/integration/authoritative-*.test.ts'",
     );
     expect(legacyIntegrationStep).toContain(
-      `PYLVA_TEST_DATABASE_ADMIN_URL: ${TEST_DATABASE_ADMIN_URL}`,
+      `PYLVA_TEST_DATABASE_ADMIN_URL: ${FIXTURE_DATABASE_ADMIN_URL}`,
+    );
+    expect(legacyIntegrationStep).toContain(
+      `PYLVA_TEST_DATABASE_URL: ${FIXTURE_DATABASE_URL}`,
     );
     const fullServicesBlock = jobBlock(integrationSource, 'ci-full-services');
     const fullIntegrationStep = stepContaining(
@@ -284,7 +292,10 @@ describe('authoritative budget-control CI topology', () => {
       "--exclude 'tests/integration/authoritative-budget-control-runtime-roles-migration.test.ts'",
     );
     expect(fullIntegrationStep).toContain(
-      `PYLVA_TEST_DATABASE_ADMIN_URL: ${TEST_DATABASE_ADMIN_URL}`,
+      `PYLVA_TEST_DATABASE_ADMIN_URL: ${FIXTURE_DATABASE_ADMIN_URL}`,
+    );
+    expect(fullIntegrationStep).toContain(
+      `PYLVA_TEST_DATABASE_URL: ${FIXTURE_DATABASE_URL}`,
     );
 
     for (const { file, job } of [

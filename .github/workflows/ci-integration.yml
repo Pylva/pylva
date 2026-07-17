@@ -150,8 +150,11 @@ jobs:
 
       - name: Legacy DB security and integration tests
         env:
-          PYLVA_TEST_DATABASE_ADMIN_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/postgres
-          PYLVA_TEST_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
+          # These suites create fixtures, roles, and grants. Keep the application
+          # connection least-privileged at job scope, and expose the container
+          # superuser only to this fixture-owning test step.
+          PYLVA_TEST_DATABASE_ADMIN_URL: postgresql://pylva:pylva_test@localhost:5432/postgres
+          PYLVA_TEST_DATABASE_URL: postgresql://pylva:pylva_test@localhost:5432/pylva_test
         run: >-
           pnpm exec vitest run --config vitest.integration.config.ts
           --exclude 'tests/integration/authoritative-*.test.ts'
@@ -283,8 +286,11 @@ jobs:
 
       - name: Full-service integration tests (immutable SDK gates delegated)
         env:
-          PYLVA_TEST_DATABASE_ADMIN_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/postgres
-          PYLVA_TEST_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
+          # Fixture setup and RLS-role verification need container-admin powers;
+          # production code imported by the suite still reads the restricted
+          # job-level DATABASE_URL.
+          PYLVA_TEST_DATABASE_ADMIN_URL: postgresql://pylva:pylva_test@localhost:5432/postgres
+          PYLVA_TEST_DATABASE_URL: postgresql://pylva:pylva_test@localhost:5432/pylva_test
         run: >-
           pnpm exec vitest run --config vitest.integration.config.ts
           --exclude 'tests/integration/authoritative-budget-chaos.test.ts'
