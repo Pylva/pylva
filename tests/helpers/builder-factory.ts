@@ -12,7 +12,9 @@ import crypto from 'node:crypto';
 import postgres, { type Sql } from 'postgres';
 
 const DATABASE_URL =
-  process.env['DATABASE_URL'] ?? 'postgresql://pylva:pylva_dev@localhost:5432/pylva';
+  process.env['PYLVA_TEST_DATABASE_URL'] ??
+  process.env['DATABASE_URL'] ??
+  'postgresql://pylva:pylva_dev@localhost:5432/pylva';
 
 const ARGON2_SECRET = process.env['ARGON2_SECRET'] ?? 'dev-secret-change-in-prod';
 

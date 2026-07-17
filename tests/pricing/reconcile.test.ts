@@ -48,7 +48,15 @@ describe('authoritative pricing reconciliation', () => {
 
     expect(mocks.clickhouseQuery).toHaveBeenCalledTimes(2);
     for (const [request] of mocks.clickhouseQuery.mock.calls) {
-      expect(request.query_params).toEqual({ day: '2026-07-13', next: '2026-07-14' });
+      expect(request.query_params).toEqual({
+        day_start: '2026-07-13T00:00:00.000Z',
+        next_day_start: '2026-07-14T00:00:00.000Z',
+      });
+      expect(request.query).toContain("parseDateTime64BestEffort({day_start:String}, 3, 'UTC')");
+      expect(request.query).toContain(
+        "parseDateTime64BestEffort({next_day_start:String}, 3, 'UTC')",
+      );
+      expect(request.query).not.toContain('::Date');
     }
 
     const canonicalQuery = mocks.clickhouseQuery.mock.calls[0]?.[0].query as string;
@@ -59,4 +67,12 @@ describe('authoritative pricing reconciliation', () => {
     expect(projectedQuery).toContain('WHERE payload_hash_count = 1');
     expect(mocks.postSlackAlert).not.toHaveBeenCalled();
   });
+
+  it.each(['2026-02-30', '2026-7-1', 'not-a-day'])(
+    'rejects malformed UTC day %s before querying ClickHouse',
+    async (day) => {
+      await expect(runReconcile(day)).rejects.toBeInstanceOf(TypeError);
+      expect(mocks.clickhouseQuery).not.toHaveBeenCalled();
+    },
+  );
 });

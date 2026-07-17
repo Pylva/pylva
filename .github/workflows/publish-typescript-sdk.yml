@@ -19,7 +19,7 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -34,30 +34,37 @@ jobs:
           fi
           echo "sha=$TAG_COMMIT" >> "$GITHUB_OUTPUT"
 
-      - name: Require successful authoritative-control CI for the exact release commit
+      - name: Require every release gate for the exact release commit
+        id: release_gates
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_SHA: ${{ steps.release_commit.outputs.sha }}
         run: |
           set -euo pipefail
-          RESPONSE_FILE="$(mktemp)"
-          trap 'rm -f "$RESPONSE_FILE"' EXIT
-          curl \
-            --fail-with-body \
-            --silent \
-            --show-error \
-            --retry 3 \
-            --retry-all-errors \
-            --header "Accept: application/vnd.github+json" \
-            --header "Authorization: Bearer ${GH_TOKEN}" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/authoritative-budget-control-ci.yml/runs?head_sha=${RELEASE_SHA}&status=completed&per_page=100" \
-            > "$RESPONSE_FILE"
-          node - "$RESPONSE_FILE" <<'NODE'
+          for WORKFLOW in \
+            authoritative-budget-control-ci.yml \
+            ci-fast.yml \
+            ci-integration.yml \
+            ci-e2e-smoke.yml
+          do
+            RESPONSE_FILE="$(mktemp)"
+            curl \
+              --fail-with-body \
+              --silent \
+              --show-error \
+              --retry 3 \
+              --retry-all-errors \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW}/runs?head_sha=${RELEASE_SHA}&status=completed&per_page=100" \
+              > "$RESPONSE_FILE"
+            REQUIRED_WORKFLOW="$WORKFLOW" node - "$RESPONSE_FILE" <<'NODE'
           const fs = require('node:fs');
 
           const response = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
           const expectedSha = process.env.RELEASE_SHA;
+          const workflow = process.env.REQUIRED_WORKFLOW;
           const acceptedEvents = new Set(['push', 'workflow_dispatch', 'schedule']);
           const runs = Array.isArray(response.workflow_runs) ? response.workflow_runs : [];
           const successful = runs
@@ -72,18 +79,26 @@ jobs:
             .sort((left, right) => String(right.updated_at).localeCompare(String(left.updated_at)));
           if (successful.length === 0) {
             throw new Error(
-              `No successful Authoritative Budget Control CI run on main exists for exact release SHA ${expectedSha}`,
+              `No successful ${workflow} run on main exists for exact release SHA ${expectedSha}`,
             );
           }
           const attested = successful[0];
+          if (workflow === 'authoritative-budget-control-ci.yml') {
+            fs.appendFileSync(
+              process.env.GITHUB_OUTPUT,
+              `authoritative_run_id=${attested.id}\n`,
+            );
+          }
           console.log(
-            `Attested Authoritative Budget Control CI run ${attested.id} for ${expectedSha}: ${attested.html_url}`,
+            `Attested ${workflow} run ${attested.id} for ${expectedSha}: ${attested.html_url}`,
           );
           NODE
+            rm -f "$RESPONSE_FILE"
+          done
 
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
@@ -138,19 +153,30 @@ jobs:
       - name: Size limit
         run: pnpm --filter @pylva/sdk size
 
-      # Pack once with npm semantics. Every verification below and the publish
-      # step consume these exact bytes and recheck the recorded SHA-256.
-      - name: Pack and fingerprint immutable release artifact
+      - name: Download the exact attested TypeScript release artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: pylva-typescript-sdk-immutable
+          path: ${{ runner.temp }}/pylva-typescript-release
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.release_gates.outputs.authoritative_run_id }}
+
+      # Every verification below and the publish step consume the artifact
+      # built by the exact-SHA authoritative workflow attested above.
+      - name: Verify and fingerprint immutable release artifact
         run: |
           set -euo pipefail
           ARTIFACT_DIR="$RUNNER_TEMP/pylva-typescript-release"
           METADATA="$ARTIFACT_DIR/metadata.json"
-          node scripts/ci/smoke-typescript-package.mjs \
-            --artifact-only \
-            --pack-output "$ARTIFACT_DIR" \
-            --metadata-output "$METADATA"
+          mapfile -t TARBALLS < <(find "$ARTIFACT_DIR" -type f -name '*.tgz' -print)
+          test "${#TARBALLS[@]}" -eq 1
           TARBALL="$(node -e "const p=require('node:path'),m=require(process.argv[1]);process.stdout.write(p.resolve(p.dirname(process.argv[1]),m.tarball))" "$METADATA")"
+          test "$(realpath "${TARBALLS[0]}")" = "$(realpath "$TARBALL")"
           SHA256="$(node -e "const m=require(process.argv[1]);process.stdout.write(m.sha256)" "$METADATA")"
+          node scripts/ci/smoke-typescript-package.mjs \
+            --tarball "$TARBALL" \
+            --expected-sha256 "$SHA256" \
+            --artifact-only
           echo "PYLVA_TYPESCRIPT_TARBALL=$TARBALL" >> "$GITHUB_ENV"
           echo "PYLVA_TYPESCRIPT_TARBALL_SHA256=$SHA256" >> "$GITHUB_ENV"
 
@@ -206,4 +232,5 @@ jobs:
           set -euo pipefail
           ACTUAL_SHA256="$(node -e "const fs=require('node:fs'),c=require('node:crypto');process.stdout.write(c.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex'))" "$PYLVA_TYPESCRIPT_TARBALL")"
           test "$ACTUAL_SHA256" = "$PYLVA_TYPESCRIPT_TARBALL_SHA256"
-          npm publish "$PYLVA_TYPESCRIPT_TARBALL" --access public --ignore-scripts
+          NPM_DIST_TAG="$(node -e "const p=require('./packages/sdk-ts/package.json');process.stdout.write(p.version.includes('-')?'next':'latest')")"
+          npm publish "$PYLVA_TYPESCRIPT_TARBALL" --access public --ignore-scripts --tag "$NPM_DIST_TAG"

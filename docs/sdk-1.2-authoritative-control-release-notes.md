@@ -144,16 +144,11 @@ See the [HTTP contract](./authoritative-budget-control-rollout.md#machine-http-c
 
 ## Release status
 
-The recorded local artifact runs establish useful core-path evidence; they do not establish source,
-artifact, or release readiness while the independent-QA blockers remain open. The final local
-TypeScript tarball is frozen at SHA-256
-`776c4e7683adbb7f276e837507c38728e2365e1dac228f11f02addd674edabf3` and has passed its local
-package/profile/size gates. The final Python wheel is frozen at SHA-256
-`f26aeacad94aa073c42c764968cb7b4d3361fb99f622e4cf20882fe36ff8d74d` and its sdist at SHA-256
-`8574d814089a243787e9ef751eaee8e39be7305f46db5eaf5daedb563eb20175`; archive inspection and all
-four wheel/sdist floor/current profiles pass with stable hashes. Those immutable TypeScript and
-Python candidates also pass the final local two-SDK chaos group 11/11 and LangGraph group 4/4 across
-three files.
+Local artifact runs establish useful core-path evidence; they do not establish release readiness.
+Focused CI builds one TypeScript tarball and one Python wheel/sdist pair, records their generated
+SHA-256 values, and reuses those exact bytes across package and service consumers. The release
+record must take hashes and green run URLs from the final frozen candidate SHA; this document does
+not pin superseded local build identities.
 Stable 1.2.0 still requires a frozen commit on `main`, green recorded workflow URLs, the production
 scheduler rehearsal, shadow comparison, internal canary, release-owner approval, and the documented
 tag-triggered trusted-publishing procedure. It also requires closure of every current blocker in the

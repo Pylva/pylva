@@ -238,10 +238,29 @@ and posture cache stack. A failed posture is not cached, so a repaired grant can
 worker attempt without an application restart. The runtime attestation complements, but does not
 replace, the admin-level catalog audit above.
 
-> Current source blocker (2026-07-17): the projector client cache and posture cache each apply a
-> five-second lifetime independently, so one attestation can authorize use for almost ten seconds.
-> Do not approve the drift-detection gate until the implementation enforces one shared end-to-end
-> expiry and the composed regression proves it.
+The posture module is the sole successful-attestation cache. The default projector target delegates
+every use to that owner instead of caching the returned client for a second TTL, so the five-second
+bound is end to end.
+
+## Read-only readiness doctor
+
+From the exact reviewed application image, run the doctor with production runtime credentials and
+one target builder UUID:
+
+```bash
+NODE_ENV=production \
+DATABASE_URL='postgresql://<general-app>:<password>@<host>/<database>' \
+BUDGET_CONTROL_DATABASE_URL='postgresql://<budget-runtime>:<password>@<host>/<database>' \
+CLICKHOUSE_URL='https://<general-app>:<password>@<clickhouse-host>:8443/pylva' \
+BUDGET_PROJECTION_CLICKHOUSE_URL='https://<projector>:<password>@<clickhouse-host>:8443/pylva' \
+pnpm budget-control:doctor -- --builder-id '<builder-uuid>'
+```
+
+Exit zero and JSON `ready: true` require attested PostgreSQL and ClickHouse production postures plus
+a ready cutover for that builder. The output never includes connection strings or raw exception
+messages. Record the candidate SHA, actor, redacted target, output, and exit status. This command is
+read-only; it does not satisfy the separate authenticated and audited create-refresh-mark activation
+procedure, and operators must never update `budget_control_cutovers` directly.
 
 ## Temporary PostgreSQL general-app owner bridge
 

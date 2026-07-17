@@ -81,6 +81,16 @@ class ImmutableArtifactHarnessTests(unittest.TestCase):
                 self.harness.run_verified_leg(proofs, "rejected", action)
             self.assertFalse(called)
 
+    def test_packaged_readme_must_match_source_bytes_exactly(self) -> None:
+        source = "# Pylva\n\nAuthoritative control.\n".encode()
+        self.harness.assert_readme_bytes(source, source, "wheel METADATA")
+        with self.assertRaisesRegex(AssertionError, "README bytes do not match"):
+            self.harness.assert_readme_bytes(
+                source.replace(b"Authoritative", b"Advisory"),
+                source,
+                "wheel METADATA",
+            )
+
     def test_verify_existing_branch_never_invokes_build(self) -> None:
         options = self.harness.Options(
             package_dir=REPO_ROOT / "packages" / "sdk-py",
@@ -112,11 +122,23 @@ class ImmutableArtifactHarnessTests(unittest.TestCase):
 
     def test_publish_workflow_audits_the_only_build_before_publish(self) -> None:
         workflow = WORKFLOW_PATH.read_text()
-        self.assertEqual(workflow.count("python -m build "), 1)
+        self.assertEqual(workflow.count("python -m build "), 0)
         self.assertIn("actions: read", workflow)
         self.assertIn("head_sha=${RELEASE_SHA}", workflow)
         self.assertIn("run.head_branch === 'main'", workflow)
         self.assertIn("run.conclusion === 'success'", workflow)
+        self.assertIn("actions/download-artifact@v7", workflow)
+        self.assertIn("name: pylva-python-sdk-immutable", workflow)
+        self.assertIn(
+            "run-id: ${{ steps.release_gates.outputs.authoritative_run_id }}", workflow
+        )
+        for required_workflow in (
+            "authoritative-budget-control-ci.yml",
+            "ci-fast.yml",
+            "ci-integration.yml",
+            "ci-e2e-smoke.yml",
+        ):
+            self.assertIn(required_workflow, workflow)
         self.assertIn("--verify-existing", workflow)
         self.assertIn(
             "--wheel-sha256 '${{ steps.artifacts.outputs.wheel_sha256 }}'", workflow

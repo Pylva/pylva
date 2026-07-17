@@ -134,21 +134,14 @@ or provider error messages.
 
 ## Verification
 
-The final local immutable LangGraph group passes 4/4 across three files. Its
-service path consumes TypeScript tarball SHA-256
-`776c4e7683adbb7f276e837507c38728e2365e1dac228f11f02addd674edabf3`
-and Python wheel SHA-256
-`f26aeacad94aa073c42c764968cb7b4d3361fb99f622e4cf20882fe36ff8d74d`.
-The exact-wheel Python 3.12 environment passes `pip check` with LangGraph
-1.2.9, LangChain 1.3.13, OpenAI 2.45.0, and respx 0.23.1. Earlier
-paired-artifact runs used superseded candidates and remain historical only;
-the frozen-commit remote CI URL is still pending external evidence.
+Focused CI consumes the generated immutable TypeScript tarball and Python wheel from the candidate
+artifact jobs. The exact hashes, dependency resolution, and run URLs belong in the release record
+for the frozen commit rather than this source document.
 
 These local results validate the exercised path, but they do not yet close release evidence:
 
-- the TypeScript service fixture currently forwards unexpected non-OpenAI origins to real `fetch`;
-  make the network boundary hermetic by allowing only the exact local Pylva origin and mocked
-  provider origins;
+- the service fixtures now allow only configured Pylva API paths and the explicitly mocked canonical
+  provider route; unexpected origins and paths fail before network I/O;
 - the service assertion reconciles operation, reservation, trace, and step identity but does not
   yet assert `span_id` and `parent_span_id` continuity;
 - there is no installed-artifact matrix for a real streaming `StateGraph` invocation that exercises

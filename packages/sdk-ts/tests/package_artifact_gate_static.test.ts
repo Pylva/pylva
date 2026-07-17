@@ -364,10 +364,10 @@ describe('immutable TypeScript package gate configuration', () => {
     expect(allRunSources(artifact).match(/--pack-output/gu)).toHaveLength(1);
     expect(allRunSources(matrix)).not.toContain('--pack-output');
     expect(step(artifact, 'Upload immutable TypeScript artifact')['uses']).toBe(
-      'actions/upload-artifact@v4',
+      'actions/upload-artifact@v7',
     );
     expect(step(matrix, 'Download the one immutable npm artifact')['uses']).toBe(
-      'actions/download-artifact@v4',
+      'actions/download-artifact@v7',
     );
 
     const identity = runSource(step(matrix, 'Verify downloaded artifact identity'));
@@ -415,7 +415,7 @@ describe('immutable TypeScript package gate configuration', () => {
     expect(releaseCommit['id']).toBe('release_commit');
     expect(runSource(releaseCommit)).toContain('echo "sha=$TAG_COMMIT" >> "$GITHUB_OUTPUT"');
     const attestation = runSource(
-      step(publish, 'Require successful authoritative-control CI for the exact release commit'),
+      step(publish, 'Require every release gate for the exact release commit'),
     );
     for (const invariant of [
       'head_sha=${RELEASE_SHA}',
@@ -424,14 +424,25 @@ describe('immutable TypeScript package gate configuration', () => {
       "run.status === 'completed'",
       "run.conclusion === 'success'",
       "new Set(['push', 'workflow_dispatch', 'schedule'])",
+      'authoritative-budget-control-ci.yml',
+      'ci-fast.yml',
+      'ci-integration.yml',
+      'ci-e2e-smoke.yml',
     ]) {
       expect(attestation).toContain(invariant);
     }
 
-    const pack = runSource(step(publish, 'Pack and fingerprint immutable release artifact'));
-    expect(pack.match(/--pack-output/gu)).toHaveLength(1);
+    const download = step(publish, 'Download the exact attested TypeScript release artifact');
+    expect(download['uses']).toBe('actions/download-artifact@v7');
+    expect(download['with']).toMatchObject({
+      name: 'pylva-typescript-sdk-immutable',
+      'github-token': '${{ github.token }}',
+      'run-id': '${{ steps.release_gates.outputs.authoritative_run_id }}',
+    });
+    const pack = runSource(step(publish, 'Verify and fingerprint immutable release artifact'));
     expect(pack).toContain('p.resolve(p.dirname(process.argv[1]),m.tarball)');
-    expect(allRunSources(publish).match(/--pack-output/gu)).toHaveLength(1);
+    expect(pack).toContain('--expected-sha256 "$SHA256"');
+    expect(allRunSources(publish)).not.toContain('--pack-output');
     expect(allRunSources(publish).match(/npm publish/gu)).toHaveLength(1);
     for (const name of [
       'Verify optional-peer-free release artifact',
@@ -448,6 +459,8 @@ describe('immutable TypeScript package gate configuration', () => {
     expect(published).toContain(
       'npm publish "$PYLVA_TYPESCRIPT_TARBALL" --access public --ignore-scripts',
     );
+    expect(published).toContain("p.version.includes('-')?'next':'latest'");
+    expect(published).toContain('--tag "$NPM_DIST_TAG"');
   });
 
   it('runs installed official stream, cancellation, close, and cache-poison subprocess proofs', () => {
@@ -483,7 +496,11 @@ describe('immutable TypeScript package gate configuration', () => {
     expect(harness).not.toContain('left?.value === right?.value');
     expect(harness).toContain('void globalThis.fetch;');
     expect(harness).toContain("new Request('https://pylva.invalid');");
-    expect(harness).toContain("Symbol.for('undici.globalDispatcher.1')");
+    expect(harness).not.toContain('fetchPrimeSnapshot');
+    expect(harness).not.toContain("Symbol.for('undici.globalDispatcher.1')");
+    expect(harness.indexOf('const globalSnapshot = new Map')).toBeGreaterThan(
+      harness.indexOf("new Request('https://pylva.invalid');"),
+    );
     expect(harness).toContain(
       "const nanDescriptorSymbol = Symbol('pylva.package-smoke.nan-descriptor');",
     );

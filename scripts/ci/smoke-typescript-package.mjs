@@ -776,46 +776,14 @@ const descriptorEqual = (left, right) =>
   left?.writable === right?.writable &&
   left?.enumerable === right?.enumerable &&
   left?.configurable === right?.configurable;
-const undiciGlobalDispatcherSymbol = Symbol.for('undici.globalDispatcher.1');
-const fetchPrimeSnapshot = new Map(
-  Reflect.ownKeys(globalThis).map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]),
-);
+// Initialize Node's lazy Fetch/Undici globals before taking the SDK mutation
+// baseline. The exact internal symbols added by this built-in initialization
+// are Node-version details; the security invariant below is that importing
+// Pylva cannot add or mutate globals after the platform has initialized.
 void globalThis.fetch;
 new Request('https://pylva.invalid');
-const fetchPrimeKeys = Reflect.ownKeys(globalThis);
-const fetchPrimeAdditions = fetchPrimeKeys.filter((key) => !fetchPrimeSnapshot.has(key));
-const fetchPrimeRemovals = [...fetchPrimeSnapshot.keys()].filter(
-  (key) => !Object.prototype.hasOwnProperty.call(globalThis, key),
-);
-const fetchPrimeMutations = fetchPrimeKeys.filter(
-  (key) =>
-    fetchPrimeSnapshot.has(key) &&
-    !descriptorEqual(
-      Object.getOwnPropertyDescriptor(globalThis, key),
-      fetchPrimeSnapshot.get(key),
-    ),
-);
-if (
-  typeof globalThis.fetch !== 'function' ||
-  fetchPrimeAdditions.length > 1 ||
-  fetchPrimeAdditions.some((key) => key !== undiciGlobalDispatcherSymbol) ||
-  fetchPrimeRemovals.length !== 0 ||
-  fetchPrimeMutations.some((key) => key !== 'fetch')
-) {
-  throw new Error('priming the builtin fetch changed unexpected process-global state');
-}
-if (fetchPrimeAdditions.includes(undiciGlobalDispatcherSymbol)) {
-  const dispatcherDescriptor = Object.getOwnPropertyDescriptor(
-    globalThis,
-    undiciGlobalDispatcherSymbol,
-  );
-  if (
-    !Object.prototype.hasOwnProperty.call(dispatcherDescriptor, 'value') ||
-    dispatcherDescriptor.enumerable !== false ||
-    dispatcherDescriptor.configurable !== false
-  ) {
-    throw new Error('builtin fetch installed an invalid Undici global dispatcher descriptor');
-  }
+if (typeof globalThis.fetch !== 'function') {
+  throw new Error('the supported Node runtime does not expose builtin fetch');
 }
 
 let providerIo = 0;

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM node:20-bookworm-slim AS base
+FROM node:26-bookworm-slim AS base
 
 ENV NEXT_TELEMETRY_DISABLED=1 \
     PNPM_HOME=/pnpm
@@ -85,7 +85,7 @@ ENV NODE_ENV=production
 ENTRYPOINT ["/app/docker-migrate-entrypoint.sh"]
 CMD ["pnpm", "db:migrate"]
 
-FROM node:20-bookworm-slim AS runner
+FROM node:26-bookworm-slim AS runner
 
 # Bake the build SHA into the RUNTIME image. src/lib/config.ts reads
 # process.env.SENTRY_RELEASE at runtime; /api/v1/health surfaces it and

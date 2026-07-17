@@ -16,6 +16,7 @@ import type { IngestRequest, IngestResponse, TelemetryEvent } from '@pylva/share
 import { TokenCountSource } from '@pylva/shared/telemetry-values';
 import type { BudgetExceededFlag } from '@pylva/shared/budget-errors';
 import { getConfig } from './config.js';
+import type { RuntimeConfig } from './config.js';
 import { markExceededFromBackend } from './budget_accumulator.js';
 import { recordLlmSpend } from './budget_rules.js';
 import { SDK_VERSION } from './version.js';
@@ -35,6 +36,7 @@ let sentSpanIds: Set<string> = new Set();
 let sentSpanIdsQueue: string[] = []; // FIFO order for LRU eviction
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 let degraded = false;
+let degradedConfig: RuntimeConfig | null = null;
 let warnedOverflow = false;
 let warnedEstimatedUsage = false;
 let flushInFlight: Promise<void> | null = null;
@@ -73,7 +75,7 @@ function isBudgetExceededFlag(flag: unknown): flag is BudgetExceededFlag {
 
 const SCHEMA_VERSION = '1.6';
 export function enqueue(event: Omit<TelemetryEvent, 'schema_version' | 'sdk_version'>): void {
-  if (degraded) return;
+  if (isCurrentConfigDegraded()) return;
 
   const full: TelemetryEvent = {
     ...event,
@@ -147,7 +149,7 @@ export function bufferSize(): number {
 }
 
 export function isDegraded(): boolean {
-  return degraded;
+  return isCurrentConfigDegraded();
 }
 
 export function flush(): Promise<void> {
@@ -162,7 +164,7 @@ export function flush(): Promise<void> {
 
 async function flushOnce(): Promise<void> {
   const owner = telemetryEpoch;
-  if (degraded) return;
+  if (isCurrentConfigDegraded()) return;
   const cfg = getConfig();
   if (!cfg) return;
   if (cfg.localMode) {
@@ -181,7 +183,7 @@ async function flushOnce(): Promise<void> {
 
   activeBatchCounts.set(owner, (activeBatchCounts.get(owner) ?? 0) + newBatch.length);
   try {
-    await flushBatch(newBatch, owner);
+    await flushBatch(newBatch, owner, cfg);
   } finally {
     const remaining = (activeBatchCounts.get(owner) ?? 0) - newBatch.length;
     if (remaining > 0) activeBatchCounts.set(owner, remaining);
@@ -189,7 +191,11 @@ async function flushOnce(): Promise<void> {
   }
 }
 
-async function flushBatch(newBatch: TelemetryEvent[], owner: number): Promise<void> {
+async function flushBatch(
+  newBatch: TelemetryEvent[],
+  owner: number,
+  cfg: RuntimeConfig,
+): Promise<void> {
   const body: IngestRequest = {
     batch_id: randomUUID(),
     sdk_version: SDK_VERSION,
@@ -210,7 +216,7 @@ async function flushBatch(newBatch: TelemetryEvent[], owner: number): Promise<vo
       });
       if (owner !== telemetryEpoch) return;
       if (response.status === 401) {
-        enterDegraded(owner);
+        enterDegraded(owner, cfg);
         return;
       }
       if (response.status >= 500) {
@@ -299,16 +305,29 @@ async function flushBatch(newBatch: TelemetryEvent[], owner: number): Promise<vo
   }
 }
 
-function enterDegraded(owner: number): void {
+function enterDegraded(owner: number, cfg: RuntimeConfig): void {
   if (owner !== telemetryEpoch) return;
   degraded = true;
+  degradedConfig = cfg;
   buffer = [];
   clearFlushTimer();
 
   console.warn(
     '[pylva] API key was rejected. Check it at https://pylva.com/settings/keys. ' +
-      'Telemetry is now disabled for this process.',
+      'Telemetry is disabled for the current SDK configuration.',
   );
+}
+
+function isCurrentConfigDegraded(): boolean {
+  if (!degraded) return false;
+  // A 401 disables only the config object that made the rejected request.
+  // init() is explicitly re-entrant for key rotation / HMR, so a subsequent
+  // config instance must be allowed to retry instead of dropping forever.
+  const cfg = getConfig();
+  if (!cfg || cfg === degradedConfig) return true;
+  degraded = false;
+  degradedConfig = null;
+  return false;
 }
 
 function recordSent(spanId: string): void {
@@ -371,6 +390,7 @@ function resetTelemetry(reportDropped: boolean): void {
   sentSpanIdsQueue = [];
   clearFlushTimer();
   degraded = false;
+  degradedConfig = null;
   warnedOverflow = false;
   warnedEstimatedUsage = false;
   warnedUnknownModel.clear();

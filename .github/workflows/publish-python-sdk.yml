@@ -18,7 +18,7 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -33,30 +33,37 @@ jobs:
           fi
           echo "sha=$TAG_COMMIT" >> "$GITHUB_OUTPUT"
 
-      - name: Require successful authoritative-control CI for the exact release commit
+      - name: Require every release gate for the exact release commit
+        id: release_gates
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_SHA: ${{ steps.release_commit.outputs.sha }}
         run: |
           set -euo pipefail
-          RESPONSE_FILE="$(mktemp)"
-          trap 'rm -f "$RESPONSE_FILE"' EXIT
-          curl \
-            --fail-with-body \
-            --silent \
-            --show-error \
-            --retry 3 \
-            --retry-all-errors \
-            --header "Accept: application/vnd.github+json" \
-            --header "Authorization: Bearer ${GH_TOKEN}" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/authoritative-budget-control-ci.yml/runs?head_sha=${RELEASE_SHA}&status=completed&per_page=100" \
-            > "$RESPONSE_FILE"
-          node - "$RESPONSE_FILE" <<'NODE'
+          for WORKFLOW in \
+            authoritative-budget-control-ci.yml \
+            ci-fast.yml \
+            ci-integration.yml \
+            ci-e2e-smoke.yml
+          do
+            RESPONSE_FILE="$(mktemp)"
+            curl \
+              --fail-with-body \
+              --silent \
+              --show-error \
+              --retry 3 \
+              --retry-all-errors \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW}/runs?head_sha=${RELEASE_SHA}&status=completed&per_page=100" \
+              > "$RESPONSE_FILE"
+            REQUIRED_WORKFLOW="$WORKFLOW" node - "$RESPONSE_FILE" <<'NODE'
           const fs = require('node:fs');
 
           const response = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
           const expectedSha = process.env.RELEASE_SHA;
+          const workflow = process.env.REQUIRED_WORKFLOW;
           const acceptedEvents = new Set(['push', 'workflow_dispatch', 'schedule']);
           const runs = Array.isArray(response.workflow_runs) ? response.workflow_runs : [];
           const successful = runs
@@ -71,22 +78,30 @@ jobs:
             .sort((left, right) => String(right.updated_at).localeCompare(String(left.updated_at)));
           if (successful.length === 0) {
             throw new Error(
-              `No successful Authoritative Budget Control CI run on main exists for exact release SHA ${expectedSha}`,
+              `No successful ${workflow} run on main exists for exact release SHA ${expectedSha}`,
             );
           }
           const attested = successful[0];
+          if (workflow === 'authoritative-budget-control-ci.yml') {
+            fs.appendFileSync(
+              process.env.GITHUB_OUTPUT,
+              `authoritative_run_id=${attested.id}\n`,
+            );
+          }
           console.log(
-            `Attested Authoritative Budget Control CI run ${attested.id} for ${expectedSha}: ${attested.html_url}`,
+            `Attested ${workflow} run ${attested.id} for ${expectedSha}: ${attested.html_url}`,
           );
           NODE
+            rm -f "$RESPONSE_FILE"
+          done
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip build
+          python -m pip install --upgrade pip
           python -m pip install -e 'packages/sdk-py[dev]'
 
       - name: Verify release metadata
@@ -130,18 +145,23 @@ jobs:
       - name: Mypy
         run: python -m mypy packages/sdk-py/pylva
 
-      - name: Build wheel and sdist exactly once
-        run: |
-          rm -rf packages/sdk-py/dist
-          python -m build --outdir packages/sdk-py/dist packages/sdk-py
+      - name: Download the exact attested Python release artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: pylva-python-sdk-immutable
+          path: ${{ runner.temp }}/pylva-python-release
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.release_gates.outputs.authoritative_run_id }}
 
       - name: Derive exact artifact identities and hashes
         id: artifacts
         run: |
           python - <<'PY'
           import hashlib
+          import json
           import os
           import pathlib
+          import shutil
           import tarfile
           import tomllib
           import zipfile
@@ -150,13 +170,17 @@ jobs:
           pyproject = tomllib.loads(pathlib.Path("packages/sdk-py/pyproject.toml").read_text())
           project_name = pyproject["project"]["name"]
           version = pyproject["project"]["version"]
-          dist = pathlib.Path("packages/sdk-py/dist")
-          files = sorted(path for path in dist.iterdir() if path.is_file())
+          download = pathlib.Path(os.environ["RUNNER_TEMP"]) / "pylva-python-release"
+          files = sorted(path for path in download.iterdir() if path.is_file())
           wheels = [path for path in files if path.suffix == ".whl"]
           sdists = [path for path in files if path.name.endswith(".tar.gz")]
-          assert len(files) == 2 and len(wheels) == 1 and len(sdists) == 1, [
+          metadata_files = [path for path in files if path.name == "metadata.json"]
+          assert len(files) == 3 and len(wheels) == len(sdists) == len(metadata_files) == 1, [
               path.name for path in files
           ]
+          attestation = json.loads(metadata_files[0].read_text())
+          assert wheels[0].name == attestation["wheel"]
+          assert sdists[0].name == attestation["sdist"]
 
           with zipfile.ZipFile(wheels[0]) as archive:
               metadata_names = [
@@ -188,22 +212,30 @@ jobs:
                       digest.update(chunk)
               return digest.hexdigest()
 
+          assert sha256(wheels[0]) == attestation["wheel_sha256"]
+          assert sha256(sdists[0]) == attestation["sdist_sha256"]
+          dist = pathlib.Path("packages/sdk-py/dist")
+          assert not dist.exists() or not any(dist.iterdir())
+          dist.mkdir(parents=True, exist_ok=True)
+          wheel = pathlib.Path(shutil.copy2(wheels[0], dist / wheels[0].name)).resolve()
+          sdist = pathlib.Path(shutil.copy2(sdists[0], dist / sdists[0].name)).resolve()
+
           outputs = {
               "name": project_name,
               "version": version,
-              "wheel": str(wheels[0].resolve()),
-              "sdist": str(sdists[0].resolve()),
-              "wheel_sha256": sha256(wheels[0]),
-              "sdist_sha256": sha256(sdists[0]),
+              "wheel": str(wheel),
+              "sdist": str(sdist),
+              "wheel_sha256": sha256(wheel),
+              "sdist_sha256": sha256(sdist),
           }
           with pathlib.Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
               for key, value in outputs.items():
                   assert "\n" not in value and "\r" not in value
                   output.write(f"{key}={value}\n")
           print(
-              f"Built {project_name}@{version}: "
-              f"{wheels[0].name} ({outputs['wheel_sha256']}), "
-              f"{sdists[0].name} ({outputs['sdist_sha256']})"
+              f"Attested {project_name}@{version}: "
+              f"{wheel.name} ({outputs['wheel_sha256']}), "
+              f"{sdist.name} ({outputs['sdist_sha256']})"
           )
           PY
 

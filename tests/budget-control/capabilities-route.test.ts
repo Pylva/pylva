@@ -190,6 +190,11 @@ describe('GET /api/v1/budget/capabilities readiness authority', () => {
     );
     expect(response.status).toBe(500);
     expect(response.headers.get('cache-control')).toBe('no-store');
+    const raw = JSON.stringify(await body(response));
+    expect(raw).toContain('Request context is unavailable');
+    expect(raw).not.toContain('x-builder-id');
+    expect(raw).not.toContain('x-key-id');
+    expect(raw).not.toContain('middleware');
     expect(readinessMocks.getBudgetControlReadiness).not.toHaveBeenCalled();
   });
 });

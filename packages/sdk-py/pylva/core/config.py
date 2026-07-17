@@ -118,9 +118,9 @@ def is_valid_api_key_format(api_key: str) -> bool:
 
 
 def _validate_control_values(mode: object, on_unavailable: object, timeout_ms: object) -> None:
-    if mode not in {"legacy", "shadow", "enforce"}:
+    if not isinstance(mode, str) or mode not in {"legacy", "shadow", "enforce"}:
         raise InvalidControlConfigError("mode must be legacy, shadow, or enforce")
-    if on_unavailable not in {"allow", "deny"}:
+    if not isinstance(on_unavailable, str) or on_unavailable not in {"allow", "deny"}:
         raise InvalidControlConfigError("on_unavailable must be allow or deny")
     if (
         isinstance(timeout_ms, bool)

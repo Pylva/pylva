@@ -25,7 +25,12 @@ import httpx
 from .._version import SDK_VERSION
 from .budget_accumulator import mark_exceeded_from_backend
 from .budget_rules import record_llm_spend
-from .config import _require_config_snapshot, get_config, get_config_generation
+from .config import (
+    ResolvedConfig,
+    _require_config_snapshot,
+    get_config,
+    get_config_generation,
+)
 
 logger = logging.getLogger("pylva")
 
@@ -43,6 +48,7 @@ class _State:
         self.sent_span_ids: OrderedDict[str, None] = OrderedDict()
         self.sent_count = 0
         self.degraded = False
+        self.degraded_config: ResolvedConfig | None = None
         self.warned_overflow = False
         self.warned_estimated_usage = False
         self.warned_unknown: set[str] = set()
@@ -56,6 +62,8 @@ _state = _State(get_config_generation())
 
 def enqueue(event: dict[str, Any]) -> None:
     """Add one event to the buffer. Silently drops if degraded."""
+    if _is_current_config_degraded():
+        return
     generation = get_config_generation()
     with _state_lock:
         state = _state
@@ -206,11 +214,13 @@ def buffer_size() -> int:
 
 
 def is_degraded() -> bool:
-    return _state.degraded
+    return _is_current_config_degraded()
 
 
 async def flush() -> None:
     """Drain buffered telemetry. Idempotent on empty buffer."""
+    if _is_current_config_degraded():
+        return
     await _flush_state(_state)
 
 
@@ -270,7 +280,7 @@ async def _flush_once(state: _State | None = None) -> None:
                 if current.retired:
                     return
                 if response.status_code == 401:
-                    _enter_degraded(current)
+                    _enter_degraded(current, cfg)
                     return
                 if response.status_code >= 500:
                     last_error = f"HTTP {response.status_code}"
@@ -353,18 +363,38 @@ async def _flush_once(state: _State | None = None) -> None:
         )
 
 
-def _enter_degraded(state: _State | None = None) -> None:
+def _enter_degraded(
+    state: _State | None = None,
+    cfg: ResolvedConfig | None = None,
+) -> None:
     current = _state if state is None else state
     if current.retired:
         return
     current.degraded = True
+    current.degraded_config = cfg if cfg is not None else get_config()
     current.buffer.clear()
     print(
         "[pylva] API key was rejected. Check it at "
         "https://pylva.com/settings/keys. "
-        "Telemetry is now disabled for this process.",
+        "Telemetry is disabled for the current SDK configuration.",
         flush=True,
     )
+
+
+def _is_current_config_degraded() -> bool:
+    cfg = get_config()
+    with _state_lock:
+        state = _state
+        if not state.degraded:
+            return False
+        # A 401 disables only the config object that made the rejected request.
+        # init() is explicitly re-entrant for key rotation / notebooks, so a
+        # subsequent config instance must be allowed to retry.
+        if cfg is None or cfg is state.degraded_config:
+            return True
+        state.degraded = False
+        state.degraded_config = None
+        return False
 
 
 def _record_sent(span_id: str, state: _State | None = None) -> None:

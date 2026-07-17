@@ -9,6 +9,7 @@ import {
 import { isBudgetExactBackfillAdapterConfigured } from '../../../../../lib/budget-control/exact-backfill-adapter.js';
 import { readBudgetControlSdkIdentity } from '../../../../../lib/budget-control/sdk-identity.js';
 import { toNextResponse } from '../../../../../lib/public-http/response.js';
+import { internalError } from '../../../../../lib/errors.js';
 
 export interface CapabilitiesDependencies {
   featureEnabled?: () => boolean;
@@ -53,7 +54,9 @@ export function createGET(dependencies: CapabilitiesDependencies = {}) {
 
   return async function GET(request: NextRequest): Promise<Response> {
     const context = readBuilderContext(request);
-    if (context instanceof NextResponse) return noStore(context);
+    if (context instanceof NextResponse) {
+      return noStore(internalError('Request context is unavailable'));
+    }
 
     return toNextResponse(
       await handler.capabilities({

@@ -3,7 +3,6 @@ import {
   authoritativePayloadToClickHouseRow,
   type AuthoritativeBudgetCostEventPayload,
 } from './contracts.js';
-import { BUDGET_PROJECTION_CLICKHOUSE_ATTESTATION_TTL_MS } from './clickhouse-config.js';
 
 export const AUTHORITATIVE_BUDGET_COST_EVENT_TABLE = 'budget_cost_events' as const;
 
@@ -57,33 +56,15 @@ export interface BudgetProjectionTarget {
   ): Promise<BudgetProjectionInspection>;
 }
 
-interface DefaultClientCache {
-  expiresAt: number;
-  promise: Promise<BudgetProjectionClickHouseClient>;
-}
-
-let defaultClientCache: DefaultClientCache | undefined;
-
 function defaultClient(): Promise<BudgetProjectionClickHouseClient> {
-  const now = Date.now();
-  if (defaultClientCache && now < defaultClientCache.expiresAt) {
-    return defaultClientCache.promise;
-  }
-  const promise = import('./clickhouse-posture.js')
+  // The posture module owns the single bounded success cache. Adding a second
+  // cache here would let an almost-expired attestation authorize a client for
+  // another full TTL and nearly double the role-drift exposure window.
+  return import('./clickhouse-posture.js')
     .then(({ getReadyBudgetProjectionClickHouseClient }) =>
       getReadyBudgetProjectionClickHouseClient(),
     )
-    .then((client) => client as unknown as BudgetProjectionClickHouseClient)
-    .catch((error: unknown) => {
-      // Any repaired credential/posture failure is retryable immediately.
-      if (defaultClientCache?.promise === promise) defaultClientCache = undefined;
-      throw error;
-    });
-  defaultClientCache = {
-    expiresAt: now + BUDGET_PROJECTION_CLICKHOUSE_ATTESTATION_TTL_MS,
-    promise,
-  };
-  return promise;
+    .then((client) => client as unknown as BudgetProjectionClickHouseClient);
 }
 
 interface InspectionRow {
@@ -150,6 +131,7 @@ function parseInspection(raw: unknown, expectedPayloadHash: string): BudgetProje
 export function createBudgetProjectionTarget(
   client?: BudgetProjectionClickHouseClient,
   timeoutMs = 25_000,
+  resolveDefaultClient: () => Promise<BudgetProjectionClickHouseClient> = defaultClient,
 ): BudgetProjectionTarget {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 45_000) {
     throw new RangeError('timeoutMs must be an integer between 100 and 45000');
@@ -157,7 +139,7 @@ export function createBudgetProjectionTarget(
 
   return {
     async insert(payload, payloadHash): Promise<void> {
-      const resolvedClient = client ?? (await defaultClient());
+      const resolvedClient = client ?? (await resolveDefaultClient());
       const row = authoritativePayloadToClickHouseRow(payload, payloadHash);
       await resolvedClient.insert({
         table: AUTHORITATIVE_BUDGET_COST_EVENT_TABLE,
@@ -170,7 +152,7 @@ export function createBudgetProjectionTarget(
     },
 
     async inspect(builderId, eventId, expectedPayloadHash): Promise<BudgetProjectionInspection> {
-      const resolvedClient = client ?? (await defaultClient());
+      const resolvedClient = client ?? (await resolveDefaultClient());
       const response = await resolvedClient.query({
         query: `
           SELECT
@@ -214,7 +196,4 @@ export function createBudgetProjectionTarget(
 
 export const __budgetProjectionClickHouseTesting = {
   parseInspection,
-  resetDefaultClient(): void {
-    defaultClientCache = undefined;
-  },
 };

@@ -411,7 +411,7 @@ describe('authoritative budget-control CI topology', () => {
       workflow('authoritative-budget-control-ci.yml'),
       'authoritative-integration',
     );
-    expect(focused).toContain('needs: typescript-package-artifact');
+    expect(focused).toContain('needs: [typescript-package-artifact, python-package-artifact]');
     expect(
       stepContaining(focused, 'tests/integration/authoritative-budget-chaos.test.ts'),
     ).toContain('PYLVA_CHAOS_PYTHON:');

@@ -152,7 +152,16 @@ def assert_distribution_metadata(
         )
 
 
-def inspect_wheel(wheel: pathlib.Path, name: str, version: str) -> None:
+def assert_readme_bytes(actual: bytes, expected: bytes, artifact_label: str) -> None:
+    if actual != expected:
+        raise AssertionError(
+            f"{artifact_label} README bytes do not match packages/sdk-py/README.md"
+        )
+
+
+def inspect_wheel(
+    wheel: pathlib.Path, name: str, version: str, expected_readme: bytes
+) -> None:
     with zipfile.ZipFile(wheel) as archive:
         files = set(archive.namelist())
         required = {
@@ -187,6 +196,15 @@ def inspect_wheel(wheel: pathlib.Path, name: str, version: str) -> None:
             )
         metadata = Parser().parsestr(archive.read(metadata_files[0]).decode())
         assert_distribution_metadata(metadata, name, version, "wheel")
+        if metadata["Description-Content-Type"] != "text/markdown":
+            raise AssertionError(
+                "wheel has unexpected Description-Content-Type: "
+                f"{metadata['Description-Content-Type']}"
+            )
+        payload = metadata.get_payload()
+        if not isinstance(payload, str):
+            raise AssertionError("wheel METADATA has a non-text description payload")
+        assert_readme_bytes(payload.encode(), expected_readme, "wheel METADATA")
         license_files = [
             entry for entry in files if entry.endswith(".dist-info/licenses/LICENSE")
         ]
@@ -196,7 +214,9 @@ def inspect_wheel(wheel: pathlib.Path, name: str, version: str) -> None:
             )
 
 
-def inspect_sdist(sdist: pathlib.Path, name: str, version: str) -> None:
+def inspect_sdist(
+    sdist: pathlib.Path, name: str, version: str, expected_readme: bytes
+) -> None:
     with tarfile.open(sdist, mode="r:gz") as archive:
         members = [member for member in archive.getmembers() if member.isfile()]
         files = {member.name for member in members}
@@ -219,6 +239,20 @@ def inspect_sdist(sdist: pathlib.Path, name: str, version: str) -> None:
                 f"sdist metadata is {metadata['Name']}@{metadata['Version']}, "
                 f"expected {name}@{version}"
             )
+        readme_members = [
+            member
+            for member in members
+            if member.name.count("/") == 1 and member.name.endswith("/README.md")
+        ]
+        if len(readme_members) != 1:
+            raise AssertionError(
+                "sdist has invalid top-level README entries: "
+                f"{[member.name for member in readme_members]}"
+            )
+        readme_file = archive.extractfile(readme_members[0])
+        if readme_file is None:
+            raise AssertionError("sdist README.md cannot be read")
+        assert_readme_bytes(readme_file.read(), expected_readme, "sdist")
     required_suffixes = {
         "/pyproject.toml",
         "/pylva/__init__.py",
@@ -868,6 +902,7 @@ def verify_artifacts(
     project: dict[str, Any],
     proofs: tuple[ArtifactProof, ArtifactProof],
     smoke_root: pathlib.Path,
+    expected_readme: bytes,
 ) -> None:
     name = project.get("name")
     version = project.get("version")
@@ -879,8 +914,8 @@ def verify_artifacts(
 
     assert_artifact_pair(proofs, "before archive inspection")
     try:
-        inspect_wheel(wheel.path, name, version)
-        inspect_sdist(sdist.path, name, version)
+        inspect_wheel(wheel.path, name, version, expected_readme)
+        inspect_sdist(sdist.path, name, version, expected_readme)
     finally:
         assert_artifact_pair(proofs, "after archive inspection")
 
@@ -923,7 +958,12 @@ def build_and_verify(package_dir: pathlib.Path, project: dict[str, Any]) -> None
         )
         print(f"built wheel sha256: {proofs[0].sha256}")
         print(f"built sdist sha256: {proofs[1].sha256}")
-        verify_artifacts(project=project, proofs=proofs, smoke_root=root)
+        verify_artifacts(
+            project=project,
+            proofs=proofs,
+            smoke_root=root,
+            expected_readme=(package_dir / "README.md").read_bytes(),
+        )
 
 
 def verify_existing(options: Options, project: dict[str, Any]) -> None:
@@ -943,6 +983,7 @@ def verify_existing(options: Options, project: dict[str, Any]) -> None:
             project=project,
             proofs=proofs,
             smoke_root=pathlib.Path(temp),
+            expected_readme=(options.package_dir / "README.md").read_bytes(),
         )
 
 

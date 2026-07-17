@@ -65,6 +65,20 @@ _MAX_LOCAL_SCALAR_BYTES = 2 * 1024 * 1024
 _MAX_EVIDENCE_RECORD_ENTRIES = 256
 
 
+def _task_has_pending_cancellation(task: asyncio.Task[Any] | None) -> bool:
+    """Return the caller cancellation count when the runtime exposes it.
+
+    ``Task.cancelling()`` was added after Python 3.10.  Callers on the
+    declared 3.10 floor are still distinguished from an inner-task
+    cancellation by checking the shielded task itself at each call site.
+    """
+
+    if task is None:
+        return False
+    cancelling = getattr(task, "cancelling", None)
+    return bool(cancelling()) if callable(cancelling) else False
+
+
 @dataclass(frozen=True)
 class PreparedProviderRequest:
     provider: Provider
@@ -1647,7 +1661,7 @@ class _AsyncHeartbeat:
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
-            if caller is not None and caller.cancelling():
+            if _task_has_pending_cancellation(caller):
                 raise
             if not task.cancelled():
                 raise
@@ -2365,7 +2379,7 @@ async def _async_stream_shutdown_raw(
         return await asyncio.shield(task)
     except asyncio.CancelledError:
         current = asyncio.current_task()
-        if current is not None and current.cancelling():
+        if _task_has_pending_cancellation(current) or not task.cancelled():
             raise
         if not suppress:
             raise

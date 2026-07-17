@@ -452,8 +452,9 @@ authoritative_budget_ledger` passes against the deployed database.
 11. Operators can observe outstanding `reserved` and `unresolved` capacity, projection lag,
     scheduler health, and authoritative versus legacy comparison results.
 
-> **Activation blocker:** the public repository currently exposes readiness as an internal service,
-> not as a public operator API or CLI. Before production activation, provide an audited,
+> **Activation blocker:** the public repository exposes a read-only production posture and builder
+> readiness CLI as `pnpm budget-control:doctor`, but not the mutating activation lifecycle. Before
+> production activation, provide an audited,
 > authenticated, retry-safe operator command that calls `createBudgetControlCutover`,
 > `refreshBudgetControlCutover`, and `markBudgetControlReady`. It must record the acting operator,
 > target builder and mode, immutable result identity, and current read-only status. Never update

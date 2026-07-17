@@ -3,7 +3,7 @@
 // timestamp, source-type chip, and a link to the pricing config page.
 
 import type { Metadata } from 'next';
-import { and, eq, isNull } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import {
   CostSourceStatus,
   CostSourceTrackingStatus,
@@ -15,8 +15,10 @@ import {
 } from '@pylva/shared';
 import { readDashboardHeaders } from '@/lib/dashboard/headers';
 import { COPY } from '@/lib/copy';
-import { budgetControlCutovers, budgetRuleRevisions, costSources } from '@/lib/db/schema';
+import { costSources } from '@/lib/db/schema';
 import { withRLS } from '@/lib/db/rls';
+import { withBudgetControlReadTransaction } from '@/lib/budget-control/read-transaction';
+import { unwrapRows } from '@/lib/db/query-utils';
 import { EmptyStateCard } from '@/components/dashboard/EmptyStateCard';
 import { PageHeader } from '@/components/dashboard/PageHeader';
 import {
@@ -45,6 +47,40 @@ interface CostSourceListRow {
   has_pricing: boolean;
 }
 
+interface CostSourceAuthorityRow {
+  control_ready: boolean;
+  has_active_hard_stop_budget: boolean;
+}
+
+async function readCostSourceAuthority(builderId: string): Promise<{
+  controlReady: boolean;
+  hasActiveHardStopBudget: boolean;
+}> {
+  return withBudgetControlReadTransaction(builderId, async (transaction) => {
+    const result = await transaction.execute(sql`
+      SELECT
+        EXISTS (
+          SELECT 1
+          FROM public.budget_control_cutovers cutover
+          WHERE cutover.builder_id = ${builderId}::UUID
+            AND cutover.status = 'ready'
+        ) AS control_ready,
+        EXISTS (
+          SELECT 1
+          FROM public.budget_rule_revisions revision
+          WHERE revision.builder_id = ${builderId}::UUID
+            AND revision.enforcement = 'hard_stop'
+            AND revision.retired_at IS NULL
+        ) AS has_active_hard_stop_budget
+    `);
+    const row = unwrapRows<CostSourceAuthorityRow>(result)[0];
+    return {
+      controlReady: row?.control_ready === true,
+      hasActiveHardStopBudget: row?.has_active_hard_stop_budget === true,
+    };
+  });
+}
+
 export default async function CostSourcesPage({ params }: { params: Promise<{ slug: string }> }) {
   const [{ slug }, { builderId, role }] = await Promise.all([params, readDashboardHeaders()]);
 
@@ -55,54 +91,35 @@ export default async function CostSourcesPage({ params }: { params: Promise<{ sl
         .catch(() => false)
     : Promise.resolve(false);
 
-  const [{ rows, controlReady: workspaceControlReady, hasActiveHardStopBudget }, postureReady] =
-    await Promise.all([
-      withRLS(builderId, async (tx) => {
-        const sourceRows = await tx
-          .select({
-            id: costSources.id,
-            source_type: costSources.source_type,
-            display_name: costSources.display_name,
-            slug: costSources.slug,
-            metric: costSources.metric,
-            unit: costSources.unit,
-            price_per_unit: costSources.price_per_unit,
-            pricing_tiers: costSources.pricing_tiers,
-            status: costSources.status,
-            tracking_status: costSources.tracking_status,
-            matchers: costSources.matchers,
-            last_seen_at: costSources.last_seen_at,
-            last_discovered_at: costSources.last_discovered_at,
-            discovery_count: costSources.discovery_count,
-          })
-          .from(costSources)
-          .where(eq(costSources.builder_id, builderId));
-        const [cutover] = await tx
-          .select({ status: budgetControlCutovers.status })
-          .from(budgetControlCutovers)
-          .where(eq(budgetControlCutovers.builder_id, builderId))
-          .limit(1);
-        const [hardStop] = await tx
-          .select({ id: budgetRuleRevisions.id })
-          .from(budgetRuleRevisions)
-          .where(
-            and(
-              eq(budgetRuleRevisions.builder_id, builderId),
-              eq(budgetRuleRevisions.enforcement, 'hard_stop'),
-              isNull(budgetRuleRevisions.retired_at),
-            ),
-          )
-          .limit(1);
-        return {
-          rows: sourceRows,
-          controlReady: cutover?.status === 'ready',
-          hasActiveHardStopBudget: hardStop !== undefined,
-        };
-      }),
-      runtimePosturePromise,
-    ]);
+  const [rows, postureReady] = await Promise.all([
+    withRLS(builderId, async (tx) =>
+      tx
+        .select({
+          id: costSources.id,
+          source_type: costSources.source_type,
+          display_name: costSources.display_name,
+          slug: costSources.slug,
+          metric: costSources.metric,
+          unit: costSources.unit,
+          price_per_unit: costSources.price_per_unit,
+          pricing_tiers: costSources.pricing_tiers,
+          status: costSources.status,
+          tracking_status: costSources.tracking_status,
+          matchers: costSources.matchers,
+          last_seen_at: costSources.last_seen_at,
+          last_discovered_at: costSources.last_discovered_at,
+          discovery_count: costSources.discovery_count,
+        })
+        .from(costSources)
+        .where(eq(costSources.builder_id, builderId)),
+    ),
+    runtimePosturePromise,
+  ]);
 
   const authoritativeEnabled = authoritativeRequested && postureReady;
+  const { controlReady: workspaceControlReady, hasActiveHardStopBudget } = authoritativeEnabled
+    ? await readCostSourceAuthority(builderId)
+    : { controlReady: false, hasActiveHardStopBudget: false };
   const controlReady = authoritativeEnabled && workspaceControlReady;
 
   const sources: CostSourceListRow[] = rows.map((r) => ({

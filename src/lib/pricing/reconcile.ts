@@ -21,15 +21,24 @@ export interface ReconcileResult {
 /** Reconcile the MV for a given UTC day (defaults to yesterday). */
 export async function runReconcile(dayIso?: string): Promise<ReconcileResult> {
   const day = dayIso ?? new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
-  const nextDay = new Date(new Date(day).getTime() + 86_400_000).toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(day)) {
+    throw new TypeError('day must be a UTC calendar date in YYYY-MM-DD format');
+  }
+  const dayStart = `${day}T00:00:00.000Z`;
+  const parsedDayStart = new Date(dayStart);
+  if (Number.isNaN(parsedDayStart.getTime()) || parsedDayStart.toISOString() !== dayStart) {
+    throw new TypeError('day must be a valid UTC calendar date');
+  }
+  const nextDayStart = new Date(parsedDayStart.getTime() + 86_400_000).toISOString();
 
   const eventsRes = await clickhouse.query({
     query: `
       SELECT coalesce(sum(cost_usd), 0) AS total
       FROM cost_events_with_control
-      WHERE timestamp >= {day:String}::Date AND timestamp < {next:String}::Date
+      WHERE timestamp >= parseDateTime64BestEffort({day_start:String}, 3, 'UTC')
+        AND timestamp < parseDateTime64BestEffort({next_day_start:String}, 3, 'UTC')
     `,
-    query_params: { day, next: nextDay },
+    query_params: { day_start: dayStart, next_day_start: nextDayStart },
     format: 'JSONEachRow',
   });
   const [eventsRow] = (await eventsRes.json()) as Array<{ total: number | string }>;
@@ -41,15 +50,16 @@ export async function runReconcile(dayIso?: string): Promise<ReconcileResult> {
       FROM (
         SELECT coalesce(sum(total_cost_usd), 0) AS total
         FROM cost_daily_agg_v2
-        WHERE day = {day:String}::Date
+        WHERE day = toDate(parseDateTime64BestEffort({day_start:String}, 3, 'UTC'), 'UTC')
         UNION ALL
         SELECT coalesce(sum(cost_usd), 0) AS total
         FROM budget_cost_events_final
         WHERE payload_hash_count = 1
-          AND timestamp >= {day:String}::Date AND timestamp < {next:String}::Date
+          AND timestamp >= parseDateTime64BestEffort({day_start:String}, 3, 'UTC')
+          AND timestamp < parseDateTime64BestEffort({next_day_start:String}, 3, 'UTC')
       )
     `,
-    query_params: { day, next: nextDay },
+    query_params: { day_start: dayStart, next_day_start: nextDayStart },
     format: 'JSONEachRow',
   });
   const [mvRow] = (await mvRes.json()) as Array<{ total: number | string }>;

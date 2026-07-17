@@ -618,7 +618,7 @@ describe('controlled Vercel AI one-step subset', () => {
     );
     expect(renderedError).not.toContain(secret);
     for (const [url, requestInit] of fetchSpy.mock.calls) {
-      if (String(url).startsWith('https://control.test')) {
+      if (new URL(String(url)).origin === 'https://control.test') {
         expect(String(requestInit?.body ?? '')).not.toContain(secret);
       }
     }
@@ -1179,8 +1179,7 @@ describe('controlled Vercel AI one-step subset', () => {
       streamText: (input) => {
         controller.abort(new DOMException('sync caller abort', 'AbortError'));
         const onAbort = (input as Record<string, unknown>)['onAbort'] as
-          | ((event: unknown) => unknown)
-          | undefined;
+          ((event: unknown) => unknown) | undefined;
         onAbort?.({ reason: 'sync provider abort' });
         return nativeResult;
       },

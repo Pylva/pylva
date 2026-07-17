@@ -1,15 +1,10 @@
 import type { ClickHouseClient } from '@clickhouse/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { BUDGET_PROJECTION_CLICKHOUSE_ATTESTATION_TTL_MS } from '../../src/lib/budget-projection/clickhouse-config.js';
 import { PAYLOAD_HASH, toolPayload } from './fixtures.js';
 
 const getReadyBudgetProjectionClickHouseClient = vi.fn();
 
-vi.mock('../../src/lib/budget-projection/clickhouse-posture.js', () => ({
-  getReadyBudgetProjectionClickHouseClient,
-}));
-
-const { __budgetProjectionClickHouseTesting, createBudgetProjectionTarget } =
+const { createBudgetProjectionTarget } =
   await import('../../src/lib/budget-projection/clickhouse.js');
 
 function client(): ClickHouseClient {
@@ -21,7 +16,6 @@ function client(): ClickHouseClient {
 describe('projection default dedicated ClickHouse client', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    __budgetProjectionClickHouseTesting.resetDefaultClient();
   });
 
   it('clears a rejected readiness promise so recovered attestation can retry', async () => {
@@ -30,48 +24,51 @@ describe('projection default dedicated ClickHouse client', () => {
     getReadyBudgetProjectionClickHouseClient
       .mockRejectedValueOnce(transientFailure)
       .mockResolvedValueOnce(recovered);
-    const target = createBudgetProjectionTarget();
+    const target = createBudgetProjectionTarget(
+      undefined,
+      25_000,
+      getReadyBudgetProjectionClickHouseClient,
+    );
 
     await expect(target.insert(toolPayload(), PAYLOAD_HASH)).rejects.toBe(transientFailure);
     await expect(target.insert(toolPayload(), PAYLOAD_HASH)).resolves.toBeUndefined();
     expect(getReadyBudgetProjectionClickHouseClient).toHaveBeenCalledTimes(2);
   });
 
-  it('shares one successful posture initialization across concurrent inserts', async () => {
+  it('delegates every concurrent insert to the one posture-cache owner', async () => {
     let release!: (value: ClickHouseClient) => void;
     const ready = new Promise<ClickHouseClient>((resolve) => {
       release = resolve;
     });
     const resolved = client();
     getReadyBudgetProjectionClickHouseClient.mockReturnValue(ready);
-    const target = createBudgetProjectionTarget();
+    const target = createBudgetProjectionTarget(
+      undefined,
+      25_000,
+      getReadyBudgetProjectionClickHouseClient,
+    );
 
     const inserts = Promise.all([
       target.insert(toolPayload(), PAYLOAD_HASH),
       target.insert(toolPayload(), PAYLOAD_HASH),
     ]);
-    await vi.waitFor(() =>
-      expect(getReadyBudgetProjectionClickHouseClient).toHaveBeenCalledTimes(1),
-    );
+    await vi.waitFor(() => expect(getReadyBudgetProjectionClickHouseClient).toHaveBeenCalled());
     release(resolved);
     await expect(inserts).resolves.toEqual([undefined, undefined]);
-    expect(getReadyBudgetProjectionClickHouseClient).toHaveBeenCalledTimes(1);
+    expect(getReadyBudgetProjectionClickHouseClient).toHaveBeenCalledTimes(2);
   });
 
-  it('reattests a cached client after the bounded drift window', async () => {
-    let now = 1_000_000;
-    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+  it('does not add an outer client cache that can extend attestation lifetime', async () => {
     const resolved = client();
     getReadyBudgetProjectionClickHouseClient.mockResolvedValue(resolved);
-    const target = createBudgetProjectionTarget();
+    const target = createBudgetProjectionTarget(
+      undefined,
+      25_000,
+      getReadyBudgetProjectionClickHouseClient,
+    );
 
     await target.insert(toolPayload(), PAYLOAD_HASH);
-    await target.insert(toolPayload(), PAYLOAD_HASH);
-    expect(getReadyBudgetProjectionClickHouseClient).toHaveBeenCalledTimes(1);
-
-    now += BUDGET_PROJECTION_CLICKHOUSE_ATTESTATION_TTL_MS + 1;
     await target.insert(toolPayload(), PAYLOAD_HASH);
     expect(getReadyBudgetProjectionClickHouseClient).toHaveBeenCalledTimes(2);
-    clock.mockRestore();
   });
 });

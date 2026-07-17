@@ -235,8 +235,24 @@ def main() -> None:
     provider_route: respx.Route | None = None
     try:
         with respx.mock(assert_all_called=False) as router:
+            backend = endpoint.rstrip("/")
+            backend_paths = (
+                "/api/v1/budget/capabilities",
+                "/api/v1/budget/reservations",
+                "/api/v1/budget/sync",
+                "/api/v1/events",
+                "/api/v1/pricing",
+                "/api/v1/rules",
+                "/api/v1/sdk/non-llm-discoveries",
+                "/api/v1/sdk/non-llm-policy",
+            )
+            for backend_path in backend_paths:
+                router.route(url=f"{backend}{backend_path}").pass_through()
             router.route(
-                url__regex=re.compile(rf"^{re.escape(endpoint.rstrip('/'))}(?:/|$)")
+                url__regex=re.compile(
+                    rf"^{re.escape(backend)}/api/v1/budget/reservations/"
+                    r"[^/?#]+/(?:commit|extend|release)$"
+                )
             ).pass_through()
             provider_route = router.post(
                 "https://api.openai.com/v1/chat/completions"

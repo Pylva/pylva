@@ -46,7 +46,7 @@ function installOfficialFetch() {
   const controlBodies: string[] = [];
   const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, request) => {
     const { href, body } = await hrefAndBody(input, request);
-    if (href.startsWith('https://control.test')) controlBodies.push(body);
+    if (new URL(href).origin === 'https://control.test') controlBodies.push(body);
     if (href.endsWith('/api/v1/budget/capabilities')) {
       return json({
         schema_version: '1.0',
@@ -183,7 +183,7 @@ function installOfficialStreamFetch(mode: OfficialStreamMode) {
   const firstEvent = openAiChunk('official stream');
   const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, request) => {
     const { href, body } = await hrefAndBody(input, request);
-    if (href.startsWith('https://control.test')) controlBodies.push(body);
+    if (new URL(href).origin === 'https://control.test') controlBodies.push(body);
     if (href.endsWith('/api/v1/budget/capabilities')) {
       return json({
         schema_version: '1.0',
@@ -361,8 +361,10 @@ describe('controlled Vercel AI official provider integration', () => {
     const reserveOrder = spy.mock.calls.findIndex(([input]) =>
       (input instanceof Request ? input.url : String(input)).endsWith('/reservations'),
     );
-    const providerOrder = spy.mock.calls.findIndex(([input]) =>
-      (input instanceof Request ? input.url : String(input)).includes('api.openai.com'),
+    const providerOrder = spy.mock.calls.findIndex(
+      ([input]) =>
+        new URL(input instanceof Request ? input.url : String(input)).origin ===
+        'https://api.openai.com',
     );
     expect(reserveOrder).toBeGreaterThanOrEqual(0);
     expect(providerOrder).toBeGreaterThan(reserveOrder);

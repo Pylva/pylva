@@ -22,19 +22,11 @@ public surface and supported price-complete subset without implying publication.
 Both source packages now identify as 1.2.0, but the paired release remains blocked until every gate
 below has recorded evidence. This groundwork does not publish either artifact.
 
-Current local immutable evidence is paired. The final TypeScript tarball is frozen at SHA-256
-`776c4e7683adbb7f276e837507c38728e2365e1dac228f11f02addd674edabf3`; that exact byte sequence
-passes topology/source-map, optional-peer-free, floor/current, AI-version refusal, official
-ESM/CJS/mixed lifecycle, identity, and fixed-size gates. The latest complete local Python source run
-passes 705/705, with package/test Ruff and strict Mypy across 47 files. The final wheel SHA-256 is
-`f26aeacad94aa073c42c764968cb7b4d3361fb99f622e4cf20882fe36ff8d74d`; the sdist SHA-256 is
-`8574d814089a243787e9ef751eaee8e39be7305f46db5eaf5daedb563eb20175`. Archive inspection and all
-four wheel/sdist-by-provider-floor/current installed profiles pass with stable hashes.
-
-The exact Python wheel environment passes `pip check` under Python 3.12 with LangGraph 1.2.9,
-LangChain 1.3.13, OpenAI 2.45.0, and respx 0.23.1. Together, the immutable TypeScript tarball and
-Python wheel pass the final two-SDK chaos group 11/11 and LangGraph group 4/4 across three files.
-None of these local passes is a frozen merged commit, GitHub-run URL, registry publication,
+Local review runs build and inspect both SDK artifact formats and exercise the provider floor/current
+profiles, but source-controlled SHA values are not release evidence. The focused workflow now
+creates one metadata-bound TypeScript tarball and one Python wheel/sdist pair per candidate run, then
+fans those exact bytes out to package and service consumers. Record the generated hashes and URLs
+only after the candidate commit is frozen on `main`. A local pass is not a registry publication,
 deployment, production shadow/canary, scheduler rehearsal, or stable-release record.
 
 ## Independent QA blockers — 2026-07-17
@@ -44,27 +36,29 @@ chaos, and LangGraph suites successfully. Those results prove that the central
 reserve/refuse/settle design works locally, but they do not make this source candidate release-ready.
 Close every item below before recording candidate CI:
 
-- [ ] Move Cost Sources authority reads out of general `withRLS` and prove the page through an
-      ordinary general-app login that is denied direct authority-table access.
-- [ ] Sanitize the capabilities missing-header response and replace raw Budget Activity exception
+- [ ] Cost Sources authority reads are split out of general `withRLS`, with source-level regression
+      coverage. Record the remaining production-shaped page proof through an ordinary general-app
+      login that is denied direct authority-table access.
+- [x] Sanitize the capabilities missing-header response and replace raw Budget Activity exception
       messages in API/RSC logs with allowlisted codes or classes; assert response and logger output.
-- [ ] Replace date-only ClickHouse reconciliation casts with explicit UTC instants and enforce one
+- [x] Replace date-only ClickHouse reconciliation casts with explicit UTC instants and enforce one
       end-to-end five-second posture-attestation lifetime.
-- [ ] Make malformed, including unhashable, Python control configuration raise only the documented
+- [x] Make malformed, including unhashable, Python control configuration raise only the documented
       validation error.
-- [ ] Build one hash-addressed Python wheel/sdist pair in focused CI and reuse that exact wheel in
+- [x] Build one hash-addressed Python wheel/sdist pair in focused CI and reuse that exact wheel in
       package, chaos, and LangGraph jobs; require the expected SHA in every runner.
-- [ ] Reject every unexpected network origin in clean-artifact service runners.
+- [x] Reject every unexpected network origin in clean-artifact service runners.
 - [ ] Add release regressions for real Redis throttling, expiry-created unresolved dashboard
       activity, direct/async Tavily denial, span/parent-span service identity, and streaming
       wrapper-plus-callback deduplication.
-- [ ] Run `tests/security/middleware-budget-control-auth.test.ts` in a required workflow.
-- [ ] Make both publish workflows attest focused, fast/security, integration, and ordinary E2E
+- [x] Run `tests/security/middleware-budget-control-auth.test.ts` in a required workflow.
+- [x] Make both publish workflows attest focused, fast/security, integration, and ordinary E2E
       success for the exact release SHA.
-- [ ] Add byte equality for both packaged SDK READMEs and an explicit non-`latest` npm dist-tag
+- [x] Add byte equality for both packaged SDK READMEs and an explicit non-`latest` npm dist-tag
       procedure for prereleases.
-- [ ] Provide and rehearse the audited readiness operator command; the public repository currently
-      exposes only internal readiness services.
+- [ ] Provide and rehearse the audited activation command. The read-only
+      `pnpm budget-control:doctor` now reports production posture and builder readiness, but it does
+      not replace the authenticated/audited create-refresh-mark lifecycle required for activation.
 
 The detailed durable lessons are D100–D114 in the decision log. The recorded 2026-07-15 pass counts
 remain valid evidence for the paths they exercised, but they do not override this blocker list.
@@ -247,9 +241,9 @@ a local claim.
 ## Locally passed core gates awaiting fixes and candidate CI records
 
 The repository contains the local chaos, LangGraph, browser, and compatibility harness families.
-The final local candidates pass chaos 11/11 and the LangGraph group 4/4 across three files, but the
-focused workflow does not yet preserve one Python artifact identity across both service jobs and the
-browser suite does not visit every authority-bearing page:
+The local harness families cover chaos and LangGraph service paths, and focused CI now preserves one
+Python artifact identity across package, chaos, and LangGraph consumers. The browser suite still
+needs frozen-candidate evidence for every authority-bearing page:
 
 - clean wheel-installed Python and built TypeScript processes contend against one pooled budget in
   `authoritative-budget-chaos.test.ts` without over-authorization;

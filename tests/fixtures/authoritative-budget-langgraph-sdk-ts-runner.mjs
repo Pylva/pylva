@@ -5,6 +5,45 @@ import path from 'node:path';
 import { loadTypescriptSdkArtifact } from './typescript-sdk-artifact.mjs';
 
 const networkFetch = globalThis.fetch;
+const configuredBackend = (() => {
+  const endpoint = process.env.PYLVA_LANGGRAPH_ENDPOINT;
+  if (!endpoint) return null;
+  const parsed = new URL(endpoint);
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
+    throw new Error('invalid TypeScript LangGraph backend endpoint');
+  }
+  return {
+    basePath: parsed.pathname.replace(/\/$/u, ''),
+    origin: parsed.origin,
+  };
+})();
+const backendStaticPaths = new Set([
+  '/api/v1/budget/capabilities',
+  '/api/v1/budget/reservations',
+  '/api/v1/budget/sync',
+  '/api/v1/events',
+  '/api/v1/pricing',
+  '/api/v1/rules',
+  '/api/v1/sdk/non-llm-discoveries',
+  '/api/v1/sdk/non-llm-policy',
+]);
+const backendReservationMutation =
+  /^\/api\/v1\/budget\/reservations\/[^/]+\/(?:commit|extend|release)$/u;
+
+function isAllowedBackendRequest(url) {
+  if (
+    configuredBackend === null ||
+    url.origin !== configuredBackend.origin ||
+    url.search ||
+    url.hash
+  ) {
+    return false;
+  }
+  if (!url.pathname.startsWith(`${configuredBackend.basePath}/`)) return false;
+  const path = url.pathname.slice(configuredBackend.basePath.length);
+  return backendStaticPaths.has(path) || backendReservationMutation.test(path);
+}
+
 let activeJourney = null;
 globalThis.fetch = async (input, request) => {
   const href = input instanceof Request ? input.url : String(input);
@@ -59,6 +98,9 @@ globalThis.fetch = async (input, request) => {
   }
   if (url.origin === 'https://api.openai.com') {
     throw new Error(`unexpected official OpenAI request: ${url.pathname}`);
+  }
+  if (!isAllowedBackendRequest(url)) {
+    throw new Error(`unexpected external request: ${url.origin}${url.pathname}`);
   }
   const response = await networkFetch(input, request);
   if (

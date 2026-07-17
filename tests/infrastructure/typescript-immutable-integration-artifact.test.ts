@@ -182,10 +182,12 @@ afterEach(() => {
 describe('immutable TypeScript artifact service gate', () => {
   it('makes service suites consume the uploaded tarball without rebuilding or repacking it', () => {
     const integration = jobBlock(authoritativeWorkflow(), 'authoritative-integration');
-    expect(integration).toContain('    needs: typescript-package-artifact');
+    expect(integration).toContain(
+      '    needs: [typescript-package-artifact, python-package-artifact]',
+    );
     expect(
       namedStep(integration, 'Download the immutable TypeScript artifact for final service gates'),
-    ).toContain('uses: actions/download-artifact@v4');
+    ).toContain('uses: actions/download-artifact@v7');
 
     const verify = namedStep(
       integration,
@@ -211,11 +213,41 @@ describe('immutable TypeScript artifact service gate', () => {
     expect(integration).not.toContain('PYLVA_TYPESCRIPT_ARTIFACT_MODE=source');
     expect(verify).not.toContain('npm pack');
     expect(verify).not.toContain('pnpm --filter @pylva/sdk build');
-    expect(namedStep(integration, 'Build clean Python chaos artifact')).not.toContain('@pylva/sdk');
-    const pythonLangGraph = namedStep(integration, 'Build clean Python LangGraph artifact');
+    const pythonDownload = namedStep(
+      integration,
+      'Download the immutable Python artifacts for final service gates',
+    );
+    expect(pythonDownload).toContain('name: pylva-python-sdk-immutable');
+    const pythonIdentity = namedStep(
+      integration,
+      'Verify the exact Python artifact identity for final service gates',
+    );
+    expect(pythonIdentity).toContain('PYLVA_PYTHON_WHEEL_SHA256');
+    expect(pythonIdentity).toContain('sha256sum "$WHEEL"');
+    const pythonChaos = namedStep(integration, 'Install immutable Python chaos artifact');
+    expect(pythonChaos).toContain('"$PYLVA_PYTHON_WHEEL"');
+    expect(pythonChaos).not.toContain('python -m pip wheel');
+    const pythonLangGraph = namedStep(integration, 'Install immutable Python LangGraph artifact');
     expect(pythonLangGraph).not.toContain('@pylva/sdk');
+    expect(pythonLangGraph).not.toContain('python -m pip wheel');
+    expect(pythonLangGraph).toContain('"$PYLVA_PYTHON_WHEEL"');
     expect(pythonLangGraph).toContain("'openai==2.45.0'");
     expect(pythonLangGraph).toContain("'respx==0.23.1'");
+  });
+
+  it('builds one Python artifact pair and makes every matrix leg verify those bytes', () => {
+    const workflow = authoritativeWorkflow();
+    const artifact = jobBlock(workflow, 'python-package-artifact');
+    const matrix = jobBlock(workflow, 'python-package-matrix');
+    expect(artifact).toContain('python -m build --outdir "$ARTIFACT_DIR" packages/sdk-py');
+    expect(artifact).toContain('name: pylva-python-sdk-immutable');
+    expect(artifact).toContain('--verify-existing');
+    expect(matrix).toContain('    needs: python-package-artifact');
+    expect(matrix).toContain('uses: actions/download-artifact@v7');
+    expect(matrix).toContain('name: pylva-python-sdk-immutable');
+    expect(matrix).toContain('--wheel-sha256 "$WHEEL_SHA256"');
+    expect(matrix).toContain('--sdist-sha256 "$SDIST_SHA256"');
+    expect(matrix).not.toContain('python -m build');
   });
 
   it('keeps both runners fail-closed unless immutable artifact identity is supplied', () => {
@@ -259,10 +291,29 @@ describe('immutable TypeScript artifact service gate', () => {
     expect(runner).toContain("new OpenAI({ apiKey: 'provider-private-langgraph-key'");
     expect(runner).toContain('const openai = await this.openai');
     expect(runner).toContain("url.origin === 'https://api.openai.com'");
+    expect(runner).toContain('function isAllowedBackendRequest(url)');
+    expect(runner).toContain('backendStaticPaths.has(path)');
+    expect(runner).toContain('backendReservationMutation.test(path)');
+    expect(runner).toContain('throw new Error(`unexpected external request:');
+    expect(runner.indexOf('if (!isAllowedBackendRequest(url))')).toBeLessThan(
+      runner.indexOf('await networkFetch(input, request)'),
+    );
     expect(runner).toContain("url.pathname === '/api/v1/budget/reservations'");
     expect(runner).toContain("decision.decision === 'reserved'");
     expect(runner).not.toContain('const rawClient');
     expect(runner).not.toContain('attemptIds(');
+  });
+
+  it('keeps the Python LangGraph network pass-through on an explicit API allowlist', () => {
+    const runner = readFileSync(
+      path.join(repoRoot, 'tests/fixtures/authoritative_budget_langgraph_sdk_py_runner.py'),
+      'utf8',
+    );
+    expect(runner).toContain('for backend_path in backend_paths:');
+    expect(runner).toContain('url=f"{backend}{backend_path}"');
+    expect(runner).toContain('/api/v1/budget/reservations/');
+    expect(runner).toContain('(?:commit|extend|release)$');
+    expect(runner).not.toContain("endpoint.rstrip('/'))}(?:/|$)");
   });
 
   it('loads root, deep entrypoint, and LangGraph peers only from one verified install', async () => {
