@@ -232,7 +232,7 @@ export const EXPECTED_MIGRATIONS: readonly MigrationManifestEntry[] = [
   {
     filename: '049_backfill_builder_owner_memberships.sql',
     sha256: 'be2ab84f5df894efb2d911e1edf237eda09259ec7f46aca50508b85215f3bb91',
-    phase: 'pre_roll',
+    phase: 'post_roll',
   },
 ] as const;
 

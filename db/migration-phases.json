@@ -1,6 +1,7 @@
 {
   "default": "pre_roll",
   "overrides": {
-    "048_universal_api_key_scope.sql": "post_roll"
+    "048_universal_api_key_scope.sql": "post_roll",
+    "049_backfill_builder_owner_memberships.sql": "post_roll"
   }
 }
