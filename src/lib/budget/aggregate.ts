@@ -33,20 +33,22 @@ export async function aggregateSpendForRule(
   const period = (rule.config as { period: RulePeriod }).period;
   const from = window?.from ?? periodStartFor(period);
   const customerFilter = scopedCustomerId ? 'AND customer_id = {customer_id:String}' : '';
-  const upperBoundFilter = window ? 'AND timestamp < {to:DateTime}' : '';
+  const upperBoundFilter = window
+    ? "AND timestamp < parseDateTime64BestEffort({to:String}, 3, 'UTC')"
+    : '';
   const rows = await queryCostEvents(
     builderId,
     // is_demo = 0 mirrors previewRule + every dashboard query: rules and
     // budget enforcement act on REAL traffic only. Without this, seeded
-    // demo cost_events (is_demo=1, never purged) are summed into the
+    // demo events (is_demo=1, never purged) are summed into the
     // period total, so a pooled cost_threshold/budget_limit rule fires —
     // or the SDK budget_exceeded flag hard-stops a real call — on fake
     // money, while previewRule (which DOES filter is_demo) shows $0.
     `SELECT sum(cost_usd) AS s
-     FROM cost_events
+     FROM cost_events_with_control
      WHERE builder_id = {builder_id:String}
        AND is_demo = 0
-       AND timestamp >= {from:DateTime}
+       AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
        ${upperBoundFilter}
        ${customerFilter}`,
     {

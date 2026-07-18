@@ -12,16 +12,20 @@
 //   or (metric) per process.
 
 import { randomUUID } from 'node:crypto';
-import {
-  TokenCountSource,
-  type BudgetExceededFlag,
-  type IngestRequest,
-  type IngestResponse,
-  type TelemetryEvent,
-} from '@pylva/shared';
+import type { IngestRequest, IngestResponse, TelemetryEvent } from '@pylva/shared/telemetry';
+import { TokenCountSource } from '@pylva/shared/telemetry-values';
+import type { BudgetExceededFlag } from '@pylva/shared/budget-errors';
 import { getConfig } from './config.js';
+import type { RuntimeConfig } from './config.js';
 import { markExceededFromBackend } from './budget_accumulator.js';
 import { recordLlmSpend } from './budget_rules.js';
+import { SDK_VERSION } from './version.js';
+import { registerIdentityResetter } from './identity_registry.js';
+import {
+  AuthenticatedRoute,
+  coreRuntime,
+  type AuthenticatedResponseSnapshot,
+} from '../internal/core-runtime-state.js';
 
 const BUFFER_CAP = 10_000;
 const LRU_CAP = 10_000;
@@ -32,9 +36,18 @@ let sentSpanIds: Set<string> = new Set();
 let sentSpanIdsQueue: string[] = []; // FIFO order for LRU eviction
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 let degraded = false;
+let degradedConfig: RuntimeConfig | null = null;
 let warnedOverflow = false;
 let warnedEstimatedUsage = false;
+let flushInFlight: Promise<void> | null = null;
 const warnedUnknownModel = new Set<string>(); // keys: `${provider}|${model}` or `metric:${metric}`
+let telemetryEpoch = 0;
+const activeControllers = new Set<AbortController>();
+const activeBatchCounts = new Map<number, number>();
+const retryWaiters = new Set<{
+  timer: ReturnType<typeof setTimeout>;
+  resolve: () => void;
+}>();
 
 function warnOnce(set: Set<string>, key: string, message: string): void {
   if (set.has(key)) return;
@@ -61,10 +74,8 @@ function isBudgetExceededFlag(flag: unknown): flag is BudgetExceededFlag {
 }
 
 const SCHEMA_VERSION = '1.6';
-const SDK_VERSION = '1.1.0';
-
 export function enqueue(event: Omit<TelemetryEvent, 'schema_version' | 'sdk_version'>): void {
-  if (degraded) return;
+  if (isCurrentConfigDegraded()) return;
 
   const full: TelemetryEvent = {
     ...event,
@@ -138,11 +149,22 @@ export function bufferSize(): number {
 }
 
 export function isDegraded(): boolean {
-  return degraded;
+  return isCurrentConfigDegraded();
 }
 
-export async function flush(): Promise<void> {
-  if (degraded) return;
+export function flush(): Promise<void> {
+  if (flushInFlight !== null) return flushInFlight;
+  const promise = flushOnce();
+  const wrapped = promise.finally(() => {
+    if (flushInFlight === wrapped) flushInFlight = null;
+  });
+  flushInFlight = wrapped;
+  return wrapped;
+}
+
+async function flushOnce(): Promise<void> {
+  const owner = telemetryEpoch;
+  if (isCurrentConfigDegraded()) return;
   const cfg = getConfig();
   if (!cfg) return;
   if (cfg.localMode) {
@@ -159,26 +181,42 @@ export async function flush(): Promise<void> {
   const newBatch = batch.filter((ev) => !sentSpanIds.has(ev.span_id));
   if (newBatch.length === 0) return;
 
+  activeBatchCounts.set(owner, (activeBatchCounts.get(owner) ?? 0) + newBatch.length);
+  try {
+    await flushBatch(newBatch, owner, cfg);
+  } finally {
+    const remaining = (activeBatchCounts.get(owner) ?? 0) - newBatch.length;
+    if (remaining > 0) activeBatchCounts.set(owner, remaining);
+    else activeBatchCounts.delete(owner);
+  }
+}
+
+async function flushBatch(
+  newBatch: TelemetryEvent[],
+  owner: number,
+  cfg: RuntimeConfig,
+): Promise<void> {
   const body: IngestRequest = {
     batch_id: randomUUID(),
     sdk_version: SDK_VERSION,
     events: newBatch,
   };
 
-  let response: Response | null = null;
+  let response: AuthenticatedResponseSnapshot | null = null;
   let lastError: Error | null = null;
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    if (owner !== telemetryEpoch) return;
+    const controller = new AbortController();
+    activeControllers.add(controller);
     try {
-      response = await fetch(`${cfg.endpoint}/api/v1/events`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'X-Pylva-Key': cfg.apiKey,
-        },
+      response = await coreRuntime.authenticatedRequest({
+        route: AuthenticatedRoute.EVENTS,
         body: JSON.stringify(body),
+        signal: controller.signal,
       });
+      if (owner !== telemetryEpoch) return;
       if (response.status === 401) {
-        enterDegraded();
+        enterDegraded(owner, cfg);
         return;
       }
       if (response.status >= 500) {
@@ -186,19 +224,25 @@ export async function flush(): Promise<void> {
         lastError = new Error(`HTTP ${response.status}`);
         if (attempt < RETRY_DELAYS_MS.length) {
           await delay(RETRY_DELAYS_MS[attempt]!);
+          if (owner !== telemetryEpoch) return;
           continue;
         }
       }
       break;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
+      if (owner !== telemetryEpoch) return;
       if (attempt < RETRY_DELAYS_MS.length) {
         await delay(RETRY_DELAYS_MS[attempt]!);
+        if (owner !== telemetryEpoch) return;
         continue;
       }
+    } finally {
+      activeControllers.delete(controller);
     }
   }
 
+  if (owner !== telemetryEpoch) return;
   if (!response || response.status >= 500) {
     // Retries exhausted. Re-queue the batch at the head so the next flush retries.
     buffer = [...newBatch, ...buffer];
@@ -220,11 +264,12 @@ export async function flush(): Promise<void> {
 
   let parsed: IngestResponse;
   try {
-    parsed = (await response.json()) as IngestResponse;
+    parsed = JSON.parse(response.bodyText) as IngestResponse;
   } catch {
     // server success but unparseable — drop the batch and move on.
     return;
   }
+  if (owner !== telemetryEpoch) return;
 
   // Mark accepted spans as sent so SDK doesn't re-send duplicates.
   for (const ev of newBatch) {
@@ -260,15 +305,29 @@ export async function flush(): Promise<void> {
   }
 }
 
-function enterDegraded(): void {
+function enterDegraded(owner: number, cfg: RuntimeConfig): void {
+  if (owner !== telemetryEpoch) return;
   degraded = true;
+  degradedConfig = cfg;
   buffer = [];
   clearFlushTimer();
 
   console.warn(
     '[pylva] API key was rejected. Check it at https://pylva.com/settings/keys. ' +
-      'Telemetry is now disabled for this process.',
+      'Telemetry is disabled for the current SDK configuration.',
   );
+}
+
+function isCurrentConfigDegraded(): boolean {
+  if (!degraded) return false;
+  // A 401 disables only the config object that made the rejected request.
+  // init() is explicitly re-entrant for key rotation / HMR, so a subsequent
+  // config instance must be allowed to retry instead of dropping forever.
+  const cfg = getConfig();
+  if (!cfg || cfg === degradedConfig) return true;
+  degraded = false;
+  degradedConfig = null;
+  return false;
 }
 
 function recordSent(spanId: string): void {
@@ -284,9 +343,17 @@ function recordSent(spanId: string): void {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
-    const t = setTimeout(resolve, ms);
-    if (typeof (t as unknown as { unref?: () => void }).unref === 'function') {
-      (t as unknown as { unref: () => void }).unref();
+    const waiter = {
+      timer: undefined as unknown as ReturnType<typeof setTimeout>,
+      resolve,
+    };
+    waiter.timer = setTimeout(() => {
+      retryWaiters.delete(waiter);
+      resolve();
+    }, ms);
+    retryWaiters.add(waiter);
+    if (typeof (waiter.timer as unknown as { unref?: () => void }).unref === 'function') {
+      (waiter.timer as unknown as { unref: () => void }).unref();
     }
   });
 }
@@ -302,12 +369,38 @@ if (typeof process !== 'undefined' && typeof process.on === 'function') {
 
 // Test-only resets.
 export function _resetTelemetryForTests(): void {
+  resetTelemetry(false);
+}
+
+function resetTelemetry(reportDropped: boolean): void {
+  const owner = telemetryEpoch;
+  const dropped = buffer.length + (activeBatchCounts.get(owner) ?? 0);
+  telemetryEpoch += 1;
+  for (const controller of activeControllers) controller.abort();
+  activeControllers.clear();
+  for (const waiter of retryWaiters) {
+    clearTimeout(waiter.timer);
+    waiter.resolve();
+  }
+  retryWaiters.clear();
+  activeBatchCounts.clear();
+  flushInFlight = null;
   buffer = [];
   sentSpanIds = new Set();
   sentSpanIdsQueue = [];
   clearFlushTimer();
   degraded = false;
+  degradedConfig = null;
   warnedOverflow = false;
   warnedEstimatedUsage = false;
   warnedUnknownModel.clear();
+  if (reportDropped && dropped > 0) {
+    console.warn(`[pylva] SDK identity changed; dropped ${dropped} buffered telemetry events`);
+  }
 }
+
+export function _resetTelemetryForIdentityChange(): void {
+  resetTelemetry(true);
+}
+
+registerIdentityResetter(_resetTelemetryForIdentityChange);

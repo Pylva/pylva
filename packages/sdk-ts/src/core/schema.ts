@@ -13,11 +13,11 @@ export {
   CostSource,
   TokenCountSource,
   IngestWarningCode,
-} from '@pylva/shared';
+} from '@pylva/shared/telemetry';
 
 export type {
   TelemetryEvent,
   TelemetryBatch,
   IngestRequest,
   IngestResponse,
-} from '@pylva/shared';
+} from '@pylva/shared/telemetry';

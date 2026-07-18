@@ -19,6 +19,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { SourceHealthBadge } from './SourceHealthBadge';
+import type { CostSourceProtectionState } from '@/lib/cost-sources/protection';
 
 export interface CostSourceControlRow {
   id: string;
@@ -34,6 +35,7 @@ export interface CostSourceControlRow {
   last_discovered_at: string | null;
   discovery_count: number;
   has_pricing: boolean;
+  protection_state: CostSourceProtectionState;
 }
 
 type Filter = 'all' | 'tracked' | 'pending' | 'ignored' | 'llm';
@@ -94,6 +96,10 @@ export function CostSourcesControlTable({
             ? {
                 ...row,
                 tracking_status,
+                protection_state:
+                  tracking_status === CostSourceTrackingStatus.IGNORED
+                    ? 'unpriced_uncontrolled'
+                    : row.protection_state,
               }
             : row,
         ),
@@ -128,6 +134,7 @@ export function CostSourcesControlTable({
             <TableRow>
               <TableHead>Source</TableHead>
               <TableHead>Tracking</TableHead>
+              <TableHead>Protection</TableHead>
               <TableHead>Metric</TableHead>
               <TableHead>Matchers</TableHead>
               <TableHead>Seen</TableHead>
@@ -157,6 +164,9 @@ export function CostSourcesControlTable({
                   source.tracking_status !== CostSourceTrackingStatus.IGNORED ? (
                     <div className="mt-1 text-xs text-amber-700">pricing required</div>
                   ) : null}
+                </TableCell>
+                <TableCell className="align-top">
+                  <ProtectionBadge state={source.protection_state} />
                 </TableCell>
                 <TableCell className="align-top text-xs">
                   {source.metric ? (
@@ -265,4 +275,34 @@ function TrackingBadge({ source }: { source: CostSourceControlRow }): React.Reac
 
 function Badge({ label, className }: { label: string; className: string }): React.ReactElement {
   return <span className={`rounded-sm px-2 py-0.5 text-xs ${className}`}>{label}</span>;
+}
+
+function ProtectionBadge({ state }: { state: CostSourceProtectionState }) {
+  const presentation: Record<
+    CostSourceProtectionState,
+    { glyph: string; label: string; className: string }
+  > = {
+    protected: {
+      glyph: '✓',
+      label: 'Protected',
+      className: 'bg-emerald-50 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200',
+    },
+    ready_to_protect: {
+      glyph: '+',
+      label: 'Ready to protect',
+      className: 'bg-sky-50 text-sky-800 dark:bg-sky-950/40 dark:text-sky-200',
+    },
+    tracking_only: {
+      glyph: '◷',
+      label: 'Tracking only',
+      className: 'bg-amber-50 text-amber-900 dark:bg-amber-950/40 dark:text-amber-200',
+    },
+    unpriced_uncontrolled: {
+      glyph: '⊘',
+      label: 'Unpriced/uncontrolled',
+      className: 'bg-red-50 text-red-800 dark:bg-red-950/40 dark:text-red-200',
+    },
+  };
+  const item = presentation[state];
+  return <Badge label={`${item.glyph} ${item.label}`} className={item.className} />;
 }

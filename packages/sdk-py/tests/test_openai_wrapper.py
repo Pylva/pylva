@@ -1,9 +1,10 @@
 """B3-T1 — OpenAI wrapper coverage.
 
 The wrapper monkey-patches ``openai.resources.chat.completions.Completions``.
-To test it without pulling in the real `openai` SDK (not a test dep), we inject
-a minimal fake openai module into sys.modules. The wrapper then attaches to
-the fake class exactly as it would to the real one.
+We inject a minimal fake OpenAI module into ``sys.modules`` so these legacy
+tests remain deterministic even when provider compatibility dependencies are
+installed. The wrapper attaches to the fake class exactly as it would to the
+real one.
 
 Covers:
   * Patch is a silent no-op when the `openai` package is unavailable.
@@ -86,6 +87,9 @@ def _install_fake_openai(raise_exc: Exception | None = None) -> Any:
     sys.modules["openai.resources"] = resources_pkg
     sys.modules["openai.resources.chat"] = chat_pkg
     sys.modules["openai.resources.chat.completions"] = completions_mod
+    # ``pylva.init`` may have auto-patched an installed real SDK immediately
+    # before this fake was installed. The fake class is a new patch target.
+    openai_wrapper._reset_openai_patch_for_tests()  # type: ignore[attr-defined]
     return Completions
 
 

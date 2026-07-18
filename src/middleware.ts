@@ -25,6 +25,7 @@ import { SESSION_FINGERPRINT_PATTERN, sessionFingerprint } from './lib/auth/sess
 import { env } from './lib/config.js';
 import { apiError, forbiddenError } from './lib/errors.js';
 import { logger } from './lib/logger.js';
+import { isAuthoritativeBudgetControlPath } from './lib/budget-control/public-paths.js';
 
 const log = logger.child({ module: 'middleware.dashboard' });
 
@@ -167,17 +168,26 @@ async function handleApiKeyAuth(
   request: NextRequest,
   rateKeyPrefix: string,
   preset: RateLimitConfig,
+  noStoreResponse = false,
 ): Promise<NextResponse> {
   const authResult = await withApiKeyAuth(request);
-  if (authResult instanceof NextResponse) return authResult;
+  if (authResult instanceof NextResponse) {
+    if (noStoreResponse) authResult.headers.set('Cache-Control', 'no-store');
+    return authResult;
+  }
 
   const rateLimitResult = await withRateLimit(`${rateKeyPrefix}:${authResult.keyId}`, preset);
-  if (rateLimitResult) return rateLimitResult;
+  if (rateLimitResult) {
+    if (noStoreResponse) rateLimitResult.headers.set('Cache-Control', 'no-store');
+    return rateLimitResult;
+  }
 
-  return nextWithContext(request, {
+  const response = nextWithContext(request, {
     'x-builder-id': authResult.builderId,
     'x-key-id': authResult.keyId,
   });
+  if (noStoreResponse) response.headers.set('Cache-Control', 'no-store');
+  return response;
 }
 
 export async function middleware(request: NextRequest) {
@@ -226,6 +236,15 @@ export async function middleware(request: NextRequest) {
     pathname === '/api/v1/billing/webhooks'
   ) {
     return nextWithContext(request);
+  }
+
+  // Authoritative reserve/commit/release/extend and capability discovery are
+  // always SDK API-key surfaces. Authentication is intentionally independent
+  // of the rollout flag: disabled routes must still never fall through to the
+  // dashboard JWT branch. A dedicated prefix isolates control traffic from
+  // telemetry for the same universal API key.
+  if (isAuthoritativeBudgetControlPath(pathname)) {
+    return handleApiKeyAuth(request, 'budget_control', RATE_LIMIT_PRESETS.budgetControl, true);
   }
 
   // SDK-facing routes (per-keyId rate limit — spec §4.10).

@@ -11,6 +11,7 @@ WORKDIR /app
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates \
   && rm -rf /var/lib/apt/lists/* \
+  && npm install --global corepack@0.35.0 \
   && corepack enable
 
 FROM base AS deps
@@ -71,17 +72,17 @@ FROM deps AS migrations
 # Step 6 migration runner. The Next.js standalone image intentionally omits
 # db/ and pnpm; this target keeps the migration assets and package runner.
 COPY db/ ./db/
-COPY scripts/apply-postgres-migration.ts scripts/apply-postgres-migration-env.ts scripts/db-migrate.ts scripts/db-migrate-core.ts scripts/db-migrate-env.ts scripts/verify-physical-schema-contract.ts ./scripts/
+COPY scripts/apply-postgres-migration.ts scripts/apply-postgres-migration-env.ts scripts/db-migrate.ts scripts/db-migrate-core.ts scripts/db-migrate-env.ts scripts/migration-database-env.ts scripts/verify-physical-schema-contract.ts ./scripts/
 COPY scripts/check-external-egress.ts ./scripts/
 COPY src/lib/external-egress.ts src/lib/external-egress-config.ts src/lib/external-egress-core.ts src/lib/safe-error-metadata.ts ./src/lib/
 COPY tsconfig.json ./
-COPY docker-db-url.sh docker-migrate-entrypoint.sh ./
-RUN chmod 755 /app/docker-migrate-entrypoint.sh /app/docker-db-url.sh
+COPY docker-migration-db-url.sh docker-migrate-entrypoint.sh ./
+RUN chmod 755 /app/docker-migrate-entrypoint.sh /app/docker-migration-db-url.sh
 
 ENV NODE_ENV=production
 
-# Assemble DATABASE_URL from the ECS-injected RDS secret parts before
-# db:migrate. Use a command override for db:setup during fresh bootstraps.
+# Resolve the dedicated migration credential before db:migrate. Use a command
+# override for db:setup during fresh bootstraps.
 ENTRYPOINT ["/app/docker-migrate-entrypoint.sh"]
 CMD ["pnpm", "db:migrate"]
 
@@ -116,9 +117,9 @@ RUN groupadd --system --gid 1001 nodejs \
 
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-COPY --chown=nextjs:nodejs docker-entrypoint.sh docker-db-url.sh /app/
+COPY --chown=nextjs:nodejs docker-entrypoint.sh docker-db-url.sh docker-runtime-db-guard.sh /app/
 
-RUN chmod 755 /app/docker-entrypoint.sh /app/docker-db-url.sh
+RUN chmod 755 /app/docker-entrypoint.sh /app/docker-db-url.sh /app/docker-runtime-db-guard.sh
 
 USER nextjs
 

@@ -7,7 +7,10 @@ import { readDashboardHeaders } from '@/lib/dashboard/headers';
 import { getCustomerDetail } from '@/lib/clickhouse/dashboard-queries';
 import { notFound } from 'next/navigation.js';
 import { COPY } from '@/lib/copy';
-import { formatUsd } from '@/lib/formatting';
+import { formatTelemetryUsd } from '@/lib/formatting';
+import { BudgetActivityPanel } from '@/components/budget-activity/BudgetActivityPanel';
+import { parseBudgetActivityQuery } from '@/lib/budget-activity/query';
+import { getBudgetAccountState, listBudgetActivity } from '@/lib/budget-activity/read-model';
 
 export const metadata: Metadata = { title: 'End user' };
 
@@ -19,7 +22,7 @@ export default async function EndUserDetailPage({
   searchParams: Promise<{ from?: string; to?: string }>;
 }) {
   const { builderId } = await readDashboardHeaders();
-  const { id } = await params;
+  const { slug, id } = await params;
   const { from: fromRaw, to: toRaw } = await searchParams;
   const to = toRaw ? new Date(toRaw) : new Date();
   const from = fromRaw ? new Date(fromRaw) : new Date(to.getTime() - 30 * 86_400_000);
@@ -30,7 +33,11 @@ export default async function EndUserDetailPage({
   // is kept available via the includeDemo flag in dashboard-queries but is
   // not auto-enabled here. Both ID forms fire in one wave (launch perf) —
   // composite (live data) wins whenever it has events.
-  const [composite, raw] = await Promise.all([
+  const authoritativeCustomer = /^[A-Za-z0-9_-]{1,255}$/.test(externalId);
+  const activityQuery = authoritativeCustomer
+    ? parseBudgetActivityQuery(new URLSearchParams({ customer: externalId, page_size: '10' }))
+    : null;
+  const [composite, raw, activityPage, accounts] = await Promise.all([
     getCustomerDetail(
       builderId,
       `${builderId}:${externalId}`,
@@ -38,9 +45,17 @@ export default async function EndUserDetailPage({
       { includeDemo: false },
     ),
     getCustomerDetail(builderId, externalId, { from, to }, { includeDemo: false }),
+    activityQuery
+      ? listBudgetActivity(builderId, activityQuery)
+      : Promise.resolve({ activities: [] }),
+    authoritativeCustomer
+      ? getBudgetAccountState(builderId, { customer_id: externalId, limit: 8 })
+      : Promise.resolve([]),
   ]);
   const detail = composite.event_count > 0 ? composite : raw;
-  if (detail.event_count === 0) notFound();
+  if (detail.event_count === 0 && activityPage.activities.length === 0 && accounts.length === 0) {
+    notFound();
+  }
 
   return (
     <>
@@ -50,65 +65,94 @@ export default async function EndUserDetailPage({
       </p>
 
       <section className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <Card label="Total spend" value={formatUsd(detail.total_spend_usd)} />
+        <Card label="Total spend" value={formatTelemetryUsd(detail.total_spend_usd)} />
         <Card label="Events" value={detail.event_count.toLocaleString()} />
       </section>
 
       <section className="mt-10 grid grid-cols-1 gap-6 md:grid-cols-2">
         <div>
           <h2 className="text-lg font-semibold tracking-tight">By model</h2>
-          <ul className="mt-4 space-y-2 text-sm">
-            {detail.by_model.slice(0, 10).map((r) => (
-              <li
-                key={`${r.provider}/${r.model ?? '-'}`}
-                className="flex items-center justify-between rounded-md border border-[color:var(--border)] px-3 py-2"
-              >
-                <span className="truncate">
-                  {r.provider}/{r.model ?? '—'}
-                </span>
-                <span className="text-[color:var(--muted-foreground)] tabular-nums">
-                  {formatUsd(r.spend_usd)} · {r.call_count}×
-                </span>
-              </li>
-            ))}
-          </ul>
+          {detail.by_model.length === 0 ? (
+            <NoSpendBreakdown />
+          ) : (
+            <ul className="mt-4 space-y-2 text-sm">
+              {detail.by_model.slice(0, 10).map((r) => (
+                <li
+                  key={`${r.provider}/${r.model ?? '-'}`}
+                  className="flex items-center justify-between rounded-md border border-[color:var(--border)] px-3 py-2"
+                >
+                  <span className="truncate">
+                    {r.provider}/{r.model ?? '—'}
+                  </span>
+                  <span className="text-[color:var(--muted-foreground)] tabular-nums">
+                    {formatTelemetryUsd(r.spend_usd)} · {r.call_count}×
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
         <div>
           <h2 className="text-lg font-semibold tracking-tight">By step</h2>
-          <ul className="mt-4 space-y-2 text-sm">
-            {detail.by_step.slice(0, 10).map((r) => (
-              <li
-                key={r.step_name ?? '-'}
-                className="flex items-center justify-between rounded-md border border-[color:var(--border)] px-3 py-2"
-              >
-                <span className="truncate">{r.step_name ?? '(unnamed)'}</span>
-                <span className="text-[color:var(--muted-foreground)] tabular-nums">
-                  {formatUsd(r.spend_usd)} · {r.call_count}×
-                </span>
-              </li>
-            ))}
-          </ul>
+          {detail.by_step.length === 0 ? (
+            <NoSpendBreakdown />
+          ) : (
+            <ul className="mt-4 space-y-2 text-sm">
+              {detail.by_step.slice(0, 10).map((r) => (
+                <li
+                  key={r.step_name ?? '-'}
+                  className="flex items-center justify-between rounded-md border border-[color:var(--border)] px-3 py-2"
+                >
+                  <span className="truncate">{r.step_name ?? '(unnamed)'}</span>
+                  <span className="text-[color:var(--muted-foreground)] tabular-nums">
+                    {formatTelemetryUsd(r.spend_usd)} · {r.call_count}×
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       </section>
 
       <section className="mt-10">
         <h2 className="text-lg font-semibold tracking-tight">Daily spend</h2>
-        <ul className="mt-4 space-y-1 font-mono text-xs">
-          {detail.daily.map((d) => (
-            <li key={d.day} className="flex items-center gap-3">
-              <span className="text-[color:var(--muted-foreground)] w-24">{d.day}</span>
-              <div className="h-2 flex-1 rounded-sm bg-[color:var(--muted)]">
-                <div
-                  className="h-2 rounded-sm bg-[color:var(--primary)]"
-                  style={{ width: `${relWidth(d.spend_usd, detail.daily)}%` }}
-                />
-              </div>
-              <span className="w-20 text-right tabular-nums">{formatUsd(d.spend_usd)}</span>
-            </li>
-          ))}
-        </ul>
+        {detail.daily.length === 0 ? (
+          <NoSpendBreakdown />
+        ) : (
+          <ul className="mt-4 space-y-1 font-mono text-xs">
+            {detail.daily.map((d) => (
+              <li key={d.day} className="flex items-center gap-3">
+                <span className="text-[color:var(--muted-foreground)] w-24">{d.day}</span>
+                <div className="h-2 flex-1 rounded-sm bg-[color:var(--muted)]">
+                  <div
+                    className="h-2 rounded-sm bg-[color:var(--primary)]"
+                    style={{ width: `${relWidth(d.spend_usd, detail.daily)}%` }}
+                  />
+                </div>
+                <span className="w-24 text-right tabular-nums">
+                  {formatTelemetryUsd(d.spend_usd)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
+
+      <BudgetActivityPanel
+        activities={activityPage.activities}
+        accounts={accounts}
+        slug={slug}
+        title="End-user budget control"
+      />
     </>
+  );
+}
+
+function NoSpendBreakdown() {
+  return (
+    <p className="mt-4 rounded-md border border-dashed border-[color:var(--border)] p-3 text-sm text-[color:var(--muted-foreground)]">
+      No charged usage. Control-only actions stay out of spend and event totals.
+    </p>
   );
 }
 

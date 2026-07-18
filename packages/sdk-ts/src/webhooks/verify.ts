@@ -15,6 +15,8 @@ export class InvalidSignatureFormat extends Error {
   }
 }
 
+Object.defineProperty(InvalidSignatureFormat, 'name', { value: 'InvalidSignatureFormat' });
+
 export interface VerifyWebhookOptions {
   toleranceSeconds?: number;
   now?: () => number; // epoch ms; for tests

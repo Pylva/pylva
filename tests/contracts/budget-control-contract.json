@@ -1,0 +1,2898 @@
+{
+  "$schema_version": "1.0",
+  "description": "Canonical valid and invalid wire examples for authoritative budget control, including widened exact post-provider costs. Backend, TypeScript SDK, and Python SDK replay every fixture without name-based exceptions.",
+  "fixtures": [
+    {
+      "name": "capabilities_ready_with_additive_field",
+      "schema": "capabilities_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "control_enabled": true,
+        "min_reservation_ttl_seconds": 30,
+        "default_reservation_ttl_seconds": 300,
+        "max_reservation_ttl_seconds": 3600,
+        "server_time": "2026-07-13T20:00:00.000Z",
+        "future_capability": "ignored"
+      },
+      "expected_output": {
+        "schema_version": "1.0",
+        "control_enabled": true,
+        "min_reservation_ttl_seconds": 30,
+        "default_reservation_ttl_seconds": 300,
+        "max_reservation_ttl_seconds": 3600,
+        "server_time": "2026-07-13T20:00:00.000Z"
+      }
+    },
+    {
+      "name": "capabilities_low_four_digit_year",
+      "schema": "capabilities_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "control_enabled": true,
+        "min_reservation_ttl_seconds": 30,
+        "default_reservation_ttl_seconds": 300,
+        "max_reservation_ttl_seconds": 3600,
+        "server_time": "0001-01-01T00:00:00Z"
+      }
+    },
+    {
+      "name": "reservation_llm_defaults_and_canonical_identity",
+      "schema": "reservation_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 100,
+        "max_output_tokens": 200
+      },
+      "expected_output": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "framework": "none",
+        "reservation_ttl_seconds": 300,
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 100,
+        "max_output_tokens": 200
+      }
+    },
+    {
+      "name": "reservation_llm_explicit_framework_and_non_default_ttl",
+      "schema": "reservation_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "shadow",
+        "operation_id": "11111111-1111-4111-8111-111111111112",
+        "customer_id": "customer-2",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": "66666666-6666-4666-8666-666666666666",
+        "step_name": null,
+        "framework": "langgraph",
+        "reservation_ttl_seconds": 31,
+        "kind": "llm",
+        "provider": "provider/custom v2",
+        "model": "model/custom:2026",
+        "estimated_input_tokens": 0,
+        "max_output_tokens": 4294967295
+      }
+    },
+    {
+      "name": "reservation_llm_uppercase_uuid_identity_normalizes",
+      "schema": "reservation_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+        "customer_id": "customer_uppercase",
+        "trace_id": "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB",
+        "span_id": "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC",
+        "parent_span_id": "DDDDDDDD-DDDD-4DDD-8DDD-DDDDDDDDDDDD",
+        "step_name": "uppercase-uuid",
+        "framework": "none",
+        "reservation_ttl_seconds": 300,
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      },
+      "expected_output": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "customer_id": "customer_uppercase",
+        "trace_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "span_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "parent_span_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "step_name": "uppercase-uuid",
+        "framework": "none",
+        "reservation_ttl_seconds": 300,
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_tool_decimal_canonicalization",
+      "schema": "reservation_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111113",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "research/search",
+        "framework": "langgraph",
+        "reservation_ttl_seconds": 3600,
+        "kind": "tool",
+        "cost_source_slug": "tavily-search",
+        "tool_name": "Tavily Search",
+        "metric": "credits",
+        "maximum_value": "1.2300"
+      },
+      "expected_output": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111113",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "research/search",
+        "framework": "langgraph",
+        "reservation_ttl_seconds": 3600,
+        "kind": "tool",
+        "cost_source_slug": "tavily-search",
+        "tool_name": "Tavily Search",
+        "metric": "credits",
+        "maximum_value": "1.23"
+      }
+    },
+    {
+      "name": "reservation_tool_maximum_numeric_38_18",
+      "schema": "reservation_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111114",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "tool",
+        "kind": "tool",
+        "cost_source_slug": "custom-tool",
+        "tool_name": "Custom Tool",
+        "metric": "units",
+        "maximum_value": "99999999999999999999.999999999999999999"
+      }
+    },
+    {
+      "name": "reservation_reserved_with_warning_and_additive_field",
+      "schema": "reservation_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "reserved",
+        "allowed": true,
+        "decision_id": "22222222-2222-4222-8222-222222222222",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "reservation_id": "33333333-3333-4333-8333-333333333333",
+        "state": "reserved",
+        "reserved_usd": "0.1000",
+        "remaining_usd": "0.9000",
+        "expires_at": "2026-07-13T20:05:00.000Z",
+        "warnings": [
+          {
+            "code": "advisory_budget_exceeded",
+            "rule_id": "77777777-7777-4777-8777-777777777777",
+            "limit_usd": "0.5000",
+            "projected_usd": "0.6000"
+          }
+        ],
+        "future_metadata": {
+          "ignored": true
+        }
+      },
+      "expected_output": {
+        "schema_version": "1.0",
+        "decision": "reserved",
+        "allowed": true,
+        "decision_id": "22222222-2222-4222-8222-222222222222",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "reservation_id": "33333333-3333-4333-8333-333333333333",
+        "state": "reserved",
+        "reserved_usd": "0.1",
+        "remaining_usd": "0.9",
+        "expires_at": "2026-07-13T20:05:00.000Z",
+        "warnings": [
+          {
+            "code": "advisory_budget_exceeded",
+            "rule_id": "77777777-7777-4777-8777-777777777777",
+            "limit_usd": "0.5",
+            "projected_usd": "0.6"
+          }
+        ]
+      }
+    },
+    {
+      "name": "reservation_reserved_without_applicable_hard_limit",
+      "schema": "reservation_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "reserved",
+        "allowed": true,
+        "decision_id": "22222222-2222-4222-8222-222222222223",
+        "operation_id": "11111111-1111-4111-8111-111111111112",
+        "reservation_id": "33333333-3333-4333-8333-333333333334",
+        "state": "reserved",
+        "reserved_usd": "0",
+        "remaining_usd": null,
+        "expires_at": "2026-07-13T20:05:00Z",
+        "warnings": []
+      }
+    },
+    {
+      "name": "reservation_denied_per_customer",
+      "schema": "reservation_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "denied",
+        "allowed": false,
+        "decision_id": "22222222-2222-4222-8222-222222222224",
+        "operation_id": "11111111-1111-4111-8111-111111111115",
+        "state": "refused",
+        "deciding_rule": {
+          "rule_id": "77777777-7777-4777-8777-777777777777",
+          "scope": "per_customer",
+          "customer_id": "customer_1",
+          "period": "day",
+          "period_start": "2026-07-13T00:00:00.000Z",
+          "period_end": "2026-07-14T00:00:00.000Z"
+        },
+        "committed_usd": "0.8",
+        "reserved_usd": "0.1",
+        "unresolved_usd": "0",
+        "requested_usd": "0.2",
+        "limit_usd": "1",
+        "remaining_usd": "0.1",
+        "warnings": []
+      }
+    },
+    {
+      "name": "reservation_denied_pooled",
+      "schema": "reservation_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "denied",
+        "allowed": false,
+        "decision_id": "22222222-2222-4222-8222-222222222225",
+        "operation_id": "11111111-1111-4111-8111-111111111116",
+        "state": "refused",
+        "deciding_rule": {
+          "rule_id": "77777777-7777-4777-8777-777777777778",
+          "scope": "pooled",
+          "customer_id": null,
+          "period": "month",
+          "period_start": "2026-07-01T00:00:00Z",
+          "period_end": "2026-08-01T00:00:00Z"
+        },
+        "committed_usd": "10",
+        "reserved_usd": "0",
+        "unresolved_usd": "2",
+        "requested_usd": "1",
+        "limit_usd": "12",
+        "remaining_usd": "0",
+        "warnings": []
+      }
+    },
+    {
+      "name": "reservation_bypassed_control_disabled",
+      "schema": "reservation_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "bypassed",
+        "allowed": true,
+        "decision_id": null,
+        "operation_id": "11111111-1111-4111-8111-111111111117",
+        "reason": "control_disabled",
+        "would_have_denied": null,
+        "warnings": []
+      }
+    },
+    {
+      "name": "reservation_bypassed_no_applicable_budget",
+      "schema": "reservation_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "bypassed",
+        "allowed": true,
+        "decision_id": "22222222-2222-4222-8222-222222222226",
+        "operation_id": "11111111-1111-4111-8111-111111111118",
+        "reason": "no_applicable_budget",
+        "would_have_denied": null,
+        "warnings": []
+      }
+    },
+    {
+      "name": "reservation_bypassed_shadow_would_allow",
+      "schema": "reservation_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "bypassed",
+        "allowed": true,
+        "decision_id": "22222222-2222-4222-8222-222222222227",
+        "operation_id": "11111111-1111-4111-8111-111111111119",
+        "reason": "shadow_would_allow",
+        "would_have_denied": false,
+        "warnings": []
+      }
+    },
+    {
+      "name": "reservation_bypassed_shadow_would_allow_with_advisory_warning",
+      "schema": "reservation_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "bypassed",
+        "allowed": true,
+        "decision_id": "22222222-2222-4222-8222-222222222252",
+        "operation_id": "11111111-1111-4111-8111-111111111162",
+        "reason": "shadow_would_allow",
+        "would_have_denied": false,
+        "warnings": [
+          {
+            "code": "advisory_budget_exceeded",
+            "rule_id": "77777777-7777-4777-8777-777777777790",
+            "limit_usd": "1",
+            "projected_usd": "1.01"
+          }
+        ]
+      }
+    },
+    {
+      "name": "reservation_bypassed_shadow_would_deny",
+      "schema": "reservation_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "bypassed",
+        "allowed": true,
+        "decision_id": "22222222-2222-4222-8222-222222222228",
+        "operation_id": "11111111-1111-4111-8111-111111111120",
+        "reason": "shadow_would_deny",
+        "would_have_denied": true,
+        "warnings": []
+      }
+    },
+    {
+      "name": "reservation_bypassed_shadow_control_unavailable",
+      "schema": "reservation_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "bypassed",
+        "allowed": true,
+        "decision_id": "22222222-2222-4222-8222-222222222250",
+        "operation_id": "11111111-1111-4111-8111-111111111160",
+        "reason": "shadow_control_unavailable",
+        "would_have_denied": null,
+        "warnings": []
+      }
+    },
+    {
+      "name": "reservation_bypassed_shadow_control_unavailable_advisory_warning_rejected",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "bypassed",
+        "allowed": true,
+        "decision_id": "22222222-2222-4222-8222-222222222251",
+        "operation_id": "11111111-1111-4111-8111-111111111161",
+        "reason": "shadow_control_unavailable",
+        "would_have_denied": null,
+        "warnings": [
+          {
+            "code": "advisory_budget_exceeded",
+            "rule_id": "77777777-7777-4777-8777-777777777790",
+            "limit_usd": "1",
+            "projected_usd": "1.01"
+          }
+        ]
+      }
+    },
+    {
+      "name": "reservation_bypassed_control_disabled_advisory_warning_rejected",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "bypassed",
+        "allowed": true,
+        "decision_id": null,
+        "operation_id": "11111111-1111-4111-8111-111111111117",
+        "reason": "control_disabled",
+        "would_have_denied": null,
+        "warnings": [
+          {
+            "code": "advisory_budget_exceeded",
+            "rule_id": "77777777-7777-4777-8777-777777777790",
+            "limit_usd": "1",
+            "projected_usd": "1.01"
+          }
+        ]
+      }
+    },
+    {
+      "name": "reservation_bypassed_no_applicable_budget_advisory_warning_rejected",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "bypassed",
+        "allowed": true,
+        "decision_id": "22222222-2222-4222-8222-222222222226",
+        "operation_id": "11111111-1111-4111-8111-111111111118",
+        "reason": "no_applicable_budget",
+        "would_have_denied": null,
+        "warnings": [
+          {
+            "code": "advisory_budget_exceeded",
+            "rule_id": "77777777-7777-4777-8777-777777777790",
+            "limit_usd": "1",
+            "projected_usd": "1.01"
+          }
+        ]
+      }
+    },
+    {
+      "name": "reservation_bypassed_no_applicable_budget_null_decision_id_rejected",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "bypassed",
+        "allowed": true,
+        "decision_id": null,
+        "operation_id": "11111111-1111-4111-8111-111111111118",
+        "reason": "no_applicable_budget",
+        "would_have_denied": null,
+        "warnings": []
+      }
+    },
+    {
+      "name": "reservation_bypassed_shadow_would_allow_null_decision_id_rejected",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "bypassed",
+        "allowed": true,
+        "decision_id": null,
+        "operation_id": "11111111-1111-4111-8111-111111111119",
+        "reason": "shadow_would_allow",
+        "would_have_denied": false,
+        "warnings": []
+      }
+    },
+    {
+      "name": "reservation_bypassed_shadow_would_deny_null_decision_id_rejected",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "bypassed",
+        "allowed": true,
+        "decision_id": null,
+        "operation_id": "11111111-1111-4111-8111-111111111120",
+        "reason": "shadow_would_deny",
+        "would_have_denied": true,
+        "warnings": []
+      }
+    },
+    {
+      "name": "reservation_bypassed_shadow_control_unavailable_null_decision_id",
+      "schema": "reservation_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "bypassed",
+        "allowed": true,
+        "decision_id": null,
+        "operation_id": "11111111-1111-4111-8111-111111111160",
+        "reason": "shadow_control_unavailable",
+        "would_have_denied": null,
+        "warnings": []
+      }
+    },
+    {
+      "name": "reservation_bypassed_shadow_control_unavailable_null_decision_id_advisory_warning_rejected",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "bypassed",
+        "allowed": true,
+        "decision_id": null,
+        "operation_id": "11111111-1111-4111-8111-111111111162",
+        "reason": "shadow_control_unavailable",
+        "would_have_denied": null,
+        "warnings": [
+          {
+            "code": "advisory_budget_exceeded",
+            "rule_id": "77777777-7777-4777-8777-777777777790",
+            "limit_usd": "1",
+            "projected_usd": "1.01"
+          }
+        ]
+      }
+    },
+    {
+      "name": "reservation_bypassed_shadow_control_unavailable_denial_flag_rejected",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "bypassed",
+        "allowed": true,
+        "decision_id": "22222222-2222-4222-8222-222222222250",
+        "operation_id": "11111111-1111-4111-8111-111111111160",
+        "reason": "shadow_control_unavailable",
+        "would_have_denied": true,
+        "warnings": []
+      }
+    },
+    {
+      "name": "reservation_unavailable_pricing",
+      "schema": "reservation_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "unavailable",
+        "allowed": false,
+        "decision_id": "22222222-2222-4222-8222-222222222229",
+        "operation_id": "11111111-1111-4111-8111-111111111121",
+        "reason": "pricing_unavailable",
+        "retryable": true
+      }
+    },
+    {
+      "name": "reservation_unavailable_usage_bound",
+      "schema": "reservation_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "unavailable",
+        "allowed": false,
+        "decision_id": null,
+        "operation_id": "11111111-1111-4111-8111-111111111122",
+        "reason": "usage_bound_required",
+        "retryable": false
+      }
+    },
+    {
+      "name": "reservation_unavailable_control_service",
+      "schema": "reservation_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "unavailable",
+        "allowed": false,
+        "decision_id": null,
+        "operation_id": "11111111-1111-4111-8111-111111111123",
+        "reason": "control_unavailable",
+        "retryable": true
+      }
+    },
+    {
+      "name": "commit_llm_success",
+      "schema": "commit_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "status": "success",
+        "latency_ms": 1250,
+        "stream_aborted": false,
+        "kind": "llm",
+        "actual_input_tokens": 95,
+        "actual_output_tokens": 180
+      }
+    },
+    {
+      "name": "commit_tool_aborted_decimal_canonicalization",
+      "schema": "commit_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "status": "aborted",
+        "latency_ms": 0,
+        "stream_aborted": true,
+        "kind": "tool",
+        "actual_value": "2.5000"
+      },
+      "expected_output": {
+        "schema_version": "1.0",
+        "status": "aborted",
+        "latency_ms": 0,
+        "stream_aborted": true,
+        "kind": "tool",
+        "actual_value": "2.5"
+      }
+    },
+    {
+      "name": "commit_response_under_reservation_with_additive_field",
+      "schema": "commit_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "state": "committed",
+        "reservation_id": "33333333-3333-4333-8333-333333333333",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "reserved_usd": "1.000",
+        "actual_usd": "0.600",
+        "released_usd": "0.400",
+        "overage_usd": "0.000",
+        "budget_exceeded_after_commit": false,
+        "committed_at": "2026-07-13T20:02:00.000Z",
+        "idempotent_replay": false,
+        "late": false,
+        "future_projection_id": "ignored"
+      },
+      "expected_output": {
+        "schema_version": "1.0",
+        "state": "committed",
+        "reservation_id": "33333333-3333-4333-8333-333333333333",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "reserved_usd": "1",
+        "actual_usd": "0.6",
+        "released_usd": "0.4",
+        "overage_usd": "0",
+        "budget_exceeded_after_commit": false,
+        "committed_at": "2026-07-13T20:02:00.000Z",
+        "idempotent_replay": false,
+        "late": false
+      }
+    },
+    {
+      "name": "commit_response_equal_reservation_replay",
+      "schema": "commit_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "state": "committed",
+        "reservation_id": "33333333-3333-4333-8333-333333333334",
+        "operation_id": "11111111-1111-4111-8111-111111111112",
+        "reserved_usd": "1",
+        "actual_usd": "1",
+        "released_usd": "0",
+        "overage_usd": "0",
+        "budget_exceeded_after_commit": false,
+        "committed_at": "2026-07-13T20:02:00Z",
+        "idempotent_replay": true,
+        "late": false
+      }
+    },
+    {
+      "name": "commit_response_over_reservation_late",
+      "schema": "commit_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "state": "committed",
+        "reservation_id": "33333333-3333-4333-8333-333333333335",
+        "operation_id": "11111111-1111-4111-8111-111111111113",
+        "reserved_usd": "1",
+        "actual_usd": "1.25",
+        "released_usd": "0",
+        "overage_usd": "0.25",
+        "budget_exceeded_after_commit": true,
+        "committed_at": "2026-07-13T20:10:00Z",
+        "idempotent_replay": false,
+        "late": true
+      }
+    },
+    {
+      "name": "commit_response_widened_post_provider_cost_canonicalization",
+      "schema": "commit_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "state": "committed",
+        "reservation_id": "33333333-3333-4333-8333-333333333340",
+        "operation_id": "11111111-1111-4111-8111-111111111140",
+        "reserved_usd": "0",
+        "actual_usd": "99999999999999999999999999.1200",
+        "released_usd": "0",
+        "overage_usd": "99999999999999999999999999.1200",
+        "budget_exceeded_after_commit": true,
+        "committed_at": "2026-07-13T20:11:00Z",
+        "idempotent_replay": false,
+        "late": true
+      },
+      "expected_output": {
+        "schema_version": "1.0",
+        "state": "committed",
+        "reservation_id": "33333333-3333-4333-8333-333333333340",
+        "operation_id": "11111111-1111-4111-8111-111111111140",
+        "reserved_usd": "0",
+        "actual_usd": "99999999999999999999999999.12",
+        "released_usd": "0",
+        "overage_usd": "99999999999999999999999999.12",
+        "budget_exceeded_after_commit": true,
+        "committed_at": "2026-07-13T20:11:00Z",
+        "idempotent_replay": false,
+        "late": true
+      }
+    },
+    {
+      "name": "release_provider_not_called",
+      "schema": "release_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "reason": "provider_not_called"
+      }
+    },
+    {
+      "name": "release_provider_confirmed_uncharged",
+      "schema": "release_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "reason": "provider_confirmed_uncharged"
+      }
+    },
+    {
+      "name": "release_response_replay",
+      "schema": "release_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "state": "released",
+        "reservation_id": "33333333-3333-4333-8333-333333333333",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "released_usd": "0.1000",
+        "released_at": "2026-07-13T20:01:00Z",
+        "idempotent_replay": true
+      }
+    },
+    {
+      "name": "extend_minimum_seconds",
+      "schema": "extend_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "extension_id": "88888888-8888-4888-8888-888888888888",
+        "extend_by_seconds": 30
+      }
+    },
+    {
+      "name": "extend_maximum_seconds",
+      "schema": "extend_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "extension_id": "88888888-8888-4888-8888-888888888889",
+        "extend_by_seconds": 3600
+      }
+    },
+    {
+      "name": "extend_response_replay",
+      "schema": "extend_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "state": "reserved",
+        "reservation_id": "33333333-3333-4333-8333-333333333333",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "extension_id": "88888888-8888-4888-8888-888888888888",
+        "expires_at": "2026-07-13T21:05:00Z",
+        "idempotent_replay": true
+      }
+    },
+    {
+      "name": "error_validation_400",
+      "schema": "error_response",
+      "valid": true,
+      "value": {
+        "error": {
+          "type": "invalid_request_error",
+          "code": "VALIDATION_ERROR",
+          "message": "Invalid request body",
+          "param": "body"
+        }
+      }
+    },
+    {
+      "name": "error_idempotency_conflict_409",
+      "schema": "error_response",
+      "valid": true,
+      "value": {
+        "error": {
+          "type": "invalid_request_error",
+          "code": "IDEMPOTENCY_CONFLICT",
+          "message": "operation_id was reused with a different request"
+        }
+      }
+    },
+    {
+      "name": "error_reservation_state_conflict_409",
+      "schema": "error_response",
+      "valid": true,
+      "value": {
+        "error": {
+          "type": "invalid_request_error",
+          "code": "RESERVATION_STATE_CONFLICT",
+          "message": "reservation is already committed"
+        }
+      }
+    },
+    {
+      "name": "error_rate_limit_429",
+      "schema": "error_response",
+      "valid": true,
+      "value": {
+        "error": {
+          "type": "rate_limit_error",
+          "code": "RATE_LIMIT_EXCEEDED",
+          "message": "Too many control requests"
+        }
+      }
+    },
+    {
+      "name": "capabilities_wrong_minimum",
+      "schema": "capabilities_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "control_enabled": true,
+        "min_reservation_ttl_seconds": 29,
+        "default_reservation_ttl_seconds": 300,
+        "max_reservation_ttl_seconds": 3600,
+        "server_time": "2026-07-13T20:00:00Z"
+      }
+    },
+    {
+      "name": "capabilities_impossible_calendar_date",
+      "schema": "capabilities_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "control_enabled": true,
+        "min_reservation_ttl_seconds": 30,
+        "default_reservation_ttl_seconds": 300,
+        "max_reservation_ttl_seconds": 3600,
+        "server_time": "2026-02-31T20:00:00Z"
+      }
+    },
+    {
+      "name": "capabilities_year_zero_rejected",
+      "schema": "capabilities_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "control_enabled": true,
+        "min_reservation_ttl_seconds": 30,
+        "default_reservation_ttl_seconds": 300,
+        "max_reservation_ttl_seconds": 3600,
+        "server_time": "0000-01-01T00:00:00Z"
+      }
+    },
+    {
+      "name": "capabilities_boolean_string_rejected",
+      "schema": "capabilities_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "control_enabled": "true",
+        "min_reservation_ttl_seconds": 30,
+        "default_reservation_ttl_seconds": 300,
+        "max_reservation_ttl_seconds": 3600,
+        "server_time": "2026-07-13T20:00:00Z"
+      }
+    },
+    {
+      "name": "reservation_missing_schema_version",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_unknown_schema_version",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "2.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_unknown_discriminator",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "kind": "image",
+        "provider": "openai",
+        "model": "gpt-image",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_llm_cross_kind_field",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1,
+        "maximum_value": "1"
+      }
+    },
+    {
+      "name": "reservation_private_prompt_rejected",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1,
+        "prompt": "private"
+      }
+    },
+    {
+      "name": "reservation_private_messages_rejected",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1,
+        "messages": [
+          {
+            "role": "user",
+            "content": "private"
+          }
+        ]
+      }
+    },
+    {
+      "name": "reservation_private_api_key_rejected",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1,
+        "api_key": "secret"
+      }
+    },
+    {
+      "name": "reservation_malformed_operation_id",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "not-a-uuid",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_invalid_customer_id",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer with spaces",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_step_control_character",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer\nprivate",
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_blank_provider",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "kind": "llm",
+        "provider": "   ",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_model_control_character",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt\u0000private",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_negative_token",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": -1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_fractional_token",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1.5,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_boolean_token",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": true,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_nan_token",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": {
+          "$special_number": "nan"
+        },
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_infinite_token",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": {
+          "$special_number": "positive_infinity"
+        },
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_token_overflow",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 4294967296,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_ttl_below_minimum",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "reservation_ttl_seconds": 29,
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_ttl_negative_infinity",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "reservation_ttl_seconds": {
+          "$special_number": "negative_infinity"
+        },
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_invalid_framework",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "answer",
+        "framework": "unknown",
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_tool_slug_uppercase",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111113",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "tool",
+        "kind": "tool",
+        "cost_source_slug": "Tavily-Search",
+        "tool_name": "Tavily Search",
+        "metric": "credits",
+        "maximum_value": "1"
+      }
+    },
+    {
+      "name": "reservation_tool_empty_name",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111113",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "tool",
+        "kind": "tool",
+        "cost_source_slug": "tavily-search",
+        "tool_name": "",
+        "metric": "credits",
+        "maximum_value": "1"
+      }
+    },
+    {
+      "name": "reservation_tool_blank_metric",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111113",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "tool",
+        "kind": "tool",
+        "cost_source_slug": "tavily-search",
+        "tool_name": "Tavily Search",
+        "metric": "   ",
+        "maximum_value": "1"
+      }
+    },
+    {
+      "name": "reservation_tool_numeric_decimal",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111113",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "tool",
+        "kind": "tool",
+        "cost_source_slug": "tavily-search",
+        "tool_name": "Tavily Search",
+        "metric": "credits",
+        "maximum_value": 1
+      }
+    },
+    {
+      "name": "reservation_tool_negative_decimal",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111113",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "tool",
+        "kind": "tool",
+        "cost_source_slug": "tavily-search",
+        "tool_name": "Tavily Search",
+        "metric": "credits",
+        "maximum_value": "-1"
+      }
+    },
+    {
+      "name": "reservation_tool_exponent_decimal",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111113",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "tool",
+        "kind": "tool",
+        "cost_source_slug": "tavily-search",
+        "tool_name": "Tavily Search",
+        "metric": "credits",
+        "maximum_value": "1e3"
+      }
+    },
+    {
+      "name": "reservation_tool_leading_zero_decimal",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111113",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "tool",
+        "kind": "tool",
+        "cost_source_slug": "tavily-search",
+        "tool_name": "Tavily Search",
+        "metric": "credits",
+        "maximum_value": "01.0"
+      }
+    },
+    {
+      "name": "reservation_tool_decimal_integer_overflow",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111113",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "tool",
+        "kind": "tool",
+        "cost_source_slug": "tavily-search",
+        "tool_name": "Tavily Search",
+        "metric": "credits",
+        "maximum_value": "100000000000000000000"
+      }
+    },
+    {
+      "name": "reservation_tool_decimal_scale_overflow",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111113",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "tool",
+        "kind": "tool",
+        "cost_source_slug": "tavily-search",
+        "tool_name": "Tavily Search",
+        "metric": "credits",
+        "maximum_value": "0.1234567890123456789"
+      }
+    },
+    {
+      "name": "reservation_tool_private_url_rejected",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111113",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "tool",
+        "kind": "tool",
+        "cost_source_slug": "tavily-search",
+        "tool_name": "Tavily Search",
+        "metric": "credits",
+        "maximum_value": "1",
+        "url": "https://private.example"
+      }
+    },
+    {
+      "name": "reservation_tool_private_arguments_rejected",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111113",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "tool",
+        "kind": "tool",
+        "cost_source_slug": "tavily-search",
+        "tool_name": "Tavily Search",
+        "metric": "credits",
+        "maximum_value": "1",
+        "tool_arguments": {
+          "query": "private"
+        }
+      }
+    },
+    {
+      "name": "reservation_tool_private_result_rejected",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111113",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "tool",
+        "kind": "tool",
+        "cost_source_slug": "tavily-search",
+        "tool_name": "Tavily Search",
+        "metric": "credits",
+        "maximum_value": "1",
+        "tool_result": "private"
+      }
+    },
+    {
+      "name": "response_reserved_allowed_contradiction",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "reserved",
+        "allowed": false,
+        "decision_id": "22222222-2222-4222-8222-222222222222",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "reservation_id": "33333333-3333-4333-8333-333333333333",
+        "state": "reserved",
+        "reserved_usd": "0.1",
+        "remaining_usd": "0.9",
+        "expires_at": "2026-07-13T20:05:00Z",
+        "warnings": []
+      }
+    },
+    {
+      "name": "response_reserved_state_contradiction",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "reserved",
+        "allowed": true,
+        "decision_id": "22222222-2222-4222-8222-222222222222",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "reservation_id": "33333333-3333-4333-8333-333333333333",
+        "state": "committed",
+        "reserved_usd": "0.1",
+        "remaining_usd": "0.9",
+        "expires_at": "2026-07-13T20:05:00Z",
+        "warnings": []
+      }
+    },
+    {
+      "name": "response_unknown_decision",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "maybe",
+        "allowed": false,
+        "decision_id": null,
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "reason": "control_unavailable",
+        "retryable": true
+      }
+    },
+    {
+      "name": "response_reserved_impossible_expiry",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "reserved",
+        "allowed": true,
+        "decision_id": "22222222-2222-4222-8222-222222222222",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "reservation_id": "33333333-3333-4333-8333-333333333333",
+        "state": "reserved",
+        "reserved_usd": "0.1",
+        "remaining_usd": "0.9",
+        "expires_at": "2026-02-30T20:05:00Z",
+        "warnings": []
+      }
+    },
+    {
+      "name": "response_denied_per_customer_null_customer",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "denied",
+        "allowed": false,
+        "decision_id": "22222222-2222-4222-8222-222222222224",
+        "operation_id": "11111111-1111-4111-8111-111111111115",
+        "state": "refused",
+        "deciding_rule": {
+          "rule_id": "77777777-7777-4777-8777-777777777777",
+          "scope": "per_customer",
+          "customer_id": null,
+          "period": "day",
+          "period_start": "2026-07-13T00:00:00Z",
+          "period_end": "2026-07-14T00:00:00Z"
+        },
+        "committed_usd": "0",
+        "reserved_usd": "0",
+        "unresolved_usd": "0",
+        "requested_usd": "1",
+        "limit_usd": "1",
+        "remaining_usd": "1",
+        "warnings": []
+      }
+    },
+    {
+      "name": "response_denied_pooled_non_null_customer",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "denied",
+        "allowed": false,
+        "decision_id": "22222222-2222-4222-8222-222222222224",
+        "operation_id": "11111111-1111-4111-8111-111111111115",
+        "state": "refused",
+        "deciding_rule": {
+          "rule_id": "77777777-7777-4777-8777-777777777777",
+          "scope": "pooled",
+          "customer_id": "customer_1",
+          "period": "day",
+          "period_start": "2026-07-13T00:00:00Z",
+          "period_end": "2026-07-14T00:00:00Z"
+        },
+        "committed_usd": "0",
+        "reserved_usd": "0",
+        "unresolved_usd": "0",
+        "requested_usd": "1",
+        "limit_usd": "1",
+        "remaining_usd": "1",
+        "warnings": []
+      }
+    },
+    {
+      "name": "response_denied_reversed_period",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "denied",
+        "allowed": false,
+        "decision_id": "22222222-2222-4222-8222-222222222224",
+        "operation_id": "11111111-1111-4111-8111-111111111115",
+        "state": "refused",
+        "deciding_rule": {
+          "rule_id": "77777777-7777-4777-8777-777777777777",
+          "scope": "per_customer",
+          "customer_id": "customer_1",
+          "period": "day",
+          "period_start": "2026-07-14T00:00:00Z",
+          "period_end": "2026-07-13T00:00:00Z"
+        },
+        "committed_usd": "0",
+        "reserved_usd": "0",
+        "unresolved_usd": "0",
+        "requested_usd": "1",
+        "limit_usd": "1",
+        "remaining_usd": "1",
+        "warnings": []
+      }
+    },
+    {
+      "name": "response_bypass_would_deny_contradiction",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "bypassed",
+        "allowed": true,
+        "decision_id": null,
+        "operation_id": "11111111-1111-4111-8111-111111111117",
+        "reason": "shadow_would_deny",
+        "would_have_denied": false,
+        "warnings": []
+      }
+    },
+    {
+      "name": "response_bypass_disabled_boolean_contradiction",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "bypassed",
+        "allowed": true,
+        "decision_id": null,
+        "operation_id": "11111111-1111-4111-8111-111111111117",
+        "reason": "control_disabled",
+        "would_have_denied": false,
+        "warnings": []
+      }
+    },
+    {
+      "name": "commit_missing_schema_version",
+      "schema": "commit_request",
+      "valid": false,
+      "value": {
+        "status": "success",
+        "latency_ms": 1,
+        "stream_aborted": false,
+        "kind": "llm",
+        "actual_input_tokens": 1,
+        "actual_output_tokens": 1
+      }
+    },
+    {
+      "name": "commit_cross_kind_field",
+      "schema": "commit_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "status": "success",
+        "latency_ms": 1,
+        "stream_aborted": false,
+        "kind": "llm",
+        "actual_input_tokens": 1,
+        "actual_output_tokens": 1,
+        "actual_value": "1"
+      }
+    },
+    {
+      "name": "commit_invalid_status",
+      "schema": "commit_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "status": "unknown",
+        "latency_ms": 1,
+        "stream_aborted": false,
+        "kind": "llm",
+        "actual_input_tokens": 1,
+        "actual_output_tokens": 1
+      }
+    },
+    {
+      "name": "commit_negative_latency",
+      "schema": "commit_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "status": "success",
+        "latency_ms": -1,
+        "stream_aborted": false,
+        "kind": "llm",
+        "actual_input_tokens": 1,
+        "actual_output_tokens": 1
+      }
+    },
+    {
+      "name": "commit_infinite_latency",
+      "schema": "commit_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "status": "success",
+        "latency_ms": {
+          "$special_number": "positive_infinity"
+        },
+        "stream_aborted": false,
+        "kind": "llm",
+        "actual_input_tokens": 1,
+        "actual_output_tokens": 1
+      }
+    },
+    {
+      "name": "commit_stream_boolean_required",
+      "schema": "commit_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "status": "success",
+        "latency_ms": 1,
+        "stream_aborted": "false",
+        "kind": "llm",
+        "actual_input_tokens": 1,
+        "actual_output_tokens": 1
+      }
+    },
+    {
+      "name": "commit_private_raw_provider_error_rejected",
+      "schema": "commit_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "status": "failure",
+        "latency_ms": 1,
+        "stream_aborted": false,
+        "kind": "llm",
+        "actual_input_tokens": 1,
+        "actual_output_tokens": 1,
+        "raw_provider_error": "private"
+      }
+    },
+    {
+      "name": "commit_response_wrong_state",
+      "schema": "commit_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "state": "released",
+        "reservation_id": "33333333-3333-4333-8333-333333333333",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "reserved_usd": "1",
+        "actual_usd": "1",
+        "released_usd": "0",
+        "overage_usd": "0",
+        "budget_exceeded_after_commit": false,
+        "committed_at": "2026-07-13T20:02:00Z",
+        "idempotent_replay": false,
+        "late": false
+      }
+    },
+    {
+      "name": "commit_response_numeric_money",
+      "schema": "commit_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "state": "committed",
+        "reservation_id": "33333333-3333-4333-8333-333333333333",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "reserved_usd": 1,
+        "actual_usd": "1",
+        "released_usd": "0",
+        "overage_usd": "0",
+        "budget_exceeded_after_commit": false,
+        "committed_at": "2026-07-13T20:02:00Z",
+        "idempotent_replay": false,
+        "late": false
+      }
+    },
+    {
+      "name": "commit_response_actual_usd_numeric_44_integer_overflow",
+      "schema": "commit_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "state": "committed",
+        "reservation_id": "33333333-3333-4333-8333-333333333340",
+        "operation_id": "11111111-1111-4111-8111-111111111140",
+        "reserved_usd": "0",
+        "actual_usd": "100000000000000000000000000",
+        "released_usd": "0",
+        "overage_usd": "0",
+        "budget_exceeded_after_commit": true,
+        "committed_at": "2026-07-13T20:11:00Z",
+        "idempotent_replay": false,
+        "late": true
+      }
+    },
+    {
+      "name": "commit_response_overage_usd_numeric_44_integer_overflow",
+      "schema": "commit_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "state": "committed",
+        "reservation_id": "33333333-3333-4333-8333-333333333340",
+        "operation_id": "11111111-1111-4111-8111-111111111140",
+        "reserved_usd": "0",
+        "actual_usd": "99999999999999999999999999",
+        "released_usd": "0",
+        "overage_usd": "100000000000000000000000000",
+        "budget_exceeded_after_commit": true,
+        "committed_at": "2026-07-13T20:11:00Z",
+        "idempotent_replay": false,
+        "late": true
+      }
+    },
+    {
+      "name": "commit_response_actual_usd_numeric_44_scale_overflow",
+      "schema": "commit_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "state": "committed",
+        "reservation_id": "33333333-3333-4333-8333-333333333340",
+        "operation_id": "11111111-1111-4111-8111-111111111140",
+        "reserved_usd": "0",
+        "actual_usd": "1.1234567890123456789",
+        "released_usd": "0",
+        "overage_usd": "0",
+        "budget_exceeded_after_commit": true,
+        "committed_at": "2026-07-13T20:11:00Z",
+        "idempotent_replay": false,
+        "late": true
+      }
+    },
+    {
+      "name": "commit_response_reserved_usd_remains_numeric_38",
+      "schema": "commit_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "state": "committed",
+        "reservation_id": "33333333-3333-4333-8333-333333333340",
+        "operation_id": "11111111-1111-4111-8111-111111111140",
+        "reserved_usd": "100000000000000000000",
+        "actual_usd": "100000000000000000000",
+        "released_usd": "0",
+        "overage_usd": "0",
+        "budget_exceeded_after_commit": false,
+        "committed_at": "2026-07-13T20:11:00Z",
+        "idempotent_replay": false,
+        "late": false
+      }
+    },
+    {
+      "name": "commit_response_released_usd_remains_numeric_38",
+      "schema": "commit_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "state": "committed",
+        "reservation_id": "33333333-3333-4333-8333-333333333340",
+        "operation_id": "11111111-1111-4111-8111-111111111140",
+        "reserved_usd": "99999999999999999999",
+        "actual_usd": "0",
+        "released_usd": "100000000000000000000",
+        "overage_usd": "0",
+        "budget_exceeded_after_commit": false,
+        "committed_at": "2026-07-13T20:11:00Z",
+        "idempotent_replay": false,
+        "late": false
+      }
+    },
+    {
+      "name": "release_missing_schema_version",
+      "schema": "release_request",
+      "valid": false,
+      "value": {
+        "reason": "provider_not_called"
+      }
+    },
+    {
+      "name": "release_unknown_reason",
+      "schema": "release_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "reason": "provider_failed"
+      }
+    },
+    {
+      "name": "release_private_raw_provider_error_rejected",
+      "schema": "release_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "reason": "provider_not_called",
+        "raw_provider_error": "private"
+      }
+    },
+    {
+      "name": "release_response_wrong_state",
+      "schema": "release_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "state": "committed",
+        "reservation_id": "33333333-3333-4333-8333-333333333333",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "released_usd": "1",
+        "released_at": "2026-07-13T20:01:00Z",
+        "idempotent_replay": false
+      }
+    },
+    {
+      "name": "extend_missing_schema_version",
+      "schema": "extend_request",
+      "valid": false,
+      "value": {
+        "extension_id": "88888888-8888-4888-8888-888888888888",
+        "extend_by_seconds": 30
+      }
+    },
+    {
+      "name": "extend_malformed_id",
+      "schema": "extend_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "extension_id": "bad",
+        "extend_by_seconds": 30
+      }
+    },
+    {
+      "name": "extend_below_minimum",
+      "schema": "extend_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "extension_id": "88888888-8888-4888-8888-888888888888",
+        "extend_by_seconds": 29
+      }
+    },
+    {
+      "name": "extend_fractional_seconds",
+      "schema": "extend_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "extension_id": "88888888-8888-4888-8888-888888888888",
+        "extend_by_seconds": 30.5
+      }
+    },
+    {
+      "name": "extend_private_api_key_rejected",
+      "schema": "extend_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "extension_id": "88888888-8888-4888-8888-888888888888",
+        "extend_by_seconds": 30,
+        "api_key": "private"
+      }
+    },
+    {
+      "name": "extend_response_wrong_state",
+      "schema": "extend_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "state": "unresolved",
+        "reservation_id": "33333333-3333-4333-8333-333333333333",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "extension_id": "88888888-8888-4888-8888-888888888888",
+        "expires_at": "2026-07-13T21:05:00Z",
+        "idempotent_replay": false
+      }
+    },
+    {
+      "name": "error_unknown_code",
+      "schema": "error_response",
+      "valid": false,
+      "value": {
+        "error": {
+          "type": "api_error",
+          "code": "UNKNOWN_ERROR",
+          "message": "unknown"
+        }
+      }
+    },
+    {
+      "name": "error_null_param_rejected",
+      "schema": "error_response",
+      "valid": false,
+      "value": {
+        "error": {
+          "type": "invalid_request_error",
+          "code": "VALIDATION_ERROR",
+          "message": "invalid",
+          "param": null
+        }
+      }
+    },
+    {
+      "name": "error_unknown_type",
+      "schema": "error_response",
+      "valid": false,
+      "value": {
+        "error": {
+          "type": "budget_error",
+          "code": "INTERNAL_ERROR",
+          "message": "invalid"
+        }
+      }
+    },
+    {
+      "name": "reservation_provider_unicode_scalar_boundary",
+      "schema": "reservation_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111130",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "edge",
+        "framework": "none",
+        "reservation_ttl_seconds": 300,
+        "kind": "llm",
+        "provider": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83d\ude00",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_provider_unicode_scalar_overflow",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111131",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "edge",
+        "framework": "none",
+        "reservation_ttl_seconds": 300,
+        "kind": "llm",
+        "provider": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83d\ude00",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_metric_unicode_scalar_boundary",
+      "schema": "reservation_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111132",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "edge",
+        "framework": "none",
+        "reservation_ttl_seconds": 300,
+        "kind": "tool",
+        "cost_source_slug": "tavily-search",
+        "tool_name": "Tavily Search",
+        "metric": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\ud83d\ude00",
+        "maximum_value": "1"
+      }
+    },
+    {
+      "name": "reservation_metric_unicode_scalar_overflow",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111133",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "edge",
+        "framework": "none",
+        "reservation_ttl_seconds": 300,
+        "kind": "tool",
+        "cost_source_slug": "tavily-search",
+        "tool_name": "Tavily Search",
+        "metric": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\ud83d\ude00",
+        "maximum_value": "1"
+      }
+    },
+    {
+      "name": "response_denied_exact_equality_is_not_denial",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "denied",
+        "allowed": false,
+        "decision_id": "22222222-2222-4222-8222-222222222230",
+        "operation_id": "11111111-1111-4111-8111-111111111134",
+        "state": "refused",
+        "deciding_rule": {
+          "rule_id": "77777777-7777-4777-8777-777777777779",
+          "scope": "per_customer",
+          "customer_id": "customer_1",
+          "period": "hour",
+          "period_start": "2026-07-13T00:00:00Z",
+          "period_end": "2026-07-13T01:00:00Z"
+        },
+        "committed_usd": "0.8",
+        "reserved_usd": "0.1",
+        "unresolved_usd": "0",
+        "requested_usd": "0.1",
+        "limit_usd": "1",
+        "remaining_usd": "0.1",
+        "warnings": []
+      }
+    },
+    {
+      "name": "response_denied_remaining_arithmetic_mismatch",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "denied",
+        "allowed": false,
+        "decision_id": "22222222-2222-4222-8222-222222222231",
+        "operation_id": "11111111-1111-4111-8111-111111111135",
+        "state": "refused",
+        "deciding_rule": {
+          "rule_id": "77777777-7777-4777-8777-777777777779",
+          "scope": "per_customer",
+          "customer_id": "customer_1",
+          "period": "week",
+          "period_start": "2026-07-13T00:00:00Z",
+          "period_end": "2026-07-20T00:00:00Z"
+        },
+        "committed_usd": "0.8",
+        "reserved_usd": "0.1",
+        "unresolved_usd": "0",
+        "requested_usd": "0.2",
+        "limit_usd": "1",
+        "remaining_usd": "0",
+        "warnings": []
+      }
+    },
+    {
+      "name": "response_advisory_warning_requires_exceeded_projection",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "reserved",
+        "allowed": true,
+        "decision_id": "22222222-2222-4222-8222-222222222232",
+        "operation_id": "11111111-1111-4111-8111-111111111136",
+        "reservation_id": "33333333-3333-4333-8333-333333333336",
+        "state": "reserved",
+        "reserved_usd": "0.1",
+        "remaining_usd": "0.9",
+        "expires_at": "2026-07-13T20:05:00Z",
+        "warnings": [
+          {
+            "code": "advisory_budget_exceeded",
+            "rule_id": "77777777-7777-4777-8777-777777777780",
+            "limit_usd": "1",
+            "projected_usd": "1"
+          }
+        ]
+      }
+    },
+    {
+      "name": "commit_response_underage_release_mismatch",
+      "schema": "commit_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "state": "committed",
+        "reservation_id": "33333333-3333-4333-8333-333333333339",
+        "operation_id": "11111111-1111-4111-8111-111111111139",
+        "reserved_usd": "10",
+        "actual_usd": "5",
+        "released_usd": "0",
+        "overage_usd": "0",
+        "budget_exceeded_after_commit": false,
+        "committed_at": "2026-07-13T20:02:00Z",
+        "idempotent_replay": false,
+        "late": false
+      }
+    },
+    {
+      "name": "commit_response_overage_amount_mismatch",
+      "schema": "commit_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "state": "committed",
+        "reservation_id": "33333333-3333-4333-8333-333333333339",
+        "operation_id": "11111111-1111-4111-8111-111111111139",
+        "reserved_usd": "10",
+        "actual_usd": "12",
+        "released_usd": "0",
+        "overage_usd": "999",
+        "budget_exceeded_after_commit": true,
+        "committed_at": "2026-07-13T20:02:00Z",
+        "idempotent_replay": false,
+        "late": false
+      }
+    },
+    {
+      "name": "commit_response_budget_exceeded_from_other_rule_without_overage",
+      "schema": "commit_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "state": "committed",
+        "reservation_id": "33333333-3333-4333-8333-333333333339",
+        "operation_id": "11111111-1111-4111-8111-111111111139",
+        "reserved_usd": "10",
+        "actual_usd": "5",
+        "released_usd": "5",
+        "overage_usd": "0",
+        "budget_exceeded_after_commit": true,
+        "committed_at": "2026-07-13T20:02:00Z",
+        "idempotent_replay": false,
+        "late": false
+      }
+    },
+    {
+      "name": "error_invalid_api_key_401",
+      "schema": "error_response",
+      "valid": true,
+      "value": {
+        "error": {
+          "type": "authentication_error",
+          "code": "INVALID_API_KEY",
+          "message": "Invalid API key"
+        }
+      },
+      "expected_output": {
+        "error": {
+          "type": "authentication_error",
+          "code": "INVALID_API_KEY",
+          "message": "Invalid API key"
+        }
+      }
+    },
+    {
+      "name": "error_wrong_scope_403",
+      "schema": "error_response",
+      "valid": true,
+      "value": {
+        "error": {
+          "type": "authentication_error",
+          "code": "WRONG_SCOPE",
+          "message": "API key scope cannot control budgets"
+        }
+      },
+      "expected_output": {
+        "error": {
+          "type": "authentication_error",
+          "code": "WRONG_SCOPE",
+          "message": "API key scope cannot control budgets"
+        }
+      }
+    },
+    {
+      "name": "error_resource_not_found_404",
+      "schema": "error_response",
+      "valid": true,
+      "value": {
+        "error": {
+          "type": "invalid_request_error",
+          "code": "RESOURCE_NOT_FOUND",
+          "message": "Reservation not found"
+        }
+      },
+      "expected_output": {
+        "error": {
+          "type": "invalid_request_error",
+          "code": "RESOURCE_NOT_FOUND",
+          "message": "Reservation not found"
+        }
+      }
+    },
+    {
+      "name": "error_internal_omitted_param_roundtrip",
+      "schema": "error_response",
+      "valid": true,
+      "value": {
+        "error": {
+          "type": "api_error",
+          "code": "INTERNAL_ERROR",
+          "message": "Control service failed"
+        }
+      },
+      "expected_output": {
+        "error": {
+          "type": "api_error",
+          "code": "INTERNAL_ERROR",
+          "message": "Control service failed"
+        }
+      }
+    },
+    {
+      "name": "commit_llm_failure_status",
+      "schema": "commit_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "status": "failure",
+        "latency_ms": 1,
+        "stream_aborted": false,
+        "kind": "llm",
+        "actual_input_tokens": 0,
+        "actual_output_tokens": 0
+      }
+    },
+    {
+      "name": "commit_llm_retry_status",
+      "schema": "commit_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "status": "retry",
+        "latency_ms": 1,
+        "stream_aborted": false,
+        "kind": "llm",
+        "actual_input_tokens": 0,
+        "actual_output_tokens": 0
+      }
+    },
+    {
+      "name": "reservation_framework_crewai",
+      "schema": "reservation_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111140",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "edge",
+        "framework": "crewai",
+        "reservation_ttl_seconds": 300,
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_framework_mastra",
+      "schema": "reservation_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111141",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "edge",
+        "framework": "mastra",
+        "reservation_ttl_seconds": 300,
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_framework_openai_agents",
+      "schema": "reservation_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111142",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "edge",
+        "framework": "openai-agents",
+        "reservation_ttl_seconds": 300,
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_framework_pydantic_ai",
+      "schema": "reservation_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111143",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "edge",
+        "framework": "pydantic-ai",
+        "reservation_ttl_seconds": 300,
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "response_denied_hour_period",
+      "schema": "reservation_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "denied",
+        "allowed": false,
+        "decision_id": "22222222-2222-4222-8222-222222222233",
+        "operation_id": "11111111-1111-4111-8111-111111111144",
+        "state": "refused",
+        "deciding_rule": {
+          "rule_id": "77777777-7777-4777-8777-777777777779",
+          "scope": "per_customer",
+          "customer_id": "customer_1",
+          "period": "hour",
+          "period_start": "2026-07-13T00:00:00Z",
+          "period_end": "2026-07-13T01:00:00Z"
+        },
+        "committed_usd": "0.8",
+        "reserved_usd": "0.1",
+        "unresolved_usd": "0",
+        "requested_usd": "0.2",
+        "limit_usd": "1",
+        "remaining_usd": "0.1",
+        "warnings": []
+      }
+    },
+    {
+      "name": "response_denied_week_period",
+      "schema": "reservation_response",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "denied",
+        "allowed": false,
+        "decision_id": "22222222-2222-4222-8222-222222222234",
+        "operation_id": "11111111-1111-4111-8111-111111111145",
+        "state": "refused",
+        "deciding_rule": {
+          "rule_id": "77777777-7777-4777-8777-777777777779",
+          "scope": "per_customer",
+          "customer_id": "customer_1",
+          "period": "week",
+          "period_start": "2026-07-13T00:00:00Z",
+          "period_end": "2026-07-20T00:00:00Z"
+        },
+        "committed_usd": "0.8",
+        "reserved_usd": "0.1",
+        "unresolved_usd": "0",
+        "requested_usd": "0.2",
+        "limit_usd": "1",
+        "remaining_usd": "0.1",
+        "warnings": []
+      }
+    },
+    {
+      "name": "reservation_integral_json_number_lexemes_canonicalize",
+      "schema": "reservation_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111146",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "integer-lexeme",
+        "framework": "none",
+        "reservation_ttl_seconds": 300.0,
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1.0,
+        "max_output_tokens": 2.0
+      },
+      "expected_output": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111146",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "integer-lexeme",
+        "framework": "none",
+        "reservation_ttl_seconds": 300,
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 2
+      }
+    },
+    {
+      "name": "reservation_negative_zero_number_lexemes_canonicalize",
+      "schema": "reservation_request",
+      "valid": true,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111149",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "negative-zero-lexeme",
+        "framework": "none",
+        "reservation_ttl_seconds": 300.0,
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": -0.0,
+        "max_output_tokens": -0.0
+      },
+      "expected_output": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111149",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "negative-zero-lexeme",
+        "framework": "none",
+        "reservation_ttl_seconds": 300,
+        "kind": "llm",
+        "provider": "openai",
+        "model": "gpt-5",
+        "estimated_input_tokens": 0,
+        "max_output_tokens": 0
+      }
+    },
+    {
+      "name": "response_rule_period_sub_millisecond_precision_rejected",
+      "schema": "reservation_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "decision": "denied",
+        "allowed": false,
+        "decision_id": "22222222-2222-4222-8222-222222222235",
+        "operation_id": "11111111-1111-4111-8111-111111111147",
+        "state": "refused",
+        "deciding_rule": {
+          "rule_id": "77777777-7777-4777-8777-777777777781",
+          "scope": "per_customer",
+          "customer_id": "customer_1",
+          "period": "hour",
+          "period_start": "2026-07-13T00:00:00.0005Z",
+          "period_end": "2026-07-13T00:00:00.0006Z"
+        },
+        "committed_usd": "0.8",
+        "reserved_usd": "0.1",
+        "unresolved_usd": "0",
+        "requested_usd": "0.2",
+        "limit_usd": "1",
+        "remaining_usd": "0.1",
+        "warnings": []
+      }
+    },
+    {
+      "name": "capabilities_noncanonical_timezone_offset_rejected",
+      "schema": "capabilities_response",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "control_enabled": true,
+        "min_reservation_ttl_seconds": 30,
+        "default_reservation_ttl_seconds": 300,
+        "max_reservation_ttl_seconds": 3600,
+        "server_time": "2026-07-13T23:00:00+03:00"
+      }
+    },
+    {
+      "name": "reservation_provider_bom_only_rejected_as_blank",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111148",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "blank-provider",
+        "framework": "none",
+        "reservation_ttl_seconds": 300,
+        "kind": "llm",
+        "provider": "\ufeff",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_provider_next_line_only_rejected_as_blank",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111149",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "blank-provider",
+        "framework": "none",
+        "reservation_ttl_seconds": 300,
+        "kind": "llm",
+        "provider": "\u0085",
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_metric_bom_only_rejected_as_blank",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111150",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "blank-metric",
+        "framework": "none",
+        "reservation_ttl_seconds": 300,
+        "kind": "tool",
+        "cost_source_slug": "tavily-search",
+        "tool_name": "Tavily Search",
+        "metric": "\ufeff",
+        "maximum_value": "1"
+      }
+    },
+    {
+      "name": "reservation_metric_next_line_only_rejected_as_blank",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111151",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "blank-metric",
+        "framework": "none",
+        "reservation_ttl_seconds": 300,
+        "kind": "tool",
+        "cost_source_slug": "tavily-search",
+        "tool_name": "Tavily Search",
+        "metric": "\u0085",
+        "maximum_value": "1"
+      }
+    },
+    {
+      "name": "reservation_provider_lone_high_surrogate_rejected",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111152",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "surrogate-provider",
+        "framework": "none",
+        "reservation_ttl_seconds": 300,
+        "kind": "llm",
+        "provider": {
+          "$special_string": "lone_high_surrogate"
+        },
+        "model": "gpt-5",
+        "estimated_input_tokens": 1,
+        "max_output_tokens": 1
+      }
+    },
+    {
+      "name": "reservation_metric_lone_low_surrogate_rejected",
+      "schema": "reservation_request",
+      "valid": false,
+      "value": {
+        "schema_version": "1.0",
+        "mode": "enforce",
+        "operation_id": "11111111-1111-4111-8111-111111111153",
+        "customer_id": "customer_1",
+        "trace_id": "44444444-4444-4444-8444-444444444444",
+        "span_id": "55555555-5555-4555-8555-555555555555",
+        "parent_span_id": null,
+        "step_name": "surrogate-metric",
+        "framework": "none",
+        "reservation_ttl_seconds": 300,
+        "kind": "tool",
+        "cost_source_slug": "tavily-search",
+        "tool_name": "Tavily Search",
+        "metric": {
+          "$special_string": "lone_low_surrogate"
+        },
+        "maximum_value": "1"
+      }
+    }
+  ]
+}

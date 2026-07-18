@@ -5,9 +5,9 @@
 // enforcement, model routing, and failover state tracking all live in
 // `_engine.ts` so anthropic + vercel-ai stay consistent.
 
-import { EventStatus, Provider, TokenCountSource } from '@pylva/shared';
+import { EventStatus, Provider, TokenCountSource } from '@pylva/shared/telemetry-values';
 import { enqueue } from '../core/telemetry.js';
-import { isInitialized } from '../core/config.js';
+import { getConfigGeneration, isInitialized } from '../core/config.js';
 import { loadPeer, patchResourceProto } from './_load.js';
 import { buildLlmEvent } from './_event.js';
 import {
@@ -17,6 +17,8 @@ import {
   runWithEngine,
 } from './_engine.js';
 import { markProviderPatched } from './_init_validation.js';
+import { originalProviderMethod, registerPatchedOriginal } from './_strict_unwrap.js';
+import { LegacyProviderPromise } from './_legacy_provider_promise.js';
 
 interface OpenAIChatResponse {
   model?: string;
@@ -29,6 +31,13 @@ interface OpenAIChatCompletions {
 
 let applied = false;
 let esmPatchLaunched = false;
+
+/** Internal strict-wrapper escape hatch: never execute legacy routing twice. */
+export function _originalOpenAiCreate(
+  candidate: OpenAIChatCompletions['create'],
+): OpenAIChatCompletions['create'] | null {
+  return originalProviderMethod(candidate);
+}
 
 export function applyOpenAiPatch(): void {
   if (applied) return;
@@ -117,10 +126,7 @@ function patchCompletions(completions: OpenAIChatCompletions): void {
   // patched function — wrapping again would emit duplicate events.
   if ((completions.create as { __pylva_patched?: boolean }).__pylva_patched) return;
   const original = completions.create;
-  const patched = async function patched(
-    this: unknown,
-    ...args: unknown[]
-  ): Promise<OpenAIChatResponse> {
+  const patched = function patched(this: unknown, ...args: unknown[]): Promise<OpenAIChatResponse> {
     // Preserve the caller's `this`: when patching Completions.prototype the
     // receiver is the per-client resource instance (carries auth/transport).
     const self = this ?? completions;
@@ -129,57 +135,72 @@ function patchCompletions(completions: OpenAIChatCompletions): void {
     // bugs never propagate, and the host SDK validates better than we can.
     if (typeof args[0] !== 'object' || args[0] === null) return original.apply(self, args);
     const start = Date.now();
+    const ownerGeneration = getConfigGeneration();
     const reqArg = args[0] as { model?: string } & Record<string, unknown>;
     const engineCtx = buildEngineCtx(Provider.OPENAI, reqArg.model ?? null);
 
-    try {
-      const { result, metadata } = await runWithEngine<OpenAIChatResponse>({
-        request: reqArg,
-        providerId: Provider.OPENAI,
-        ctx: engineCtx,
-        call: (req) => original.apply(self, [req, ...args.slice(1)]) as Promise<OpenAIChatResponse>,
+    let nativePromise:
+      | (Promise<OpenAIChatResponse> & {
+          asResponse?: () => Promise<Response>;
+        })
+      | null = null;
+    const finalized = runWithEngine<OpenAIChatResponse>({
+      request: reqArg,
+      providerId: Provider.OPENAI,
+      ctx: engineCtx,
+      call: (req) => {
+        nativePromise = original.apply(self, [req, ...args.slice(1)]) as typeof nativePromise;
+        return nativePromise!;
+      },
+    })
+      .then(({ result, metadata }) => {
+        try {
+          if (ownerGeneration === getConfigGeneration()) {
+            enqueue(
+              buildLlmEvent({
+                provider: Provider.OPENAI,
+                model: result?.model ?? metadata.routed_model ?? metadata.original_model ?? null,
+                tokensIn: result?.usage?.prompt_tokens ?? 0,
+                tokensOut: result?.usage?.completion_tokens ?? 0,
+                latencyMs: Date.now() - start,
+                status: EventStatus.SUCCESS,
+                tokenCountSource: TokenCountSource.EXACT,
+              }),
+            );
+          }
+        } catch (err) {
+          console.warn(
+            `[pylva] openai telemetry emit failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        return result && typeof result === 'object'
+          ? attachPylvaMetadata(result, metadata)
+          : result;
+      })
+      .catch((err: unknown) => {
+        if (isIntentionalRefusal(err)) throw err;
+        try {
+          if (ownerGeneration === getConfigGeneration()) {
+            enqueue(
+              buildLlmEvent({
+                provider: Provider.OPENAI,
+                model: reqArg.model ?? null,
+                tokensIn: 0,
+                tokensOut: 0,
+                latencyMs: Date.now() - start,
+                status: EventStatus.FAILURE,
+              }),
+            );
+          }
+        } catch {
+          // swallow
+        }
+        throw err;
       });
-
-      try {
-        enqueue(
-          buildLlmEvent({
-            provider: Provider.OPENAI,
-            model: result?.model ?? metadata.routed_model ?? metadata.original_model ?? null,
-            tokensIn: result?.usage?.prompt_tokens ?? 0,
-            tokensOut: result?.usage?.completion_tokens ?? 0,
-            latencyMs: Date.now() - start,
-            status: EventStatus.SUCCESS,
-            tokenCountSource: TokenCountSource.EXACT,
-          }),
-        );
-      } catch (err) {
-        console.warn(
-          `[pylva] openai telemetry emit failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      return result && typeof result === 'object'
-        ? attachPylvaMetadata(result, metadata)
-        : result;
-    } catch (err) {
-      if (isIntentionalRefusal(err)) throw err;
-      try {
-        enqueue(
-          buildLlmEvent({
-            provider: Provider.OPENAI,
-            model: reqArg.model ?? null,
-            tokensIn: 0,
-            tokensOut: 0,
-            latencyMs: Date.now() - start,
-            status: EventStatus.FAILURE,
-          }),
-        );
-      } catch {
-        // swallow
-      }
-      throw err;
-    }
+    return new LegacyProviderPromise(finalized, () => nativePromise);
   };
   (patched as unknown as { __pylva_patched: boolean }).__pylva_patched = true;
+  registerPatchedOriginal(patched, original);
   completions.create = patched;
 }
 
@@ -187,3 +208,10 @@ export function _resetOpenAiPatchForTests(): void {
   applied = false;
   esmPatchLaunched = false;
 }
+
+export {
+  wrapOpenAI,
+  PylvaStrictProviderError,
+  type ControlledOpenAIClient,
+} from './openai_controlled.js';
+export type { StrictOpenAIOptions } from './openai_controlled.js';

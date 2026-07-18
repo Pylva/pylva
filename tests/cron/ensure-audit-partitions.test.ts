@@ -72,7 +72,7 @@ describe('auditLogPartitionSpecs', () => {
 });
 
 describe('isValidPartitionSpec', () => {
-  it("accepts every spec the generator produces (the cron's interpolation guard)", () => {
+  it("accepts every spec the generator produces (the cron's semantic guard)", () => {
     for (const spec of auditLogPartitionSpecs(new Date('2026-06-09T00:00:00Z'))) {
       expect(isValidPartitionSpec(spec)).toBe(true);
     }
@@ -117,5 +117,63 @@ describe('isValidPartitionSpec', () => {
         to: "2026-08-01'); DROP",
       }),
     ).toBe(false);
+  });
+
+  it('rejects semantically mismatched names and bounds', () => {
+    expect(
+      isValidPartitionSpec({
+        name: 'audit_log_y2026m08',
+        from: '2026-07-01',
+        to: '2026-08-01',
+      }),
+    ).toBe(false);
+    expect(
+      isValidPartitionSpec({
+        name: 'audit_log_y2026m07',
+        from: '2026-07-01',
+        to: '2026-09-01',
+      }),
+    ).toBe(false);
+    expect(
+      isValidPartitionSpec({
+        name: 'audit_log_y2026m07',
+        from: '2026-08-01',
+        to: '2026-09-01',
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects invalid months without Date normalization accepting them', () => {
+    expect(
+      isValidPartitionSpec({
+        name: 'audit_log_y2026m00',
+        from: '2026-00-01',
+        to: '2026-01-01',
+      }),
+    ).toBe(false);
+    expect(
+      isValidPartitionSpec({
+        name: 'audit_log_y2026m13',
+        from: '2026-13-01',
+        to: '2027-02-01',
+      }),
+    ).toBe(false);
+  });
+
+  it('accepts leap-year February and exact year rollover bounds', () => {
+    expect(
+      isValidPartitionSpec({
+        name: 'audit_log_y2028m02',
+        from: '2028-02-01',
+        to: '2028-03-01',
+      }),
+    ).toBe(true);
+    expect(
+      isValidPartitionSpec({
+        name: 'audit_log_y2026m12',
+        from: '2026-12-01',
+        to: '2027-01-01',
+      }),
+    ).toBe(true);
   });
 });

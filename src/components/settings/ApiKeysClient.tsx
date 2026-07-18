@@ -28,6 +28,12 @@ interface Props {
   canMutate: boolean;
 }
 
+const MUTED_METADATA_CLASS = 'text-xs text-[color:var(--muted-foreground)]';
+
+function localDate(value: string): string {
+  return new Date(value).toLocaleDateString();
+}
+
 export function ApiKeysClient({ keys, canMutate }: Props) {
   const router = useRouter();
   const [label, setLabel] = useState('');
@@ -43,8 +49,8 @@ export function ApiKeysClient({ keys, canMutate }: Props) {
     setIsSubmitting(true);
     setError(null);
     try {
-      const body: Record<string, unknown> = {};
-      if (label.trim()) body['label'] = label.trim();
+      const trimmedLabel = label.trim();
+      const body = trimmedLabel ? { label: trimmedLabel } : {};
       const res = await apiFetch('/api/v1/settings/api-keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -116,9 +122,7 @@ export function ApiKeysClient({ keys, canMutate }: Props) {
           {error ? <p className="mt-2 text-xs text-red-600">{error}</p> : null}
         </section>
       ) : (
-        <p className="text-xs text-[color:var(--muted-foreground)]">
-          {COPY.api_key_member_view_only}
-        </p>
+        <p className={MUTED_METADATA_CLASS}>{COPY.api_key_member_view_only}</p>
       )}
 
       <section>
@@ -126,7 +130,7 @@ export function ApiKeysClient({ keys, canMutate }: Props) {
           Keys ({keys.length})
         </h2>
         {keys.length === 0 ? (
-          <p className="mt-2 text-xs text-[color:var(--muted-foreground)]">{COPY.api_key_empty}</p>
+          <p className={`mt-2 ${MUTED_METADATA_CLASS}`}>{COPY.api_key_empty}</p>
         ) : (
           <ul className="mt-2 space-y-2">
             {keys.map((k) => (
@@ -137,18 +141,12 @@ export function ApiKeysClient({ keys, canMutate }: Props) {
                 <div className="min-w-0">
                   <div className="font-medium">
                     {k.label ?? '(no label)'}{' '}
-                    <span className="text-xs text-[color:var(--muted-foreground)]">
-                      · {k.key_id}
-                    </span>
+                    <span className={MUTED_METADATA_CLASS}>· {k.key_id}</span>
                   </div>
-                  <div className="text-xs text-[color:var(--muted-foreground)]">
-                    Created {new Date(k.created_at).toLocaleDateString()}
-                    {k.revoked_at
-                      ? ` · revoked ${new Date(k.revoked_at).toLocaleDateString()}`
-                      : ''}
-                    {k.expires_at && !k.revoked_at
-                      ? ` · expires ${new Date(k.expires_at).toLocaleDateString()}`
-                      : ''}
+                  <div className={MUTED_METADATA_CLASS}>
+                    Created {localDate(k.created_at)}
+                    {k.revoked_at ? ` · revoked ${localDate(k.revoked_at)}` : ''}
+                    {k.expires_at && !k.revoked_at ? ` · expires ${localDate(k.expires_at)}` : ''}
                   </div>
                 </div>
                 {canMutate && !k.revoked_at ? (

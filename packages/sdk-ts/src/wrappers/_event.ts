@@ -10,8 +10,8 @@ import {
   InstrumentationTier,
   Provider,
   TokenCountSource,
-  type TelemetryEvent,
-} from '@pylva/shared';
+} from '@pylva/shared/telemetry-values';
+import type { TelemetryEvent } from '@pylva/shared/telemetry';
 import { currentContext } from '../core/context.js';
 
 export interface BuildLlmEventInput {

@@ -159,4 +159,20 @@ describe('splitClickHouseStatements', () => {
     );
     expect(statements[2]).toContain('MODIFY TTL timestamp + toIntervalDay(retention_days)');
   });
+
+  it('keeps the legacy event timestamp pinned to UTC', () => {
+    const initial = fs.readFileSync(
+      path.join(repoRoot, 'db/clickhouse/001_cost_events.sql'),
+      'utf8',
+    );
+    const migration = fs.readFileSync(
+      path.join(repoRoot, 'db/clickhouse/012_cost_events_utc_timestamp.sql'),
+      'utf8',
+    );
+    const statements = splitClickHouseStatements(migration);
+
+    expect(initial).toContain("timestamp             DateTime('UTC')");
+    expect(statements).toHaveLength(1);
+    expect(statements[0]).toContain("MODIFY COLUMN IF EXISTS timestamp DateTime('UTC')");
+  });
 });

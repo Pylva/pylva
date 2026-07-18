@@ -13,9 +13,8 @@ export interface BuilderCostSummary {
 }
 
 /**
- * Summary across a builder's cost_events within a time window. Aggregates
- * over Nullable cost_usd using sum() (NULLs treated as 0, consistent with
- * the cost_daily_agg_v2 MV target).
+ * Summary across the canonical legacy-plus-authoritative event view within a
+ * time window. Aggregates over Nullable cost_usd using sum() (NULLs are 0).
  */
 export async function getBuilderCostSummary(
   builderId: string,
@@ -29,10 +28,10 @@ export async function getBuilderCostSummary(
        sum(cost_usd) AS total_cost_usd,
        sum(tokens_in) AS total_tokens_in,
        sum(tokens_out) AS total_tokens_out
-     FROM cost_events
+     FROM cost_events_with_control
      WHERE builder_id = {builder_id:String}
-       AND timestamp >= parseDateTimeBestEffort({from:String})
-       AND timestamp <  parseDateTimeBestEffort({to:String})`,
+       AND timestamp >= parseDateTimeBestEffort({from:String}, 'UTC')
+       AND timestamp <  parseDateTimeBestEffort({to:String}, 'UTC')`,
     { from: fromIso, to: toIso },
   );
   const r = (rows[0] as Record<string, unknown> | undefined) ?? {};
@@ -65,10 +64,10 @@ export async function getCostsByCustomer(
        customer_id,
        sum(cost_usd) AS total_cost_usd,
        count() AS event_count
-     FROM cost_events
+     FROM cost_events_with_control
      WHERE builder_id = {builder_id:String}
-       AND timestamp >= parseDateTimeBestEffort({from:String})
-       AND timestamp <  parseDateTimeBestEffort({to:String})
+       AND timestamp >= parseDateTimeBestEffort({from:String}, 'UTC')
+       AND timestamp <  parseDateTimeBestEffort({to:String}, 'UTC')
      GROUP BY customer_id
      ORDER BY total_cost_usd DESC
      LIMIT {lim:UInt32}`,

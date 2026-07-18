@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type { EventStatus, Framework } from '@pylva/shared';
+import type { EventStatus, Framework } from '@pylva/shared/telemetry';
 import { getConfig } from './config.js';
+import { registerIdentityResetter } from './identity_registry.js';
+import { AuthenticatedRoute, coreRuntime } from '../internal/core-runtime-state.js';
 
 export type NonLlmMode = 'off' | 'policy' | 'legacy_all';
 
@@ -69,6 +71,8 @@ let discoveryDedup = new Map<string, number>();
 let warnedPolicyFetch = false;
 let warnedExtractor = new Set<string>();
 let warnedLegacy = false;
+let policyEpoch = 0;
+const activeControllers = new Set<AbortController>();
 
 interface DiscoveryItem {
   tool_name: string;
@@ -88,7 +92,10 @@ interface RemoteNonLlmPolicyResponse {
 
 export function normalizeNonLlmMatcher(value: unknown): string | null {
   if (typeof value !== 'string' || value.length === 0) return null;
-  const sanitized = value.toLowerCase().trim().replace(/[^a-z0-9_.:/-]+/g, '-');
+  const sanitized = value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9_.:/-]+/g, '-');
   let start = 0;
   while (sanitized[start] === '-') start += 1;
   let end = sanitized.length;
@@ -122,25 +129,31 @@ export async function ensureNonLlmPolicy(): Promise<void> {
   const now = Date.now();
   if (fetchedAt > 0 && now - fetchedAt < refreshAfterMs) return;
   if (inFlight) return inFlight;
-  inFlight = refreshPolicy(now).finally(() => {
-    inFlight = null;
+  const owner = policyEpoch;
+  const promise = refreshPolicy(now, owner);
+  const wrapped = promise.finally(() => {
+    if (inFlight === wrapped) inFlight = null;
   });
+  inFlight = wrapped;
   return inFlight;
 }
 
-async function refreshPolicy(now: number): Promise<void> {
-  const cfg = getConfig();
-  if (!cfg) return;
+async function refreshPolicy(now: number, owner: number): Promise<void> {
+  if (!getConfig()) return;
+  const controller = new AbortController();
+  activeControllers.add(controller);
   try {
-    const res = await fetch(`${cfg.endpoint}/api/v1/sdk/non-llm-policy`, {
-      method: 'GET',
-      headers: { 'X-Pylva-Key': cfg.apiKey },
+    const res = await coreRuntime.authenticatedRequest({
+      route: AuthenticatedRoute.NON_LLM_POLICY,
+      signal: controller.signal,
     });
+    if (owner !== policyEpoch) return;
     if (!res.ok) {
       warnPolicyFetchOnce();
       return;
     }
-    const body = (await res.json()) as unknown;
+    const body = JSON.parse(res.bodyText) as unknown;
+    if (owner !== policyEpoch) return;
     const normalized = normalizeRemotePolicy(body);
     if (!normalized) {
       warnPolicyFetchOnce();
@@ -152,7 +165,10 @@ async function refreshPolicy(now: number): Promise<void> {
     fetchedAt = now;
     warnedPolicyFetch = false;
   } catch {
+    if (owner !== policyEpoch) return;
     warnPolicyFetchOnce();
+  } finally {
+    activeControllers.delete(controller);
   }
 }
 
@@ -318,22 +334,32 @@ export async function flushNonLlmDiscoveries(): Promise<void> {
   if (!cfg || cfg.localMode || discoveryBuffer.length === 0) return;
   const batch = discoveryBuffer.slice(0, 100);
   discoveryBuffer = discoveryBuffer.slice(batch.length);
+  const owner = policyEpoch;
+  const controller = new AbortController();
+  activeControllers.add(controller);
   try {
-    await fetch(`${cfg.endpoint}/api/v1/sdk/non-llm-discoveries`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'X-Pylva-Key': cfg.apiKey,
-      },
+    await coreRuntime.authenticatedRequest({
+      route: AuthenticatedRoute.NON_LLM_DISCOVERIES,
       body: JSON.stringify({ batch_id: randomUUID(), discoveries: batch }),
+      signal: controller.signal,
     });
   } catch {
     // R1: discovery is advisory and must never affect host code.
+  } finally {
+    activeControllers.delete(controller);
   }
+  if (owner !== policyEpoch) return;
   if (discoveryBuffer.length > 0) scheduleDiscoveryFlush();
 }
 
 export function _resetNonLlmPolicyForTests(): void {
+  resetNonLlmPolicy();
+}
+
+function resetNonLlmPolicy(): void {
+  policyEpoch += 1;
+  for (const controller of activeControllers) controller.abort();
+  activeControllers.clear();
   remotePolicy = [];
   localPolicy = [];
   unknownBehavior = 'discover_only';
@@ -348,3 +374,9 @@ export function _resetNonLlmPolicyForTests(): void {
   warnedExtractor.clear();
   warnedLegacy = false;
 }
+
+export function _resetNonLlmPolicyForIdentityChange(): void {
+  resetNonLlmPolicy();
+}
+
+registerIdentityResetter(_resetNonLlmPolicyForIdentityChange);

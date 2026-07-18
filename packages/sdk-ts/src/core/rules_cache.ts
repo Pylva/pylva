@@ -3,6 +3,8 @@
 // can share the same fetch path.
 
 import { getConfig } from './config.js';
+import { registerIdentityResetter } from './identity_registry.js';
+import { AuthenticatedRoute, coreRuntime } from '../internal/core-runtime-state.js';
 
 // PR #70 follow-up — 60s per remaining-implementation-plan.md O25
 // (was 300s; plan tightened to keep newly-activated rules reaching
@@ -20,27 +22,34 @@ interface RulesCacheState {
 let state: RulesCacheState = { rules: [], fetchedAt: 0, passthrough: false };
 let inFlight: Promise<void> | null = null;
 let warnedPassthrough = false;
+let cacheEpoch = 0;
+const activeControllers = new Set<AbortController>();
 
 export async function ensureRulesCache(): Promise<void> {
   const now = Date.now();
   const age = now - state.fetchedAt;
   if (age < RULES_CACHE_TTL_MS && !state.passthrough) return;
   if (inFlight) return inFlight;
-  inFlight = refresh(now, age).finally(() => {
-    inFlight = null;
+  const owner = cacheEpoch;
+  const promise = refresh(now, age, owner);
+  const wrapped = promise.finally(() => {
+    if (inFlight === wrapped) inFlight = null;
   });
+  inFlight = wrapped;
   return inFlight;
 }
 
-async function refresh(now: number, age: number): Promise<void> {
-  const cfg = getConfig();
-  if (!cfg) return;
+async function refresh(now: number, age: number, owner: number): Promise<void> {
+  if (!getConfig()) return;
+  const controller = new AbortController();
+  activeControllers.add(controller);
 
   try {
-    const res = await fetch(`${cfg.endpoint}/api/v1/rules`, {
-      method: 'GET',
-      headers: { 'X-Pylva-Key': cfg.apiKey },
+    const res = await coreRuntime.authenticatedRequest({
+      route: AuthenticatedRoute.RULES,
+      signal: controller.signal,
     });
+    if (owner !== cacheEpoch) return;
     if (!res.ok) {
       if (!warnedPassthrough)
         console.warn('[pylva] rules cache stale — backend returned non-ok; passthrough mode');
@@ -48,7 +57,21 @@ async function refresh(now: number, age: number): Promise<void> {
       state.passthrough = true;
       return;
     }
-    const body: unknown = await res.json();
+    let body: unknown;
+    try {
+      body = JSON.parse(res.bodyText) as unknown;
+    } catch {
+      if (owner !== cacheEpoch) return;
+      if (!warnedPassthrough) {
+        console.warn(
+          '[pylva] rules cache stale — backend returned malformed rules; passthrough mode',
+        );
+      }
+      warnedPassthrough = true;
+      state.passthrough = true;
+      return;
+    }
+    if (owner !== cacheEpoch) return;
     const rules =
       typeof body === 'object' && body !== null ? (body as { rules?: unknown }).rules : undefined;
     if (!Array.isArray(rules)) {
@@ -64,11 +87,14 @@ async function refresh(now: number, age: number): Promise<void> {
     state = { rules, fetchedAt: now, passthrough: false };
     warnedPassthrough = false;
   } catch {
+    if (owner !== cacheEpoch) return;
     if (age > RULES_CACHE_TTL_MS && !warnedPassthrough) {
       console.warn('[pylva] rules cache stale — passthrough mode (backend unreachable > 60s)');
       warnedPassthrough = true;
     }
     state.passthrough = true;
+  } finally {
+    activeControllers.delete(controller);
   }
 }
 
@@ -81,7 +107,20 @@ export function getCachedRules(): unknown[] {
 }
 
 export function _resetRulesCacheForTests(): void {
+  resetRulesCache();
+}
+
+function resetRulesCache(): void {
+  cacheEpoch += 1;
+  for (const controller of activeControllers) controller.abort();
+  activeControllers.clear();
   state = { rules: [], fetchedAt: 0, passthrough: false };
   inFlight = null;
   warnedPassthrough = false;
 }
+
+export function _resetRulesCacheForIdentityChange(): void {
+  resetRulesCache();
+}
+
+registerIdentityResetter(_resetRulesCacheForIdentityChange);

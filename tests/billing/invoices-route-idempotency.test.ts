@@ -39,7 +39,14 @@ vi.mock('@/lib/billing/idempotency', () => ({
 vi.mock('@/lib/billing/invoice-generator', () => {
   class BillingError extends Error {
     constructor(
-      public code: 'pricing_not_configured' | 'stripe_not_connected' | 'stripe_capabilities_pending',
+      public code:
+        | 'pricing_not_configured'
+        | 'stripe_not_connected'
+        | 'stripe_capabilities_pending'
+        | 'projection_pending'
+        | 'period_not_closed'
+        | 'usage_unbillable'
+        | 'invalid_period',
       message: string,
     ) {
       super(message);
@@ -80,6 +87,9 @@ const { POST } = await import('../../src/app/api/v1/billing/invoices/route.js');
 const { BillingError } = await import('../../src/lib/billing/invoice-generator.js');
 const { StripeConfigurationError } = await import('../../src/lib/stripe/config-error.js');
 
+const FIRST_CLAIM_CREATED_AT = new Date('2026-07-14T10:00:00.000Z');
+const SECOND_CLAIM_CREATED_AT = new Date('2026-07-16T10:00:00.000Z');
+
 function makeRequest(key = 'invoice-key-1'): NextRequest {
   return new NextRequest('http://localhost/api/v1/billing/invoices', {
     method: 'POST',
@@ -97,14 +107,25 @@ function makeRequest(key = 'invoice-key-1'): NextRequest {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.hashBody.mockReturnValue('stable-body-hash');
+  mocks.hashBody.mockImplementation((value: unknown) => {
+    if (typeof value !== 'object' || value === null || !('key' in value)) {
+      return 'stable-body-hash';
+    }
+    return 'claimCreatedAt' in value &&
+      value.claimCreatedAt === SECOND_CLAIM_CREATED_AT.toISOString()
+      ? 'second-draft-key-hash'
+      : 'stable-draft-key-hash';
+  });
   mocks.releaseClaim.mockResolvedValue(undefined);
   mocks.commitClaim.mockResolvedValue(undefined);
 });
 
 describe('POST /api/v1/billing/invoices idempotency', () => {
   it('releases an uncommitted claim after a billing preflight error so the same key can retry', async () => {
-    mocks.checkOrClaim.mockResolvedValueOnce({ status: 'new' });
+    mocks.checkOrClaim.mockResolvedValueOnce({
+      status: 'new',
+      claimCreatedAt: FIRST_CLAIM_CREATED_AT,
+    });
     mocks.generateInvoice.mockRejectedValueOnce(
       new BillingError('stripe_not_connected', 'Builder has no Stripe account connected'),
     );
@@ -120,7 +141,10 @@ describe('POST /api/v1/billing/invoices idempotency', () => {
       bodyHash: 'stable-body-hash',
     });
 
-    mocks.checkOrClaim.mockResolvedValueOnce({ status: 'new' });
+    mocks.checkOrClaim.mockResolvedValueOnce({
+      status: 'new',
+      claimCreatedAt: FIRST_CLAIM_CREATED_AT,
+    });
     mocks.generateInvoice.mockResolvedValueOnce([
       {
         invoice_id: '33333333-3333-4333-8333-333333333333',
@@ -145,7 +169,10 @@ describe('POST /api/v1/billing/invoices idempotency', () => {
   });
 
   it('releases the idempotency claim and returns 503 when Stripe server config is missing', async () => {
-    mocks.checkOrClaim.mockResolvedValueOnce({ status: 'new' });
+    mocks.checkOrClaim.mockResolvedValueOnce({
+      status: 'new',
+      claimCreatedAt: FIRST_CLAIM_CREATED_AT,
+    });
     mocks.generateInvoice.mockRejectedValueOnce(new StripeConfigurationError('STRIPE_SECRET_KEY'));
 
     const res = await POST(makeRequest('missing-stripe-config-key'));
@@ -161,5 +188,138 @@ describe('POST /api/v1/billing/invoices idempotency', () => {
       bodyHash: 'stable-body-hash',
     });
     expect(mocks.commitClaim).not.toHaveBeenCalled();
+  });
+
+  it('returns a retryable 503 and releases the claim while projection is pending', async () => {
+    mocks.checkOrClaim.mockResolvedValueOnce({
+      status: 'new',
+      claimCreatedAt: FIRST_CLAIM_CREATED_AT,
+    });
+    mocks.generateInvoice.mockRejectedValueOnce(
+      new BillingError('projection_pending', 'Authoritative usage is still reconciling'),
+    );
+
+    const res = await POST(makeRequest('projection-pending-key'));
+    const body = await res.json();
+
+    expect(res.status).toBe(503);
+    expect(body.error.type).toBe('api_error');
+    expect(body.error.param).toBe('projection_pending');
+    expect(mocks.releaseClaim).toHaveBeenCalledWith({
+      builderId: mocks.builderId,
+      key: 'projection-pending-key',
+      bodyHash: 'stable-body-hash',
+    });
+    expect(mocks.commitClaim).not.toHaveBeenCalled();
+  });
+
+  it('returns 409 and releases the claim while the requested period is still open', async () => {
+    mocks.checkOrClaim.mockResolvedValueOnce({
+      status: 'new',
+      claimCreatedAt: FIRST_CLAIM_CREATED_AT,
+    });
+    mocks.generateInvoice.mockRejectedValueOnce(
+      new BillingError('period_not_closed', 'Billing period is still open'),
+    );
+
+    const res = await POST(makeRequest('period-open-key'));
+    const body = await res.json();
+
+    expect(res.status).toBe(409);
+    expect(body.error.param).toBe('period_not_closed');
+    expect(mocks.releaseClaim).toHaveBeenCalledWith({
+      builderId: mocks.builderId,
+      key: 'period-open-key',
+      bodyHash: 'stable-body-hash',
+    });
+  });
+
+  it('resumes an interrupted auto-split request with the same idempotency key', async () => {
+    mocks.checkOrClaim
+      .mockResolvedValueOnce({ status: 'new', claimCreatedAt: FIRST_CLAIM_CREATED_AT })
+      .mockResolvedValueOnce({
+        status: 'replay',
+        invoiceId: null,
+        claimCreatedAt: FIRST_CLAIM_CREATED_AT,
+      });
+    mocks.generateInvoice
+      .mockRejectedValueOnce(new Error('transient Stripe failure after slice 1'))
+      .mockResolvedValueOnce([
+        {
+          invoice_id: '33333333-3333-4333-8333-333333333333',
+          stripe_invoice_id: 'in_slice_1',
+          amount_usd: 10,
+          has_unpriced_events: false,
+          billing_cycle_id: '55555555-5555-4555-8555-555555555555',
+        },
+        {
+          invoice_id: '44444444-4444-4444-8444-444444444444',
+          stripe_invoice_id: 'in_slice_2',
+          amount_usd: 20,
+          has_unpriced_events: false,
+          billing_cycle_id: '55555555-5555-4555-8555-555555555555',
+        },
+      ]);
+
+    const interrupted = await POST(makeRequest('interrupted-split-key'));
+    const response = await POST(makeRequest('interrupted-split-key'));
+    const body = await response.json();
+
+    expect(interrupted.status).toBe(500);
+    expect(response.status).toBe(201);
+    expect(body.invoices).toHaveLength(2);
+    expect(mocks.generateInvoice).toHaveBeenCalledTimes(2);
+    expect(mocks.generateInvoice).toHaveBeenNthCalledWith(1, {
+      builderId: mocks.builderId,
+      customerId: mocks.customerId,
+      period: {
+        start: new Date('2026-06-01T00:00:00.000Z'),
+        end: new Date('2026-07-01T00:00:00.000Z'),
+      },
+      actorUserId: mocks.userId,
+      draftKeyBase: 'oneoff:stable-draft-key-hash',
+    });
+    expect(mocks.generateInvoice).toHaveBeenNthCalledWith(2, {
+      builderId: mocks.builderId,
+      customerId: mocks.customerId,
+      period: {
+        start: new Date('2026-06-01T00:00:00.000Z'),
+        end: new Date('2026-07-01T00:00:00.000Z'),
+      },
+      actorUserId: mocks.userId,
+      draftKeyBase: 'oneoff:stable-draft-key-hash',
+    });
+    expect(mocks.commitClaim).toHaveBeenCalledWith({
+      builderId: mocks.builderId,
+      key: 'interrupted-split-key',
+      invoiceId: '33333333-3333-4333-8333-333333333333',
+    });
+    expect(mocks.releaseClaim).not.toHaveBeenCalled();
+  });
+
+  it('uses a fresh draft namespace when the same key is reused after claim expiry', async () => {
+    mocks.checkOrClaim
+      .mockResolvedValueOnce({ status: 'new', claimCreatedAt: FIRST_CLAIM_CREATED_AT })
+      .mockResolvedValueOnce({ status: 'new', claimCreatedAt: SECOND_CLAIM_CREATED_AT });
+    mocks.generateInvoice.mockResolvedValue([
+      {
+        invoice_id: '33333333-3333-4333-8333-333333333333',
+        stripe_invoice_id: 'in_test_123',
+        amount_usd: 59,
+        has_unpriced_events: false,
+      },
+    ]);
+
+    expect((await POST(makeRequest('reused-after-ttl'))).status).toBe(201);
+    expect((await POST(makeRequest('reused-after-ttl'))).status).toBe(201);
+
+    expect(mocks.generateInvoice).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ draftKeyBase: 'oneoff:stable-draft-key-hash' }),
+    );
+    expect(mocks.generateInvoice).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ draftKeyBase: 'oneoff:second-draft-key-hash' }),
+    );
   });
 });

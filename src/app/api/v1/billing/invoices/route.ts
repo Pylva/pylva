@@ -117,19 +117,24 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
   if (claim.status === 'replay') {
-    if (!claim.invoiceId) {
-      // Prior claim never committed (crash between claim + commit). Safe to
-      // tell the client to retry with a fresh key.
-      return apiError(
-        409,
-        'invalid_request_error',
-        ErrorCode.VALIDATION_ERROR,
-        'Prior request using this Idempotency-Key did not complete. Retry with a new key.',
-        'Idempotency-Key',
-      );
+    if (claim.invoiceId) {
+      return NextResponse.json({ invoices: [{ invoice_id: claim.invoiceId }], replayed: true });
     }
-    return NextResponse.json({ invoices: [{ invoice_id: claim.invoiceId }], replayed: true });
+    // An uncommitted claim can mean a prior attempt stopped after persisting
+    // only some auto-split slices. Resume with the deterministic draft keys;
+    // persistOneDraft returns existing winners and creates only missing slices.
   }
+
+  // Give manual invoice generation the same resumable per-slice dedupe rail
+  // as the monthly cron. The persisted claim timestamp keeps retries inside
+  // one 24-hour claim on the same namespace, while a key legitimately reused
+  // after the claim is purged gets a new namespace. Hash before storing so
+  // caller-supplied key material is never persisted in invoices.draft_key.
+  const draftKeyBase = `oneoff:${hashBody({
+    key: idempotencyKey,
+    bodyHash,
+    claimCreatedAt: claim.claimCreatedAt.toISOString(),
+  })}`;
 
   try {
     const results = await generateInvoice({
@@ -140,6 +145,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         end: new Date(parsed.output.period_end),
       },
       actorUserId: ctx.userId ?? undefined,
+      draftKeyBase,
     });
 
     // Record the first invoice id against the key — for auto-split both drafts
@@ -158,7 +164,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       try {
         await releaseClaim({ builderId: ctx.builderId, key: idempotencyKey, bodyHash });
       } catch (releaseErr) {
-        const releaseMessage = releaseErr instanceof Error ? releaseErr.message : String(releaseErr);
+        const releaseMessage =
+          releaseErr instanceof Error ? releaseErr.message : String(releaseErr);
         log.warn(
           { builder_id: ctx.builderId, error: releaseMessage },
           'failed to release invoice idempotency claim after billing preflight error',
@@ -166,6 +173,27 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       }
       if (isStripeConfigurationError(err)) {
         return apiError(503, 'api_error', ErrorCode.INTERNAL_ERROR, err.message, 'stripe');
+      }
+      if (err.code === 'projection_pending') {
+        return apiError(503, 'api_error', ErrorCode.INTERNAL_ERROR, err.message, err.code);
+      }
+      if (err.code === 'period_not_closed') {
+        return apiError(
+          409,
+          'invalid_request_error',
+          ErrorCode.VALIDATION_ERROR,
+          err.message,
+          err.code,
+        );
+      }
+      if (err.code === 'usage_unbillable') {
+        return apiError(
+          422,
+          'invalid_request_error',
+          ErrorCode.VALIDATION_ERROR,
+          err.message,
+          err.code,
+        );
       }
       return apiError(
         400,

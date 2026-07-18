@@ -10,7 +10,7 @@ import {
   RuleWarningCode,
   type RuleWarning,
   type ReliabilityFailoverConfig,
-} from '@pylva/shared';
+} from '@pylva/shared/rules';
 import { getCachedRules } from '../core/rules_cache.js';
 import { evaluatePreCall, type PreCallContext } from '../core/rules_engine.js';
 import { isActive, recordOutcome } from '../core/failover.js';
@@ -19,6 +19,7 @@ import { currentContext } from '../core/context.js';
 import { hasRegisteredClient } from '../core/client_registry.js';
 import { maybeEnforcePreCall } from './_budget.js';
 import { PylvaBudgetExceeded } from '../errors/budget_exceeded.js';
+import { getConfigGeneration } from '../core/config.js';
 
 export interface EngineRequestShape {
   /** Mutable copy of request args[0] — wrappers pass a shallow copy so
@@ -70,6 +71,7 @@ export function buildEngineCtx(providerId: string, model: string | null): PreCal
  * failure paths so wrappers only need to handle telemetry on rethrow.
  */
 export async function runWithEngine<T>(input: EngineRequestShape): Promise<EngineResult<T>> {
+  const ownerGeneration = getConfigGeneration();
   // maybeEnforcePreCall already warms the rules cache via ensureRulesCache.
   maybeEnforcePreCall({ customer_id: input.ctx.customer_id, estimated_usd: 0 });
 
@@ -144,11 +146,15 @@ export async function runWithEngine<T>(input: EngineRequestShape): Promise<Engin
       result = (await input.call(input.request)) as T;
     }
   } catch (err) {
-    if (failoverCfg) recordOutcome(failoverCfg, false);
+    if (failoverCfg && ownerGeneration === getConfigGeneration()) {
+      recordOutcome(failoverCfg, false);
+    }
     throw err;
   }
 
-  if (failoverCfg) recordOutcome(failoverCfg, true);
+  if (failoverCfg && ownerGeneration === getConfigGeneration()) {
+    recordOutcome(failoverCfg, true);
+  }
 
   const metadata: PylvaResponseMetadata = {
     original_model: originalModel,

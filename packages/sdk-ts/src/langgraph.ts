@@ -12,11 +12,20 @@ import {
   InstrumentationTier,
   Provider,
   TokenCountSource,
-  type TelemetryEvent,
-} from '@pylva/shared';
+} from '@pylva/shared/telemetry-values';
+import type { TelemetryEvent } from '@pylva/shared/telemetry';
 import type { CallbackHandlerMethods } from '@langchain/core/callbacks/base';
-import { init as initConfig, type InitConfig } from './core/config.js';
+import { getConfigGeneration, type InitConfig } from './core/config.js';
+import { installSdkConfig, snapshotStandaloneNonLlmConfig } from './core/identity.js';
 import { currentContext } from './core/context.js';
+import {
+  completeControlledCallback,
+  controlledOperationForCallbackStart,
+  registerControlledCallback,
+  withControlledCallbackScope,
+  type ControlledCallbackLink,
+  type ControlledOperationCorrelation,
+} from './core/control_correlation.js';
 import { initAccumulator } from './core/budget_accumulator.js';
 import { ensurePricingCache } from './core/pricing_cache.js';
 import { enqueue, flush } from './core/telemetry.js';
@@ -36,6 +45,7 @@ type JsonishRecord = Record<string, unknown>;
 type RunKind = 'chain' | 'llm' | 'tool';
 
 interface RunState {
+  generation: number;
   runKey: string;
   parentRunKey: string | null;
   run_id: string;
@@ -49,6 +59,8 @@ interface RunState {
   started_at: number;
   metadata: JsonishRecord;
   kind: RunKind;
+  controlled_operation: ControlledOperationCorrelation | null;
+  controlled_callback: ControlledCallbackLink | null;
   tool_input?: unknown;
 }
 
@@ -60,17 +72,34 @@ interface UsageResult {
   found: boolean;
 }
 
+const MAX_COMPLETED_RUN_TOMBSTONES = 10_000;
+
+export type PylvaCallbackLlmTrackingMode = 'auto' | 'callback' | 'off';
+
+/**
+ * Bind one LangGraph/LangChain model or tool invocation to the exact controlled
+ * provider attempt that executes inside it.
+ */
+export function withLangGraphControlScope<T>(invoke: () => T): T {
+  return withControlledCallbackScope(invoke);
+}
+
 export interface PylvaCallbackHandlerOptions extends Omit<InitConfig, 'apiKey'> {
   apiKey?: string;
   customerId?: string;
   trackToolCalls?: boolean;
   nonLlm?: NonLlmConfig;
   flushOnChainEnd?: boolean;
+  /**
+   * `auto` lets an exact active Pylva provider wrapper own LLM billing,
+   * `callback` is for callback-only instrumentation, and `off` ignores LLMs.
+   */
+  llmTracking?: PylvaCallbackLlmTrackingMode;
 }
 
 export class PylvaCallbackHandler implements CallbackHandlerMethods {
   name = 'pylva_callback_handler';
-  ignoreLLM = false;
+  ignoreLLM: boolean;
   ignoreChain = false;
   ignoreAgent = false;
   ignoreRetriever = true;
@@ -83,27 +112,49 @@ export class PylvaCallbackHandler implements CallbackHandlerMethods {
   private readonly nonLlmMode: NonLlmMode;
   private readonly nonLlmConfig: NonLlmConfig | undefined;
   private readonly flushOnChainEnd: boolean;
+  private readonly llmTracking: PylvaCallbackLlmTrackingMode;
+  private readonly fallbackGeneration: number;
   private readonly runs = new Map<string, RunState>();
-  private readonly completedToolRuns = new Set<string>();
+  // Keep a terminal tombstone after deleting run state. An old-identity
+  // callback may be delivered more than once; without the tombstone, the
+  // duplicate would take the no-start fallback path and inherit the current
+  // tenant generation. A real start for a reused run ID clears the tombstone.
+  private readonly completedRuns = new Map<string, number>();
 
   constructor(options: PylvaCallbackHandlerOptions = {}) {
-    this.customerId = cleanCustomerId(options.customerId);
-    this.nonLlmConfig = options.nonLlm;
-    this.nonLlmMode = nonLlmMode(options.nonLlm, options.trackToolCalls);
-    this.observeToolCalls = this.nonLlmMode !== 'off';
-    this.flushOnChainEnd = options.flushOnChainEnd ?? false;
-    configureNonLlmPolicy(options.nonLlm);
-    if (this.nonLlmMode === 'legacy_all') warnLegacyToolTrackingOnce();
+    // Read and validate every caller-controlled option before installSdkConfig
+    // can replace the process identity. A getter or Proxy trap must never make
+    // construction fail after a new credential has already been published.
+    const {
+      llmTracking: llmTrackingValue,
+      customerId: customerIdValue,
+      apiKey,
+      trackToolCalls: trackToolCallsValue,
+      flushOnChainEnd: flushOnChainEndValue,
+      endpoint,
+      batchSize,
+      flushInterval,
+      localMode,
+      nonLlm: nonLlmValue,
+      control,
+    } = options;
+    const llmTracking = parseLlmTrackingMode(llmTrackingValue);
+    const customerId = cleanCustomerId(customerIdValue);
+    const trackToolCalls = parseOptionalBoolean(trackToolCallsValue, 'trackToolCalls');
+    const flushOnChainEnd = parseOptionalBoolean(flushOnChainEndValue, 'flushOnChainEnd');
+    let nonLlmConfig: NonLlmConfig | undefined;
 
-    if (options.apiKey !== undefined) {
-      initConfig({
-        apiKey: options.apiKey,
-        endpoint: options.endpoint,
-        batchSize: options.batchSize,
-        flushInterval: options.flushInterval,
-        localMode: options.localMode,
-        nonLlm: options.nonLlm,
+    if (apiKey !== undefined) {
+      const resolved = installSdkConfig({
+        apiKey,
+        endpoint,
+        batchSize,
+        flushInterval,
+        localMode,
+        nonLlm: nonLlmValue,
+        control,
       });
+      nonLlmConfig = resolved.nonLlm;
       void initAccumulator().catch(() => {
         /* R1 */
       });
@@ -112,12 +163,29 @@ export class PylvaCallbackHandler implements CallbackHandlerMethods {
       void ensurePricingCache().catch(() => {
         /* R1 */
       });
-      if (this.nonLlmMode === 'policy') {
-        void ensureNonLlmPolicy().catch(() => {
-          /* R1 */
-        });
-      }
+    } else {
+      nonLlmConfig = snapshotStandaloneNonLlmConfig(nonLlmValue);
+      configureNonLlmPolicy(nonLlmConfig);
     }
+
+    this.llmTracking = llmTracking;
+    this.ignoreLLM = llmTracking === 'off';
+    this.customerId = customerId;
+    this.nonLlmConfig = nonLlmConfig;
+    this.nonLlmMode = nonLlmMode(nonLlmConfig, trackToolCalls);
+    this.observeToolCalls = this.nonLlmMode !== 'off';
+    this.flushOnChainEnd = flushOnChainEnd;
+    if (this.nonLlmMode === 'legacy_all') warnLegacyToolTrackingOnce();
+    if (apiKey !== undefined && this.nonLlmMode === 'policy') {
+      void ensureNonLlmPolicy().catch(() => {
+        /* R1 */
+      });
+    }
+    // A terminal callback without a matching start belongs, at best, to the
+    // identity under which this handler was created. Real starts capture the
+    // current generation separately, so a reused handler still works after a
+    // deliberate reinit while orphaned old callbacks remain fenced out.
+    this.fallbackGeneration = getConfigGeneration();
   }
 
   // LangChain.js v1 managers pass parentRunId before tags/metadata. LLM and
@@ -154,6 +222,7 @@ export class PylvaCallbackHandler implements CallbackHandlerMethods {
     metadata?: JsonishRecord,
     runName?: string,
   ): void {
+    if (this.llmTracking === 'off') return;
     this.handleStart({
       runId,
       parentRunId,
@@ -175,6 +244,7 @@ export class PylvaCallbackHandler implements CallbackHandlerMethods {
     metadata?: JsonishRecord,
     runName?: string,
   ): void {
+    if (this.llmTracking === 'off') return;
     this.handleStart({
       runId,
       parentRunId,
@@ -187,13 +257,14 @@ export class PylvaCallbackHandler implements CallbackHandlerMethods {
   }
 
   handleLLMEnd(output: unknown, runId: string, parentRunId?: string): void {
+    if (this.llmTracking === 'off') return;
     try {
       const runKey = id(runId);
       if (!runKey) return;
       const parentRunKey = id(parentRunId);
-      const state =
-        this.runs.get(runKey) ?? this.fallbackState({ runKey, parentRunKey, kind: 'llm' });
-      this.runs.delete(runKey);
+      const state = this.takeTerminalState({ runKey, parentRunKey, kind: 'llm' });
+      if (!state) return;
+      if (this.callbackLlmIsWrapperOwned(state)) return;
 
       const usage = extractUsage(output);
       const metadata = { ...state.metadata };
@@ -216,13 +287,14 @@ export class PylvaCallbackHandler implements CallbackHandlerMethods {
   }
 
   handleLLMError(error: unknown, runId: string, parentRunId?: string): void {
+    if (this.llmTracking === 'off') return;
     try {
       const runKey = id(runId);
       if (!runKey) return;
       const parentRunKey = id(parentRunId);
-      const state =
-        this.runs.get(runKey) ?? this.fallbackState({ runKey, parentRunKey, kind: 'llm' });
-      this.runs.delete(runKey);
+      const state = this.takeTerminalState({ runKey, parentRunKey, kind: 'llm' });
+      if (!state) return;
+      if (this.callbackLlmIsWrapperOwned(state)) return;
       const errorName =
         typeof error === 'object' && error !== null && 'name' in error
           ? String((error as { name?: unknown }).name)
@@ -244,13 +316,20 @@ export class PylvaCallbackHandler implements CallbackHandlerMethods {
   }
 
   async handleChainError(_error: unknown, runId: string): Promise<void> {
+    let ownerGeneration: number | null = getConfigGeneration();
     try {
       const runKey = id(runId);
-      if (runKey) this.runs.delete(runKey);
+      if (runKey) {
+        ownerGeneration = this.takeTerminalGeneration(runKey);
+      }
     } catch {
       /* R1 */
     }
-    if (this.flushOnChainEnd) {
+    if (
+      this.flushOnChainEnd &&
+      ownerGeneration !== null &&
+      ownerGeneration === getConfigGeneration()
+    ) {
       try {
         await flush();
       } catch {
@@ -291,12 +370,10 @@ export class PylvaCallbackHandler implements CallbackHandlerMethods {
     try {
       const runKey = id(runId);
       if (!runKey) return;
-      if (this.completedToolRuns.has(runKey)) return;
-      this.completedToolRuns.add(runKey);
       const parentRunKey = id(parentRunId);
-      const state =
-        this.runs.get(runKey) ?? this.fallbackState({ runKey, parentRunKey, kind: 'tool' });
-      this.runs.delete(runKey);
+      const state = this.takeTerminalState({ runKey, parentRunKey, kind: 'tool' });
+      if (!state) return;
+      if (this.callbackToolIsWrapperOwned(state)) return;
       const toolName = cleanStep(state.run_name ?? state.step_name ?? 'tool') ?? 'tool';
       if (this.nonLlmMode === 'policy') {
         this.handlePolicyTool({
@@ -335,12 +412,10 @@ export class PylvaCallbackHandler implements CallbackHandlerMethods {
     try {
       const runKey = id(runId);
       if (!runKey) return;
-      if (this.completedToolRuns.has(runKey)) return;
-      this.completedToolRuns.add(runKey);
       const parentRunKey = id(parentRunId);
-      const state =
-        this.runs.get(runKey) ?? this.fallbackState({ runKey, parentRunKey, kind: 'tool' });
-      this.runs.delete(runKey);
+      const state = this.takeTerminalState({ runKey, parentRunKey, kind: 'tool' });
+      if (!state) return;
+      if (this.callbackToolIsWrapperOwned(state)) return;
       const toolName = cleanStep(state.run_name ?? state.step_name ?? 'tool') ?? 'tool';
       const errorName =
         typeof error === 'object' && error !== null && 'name' in error
@@ -379,13 +454,20 @@ export class PylvaCallbackHandler implements CallbackHandlerMethods {
   }
 
   async handleChainEnd(_outputs: unknown, runId: string): Promise<void> {
+    let ownerGeneration: number | null = getConfigGeneration();
     try {
       const runKey = id(runId);
-      if (runKey) this.runs.delete(runKey);
+      if (runKey) {
+        ownerGeneration = this.takeTerminalGeneration(runKey);
+      }
     } catch {
       /* R1 */
     }
-    if (this.flushOnChainEnd) {
+    if (
+      this.flushOnChainEnd &&
+      ownerGeneration !== null &&
+      ownerGeneration === getConfigGeneration()
+    ) {
       try {
         await flush();
       } catch {
@@ -411,16 +493,29 @@ export class PylvaCallbackHandler implements CallbackHandlerMethods {
     try {
       const runKey = id(input.runId);
       if (!runKey) return;
+      const generation = getConfigGeneration();
+      this.completedRuns.delete(runKey);
+      completeControlledCallback(this.runs.get(runKey)?.controlled_callback ?? null);
       const parentRunKey = id(input.parentRunId);
-      const parent = parentRunKey ? this.runs.get(parentRunKey) : undefined;
+      const parentCandidate = parentRunKey ? this.runs.get(parentRunKey) : undefined;
+      const parent = parentCandidate?.generation === generation ? parentCandidate : undefined;
       const ctx = currentContext();
       const safeMetadata = safeRunMetadata(input.metadata);
       const runName = resolveRunName(input.serialized, input.name);
       const runUuid = uuidOrRandom(runKey);
       const parentUuid = parent?.run_id ?? uuidOrNull(parentRunKey);
       const traceId = parent?.trace_id ?? ctx?.trace_id ?? parentUuid ?? runUuid;
+      const controlledOperation =
+        input.kind === 'llm' || input.kind === 'tool'
+          ? controlledOperationForCallbackStart(input.kind)
+          : null;
+      const controlledCallback =
+        controlledOperation === null && (input.kind === 'llm' || input.kind === 'tool')
+          ? registerControlledCallback(input.kind)
+          : null;
 
       this.runs.set(runKey, {
+        generation,
         runKey,
         parentRunKey,
         run_id: runUuid,
@@ -434,6 +529,8 @@ export class PylvaCallbackHandler implements CallbackHandlerMethods {
         started_at: Date.now(),
         metadata: safeMetadata,
         kind: input.kind,
+        controlled_operation: controlledOperation,
+        controlled_callback: controlledCallback,
         tool_input: input.toolInput,
       });
     } catch {
@@ -450,6 +547,7 @@ export class PylvaCallbackHandler implements CallbackHandlerMethods {
     const runUuid = uuidOrRandom(input.runKey);
     const parentUuid = uuidOrNull(input.parentRunKey);
     return {
+      generation: this.fallbackGeneration,
       runKey: input.runKey,
       parentRunKey: input.parentRunKey,
       run_id: runUuid,
@@ -463,7 +561,64 @@ export class PylvaCallbackHandler implements CallbackHandlerMethods {
       started_at: Date.now(),
       metadata: {},
       kind: input.kind,
+      controlled_operation: null,
+      controlled_callback: null,
     };
+  }
+
+  private callbackLlmIsWrapperOwned(state: RunState): boolean {
+    const operation =
+      state.controlled_operation ?? state.controlled_callback?.controlledOperation ?? null;
+    const noDispatch = state.controlled_callback?.controlledNoDispatch ?? null;
+    return this.llmTracking === 'auto' && (operation?.kind === 'llm' || noDispatch?.kind === 'llm');
+  }
+
+  private callbackToolIsWrapperOwned(state: RunState): boolean {
+    const operation =
+      state.controlled_operation ?? state.controlled_callback?.controlledOperation ?? null;
+    const noDispatch = state.controlled_callback?.controlledNoDispatch ?? null;
+    return operation?.kind === 'tool' || noDispatch?.kind === 'tool';
+  }
+
+  private takeTerminalGeneration(runKey: string): number | null {
+    const state = this.runs.get(runKey);
+    if (state) {
+      this.runs.delete(runKey);
+      completeControlledCallback(state.controlled_callback);
+      this.rememberCompletedRun(runKey, state.generation);
+      return state.generation;
+    }
+    if (this.completedRuns.has(runKey)) return null;
+    const generation = this.fallbackGeneration;
+    this.rememberCompletedRun(runKey, generation);
+    return generation;
+  }
+
+  private takeTerminalState(input: {
+    runKey: string;
+    parentRunKey: string | null;
+    kind: RunKind;
+  }): RunState | null {
+    const state = this.runs.get(input.runKey);
+    if (state) {
+      this.runs.delete(input.runKey);
+      completeControlledCallback(state.controlled_callback);
+      this.rememberCompletedRun(input.runKey, state.generation);
+      return state.generation === getConfigGeneration() ? state : null;
+    }
+    if (this.completedRuns.has(input.runKey)) return null;
+    const fallback = this.fallbackState(input);
+    this.rememberCompletedRun(input.runKey, fallback.generation);
+    return fallback.generation === getConfigGeneration() ? fallback : null;
+  }
+
+  private rememberCompletedRun(runKey: string, generation: number): void {
+    // Refresh insertion order when a real run ID is intentionally reused.
+    this.completedRuns.delete(runKey);
+    this.completedRuns.set(runKey, generation);
+    if (this.completedRuns.size <= MAX_COMPLETED_RUN_TOMBSTONES) return;
+    const oldest = this.completedRuns.keys().next().value;
+    if (oldest !== undefined) this.completedRuns.delete(oldest);
   }
 
   private handlePolicyTool(input: {
@@ -586,6 +741,21 @@ export class PylvaCallbackHandler implements CallbackHandlerMethods {
 // LangChain.js uses one callback protocol for sync and async runs. This alias
 // mirrors the Python SDK's public import for users looking for parity.
 export class AsyncPylvaCallbackHandler extends PylvaCallbackHandler {}
+
+Object.defineProperty(PylvaCallbackHandler, 'name', { value: 'PylvaCallbackHandler' });
+Object.defineProperty(AsyncPylvaCallbackHandler, 'name', { value: 'AsyncPylvaCallbackHandler' });
+
+function parseLlmTrackingMode(value: unknown): PylvaCallbackLlmTrackingMode {
+  if (value === undefined) return 'auto';
+  if (value === 'auto' || value === 'callback' || value === 'off') return value;
+  throw new TypeError("[pylva] llmTracking must be 'auto', 'callback', or 'off'");
+}
+
+function parseOptionalBoolean(value: unknown, label: string): boolean {
+  if (value === undefined) return false;
+  if (typeof value === 'boolean') return value;
+  throw new TypeError(`[pylva] ${label} must be a boolean`);
+}
 
 function id(value: unknown): string | null {
   if (value === null || value === undefined) return null;

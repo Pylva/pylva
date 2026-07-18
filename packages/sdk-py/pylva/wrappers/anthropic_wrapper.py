@@ -6,6 +6,7 @@ and failover state tracking live in ``_engine.py``."""
 from __future__ import annotations
 
 import time
+from importlib import import_module
 from typing import Any
 
 from ..core.config import is_initialized
@@ -19,6 +20,7 @@ from ._engine import (
 )
 from ._event import build_llm_event
 from ._init_validation import mark_provider_patched
+from ._strict_context import is_strict_provider_dispatch
 
 _patched = False
 
@@ -30,7 +32,7 @@ def _event_for(
     start: float,
     failure: bool,
     metadata_model: Any | None = None,
-) -> dict:
+) -> dict[str, Any]:
     response_model = getattr(response, "model", None)
     model = response_model or metadata_model or request_model
     usage = getattr(response, "usage", None)
@@ -50,14 +52,11 @@ def try_patch_anthropic() -> None:
     if _patched:
         return
     try:
-        from anthropic.resources.messages import Messages  # type: ignore
+        provider_module = import_module("anthropic.resources.messages")
+        Messages: Any = provider_module.Messages
     except Exception:
         return
-
-    try:
-        from anthropic.resources.messages import AsyncMessages  # type: ignore
-    except Exception:
-        AsyncMessages = None  # type: ignore
+    AsyncMessages: Any = getattr(provider_module, "AsyncMessages", None)
 
     sync_original = Messages.create
 
@@ -65,6 +64,8 @@ def try_patch_anthropic() -> None:
         if not is_initialized():
             return sync_original(self, *args, **kwargs)
         if not kwargs:
+            return sync_original(self, *args, **kwargs)
+        if is_strict_provider_dispatch("anthropic", kwargs.get("model")):
             return sync_original(self, *args, **kwargs)
         start = time.time()
         request = dict(kwargs)
@@ -107,7 +108,7 @@ def try_patch_anthropic() -> None:
                 pass
             raise
 
-    Messages.create = sync_patched  # type: ignore[assignment]
+    Messages.create = sync_patched
 
     if AsyncMessages is not None:
         async_original = AsyncMessages.create
@@ -116,6 +117,8 @@ def try_patch_anthropic() -> None:
             if not is_initialized():
                 return await async_original(self, *args, **kwargs)
             if not kwargs:
+                return await async_original(self, *args, **kwargs)
+            if is_strict_provider_dispatch("anthropic", kwargs.get("model")):
                 return await async_original(self, *args, **kwargs)
             start = time.time()
             request = dict(kwargs)
@@ -161,7 +164,7 @@ def try_patch_anthropic() -> None:
                     pass
                 raise
 
-        AsyncMessages.create = async_patched  # type: ignore[assignment]
+        AsyncMessages.create = async_patched
 
     _patched = True
     mark_provider_patched("anthropic")

@@ -234,10 +234,10 @@ async function seedFromClickHouse(
     const rows = await queryCostEvents(
       builderId,
       `SELECT count() AS event_count
-       FROM cost_events
+       FROM cost_events_with_control
        WHERE builder_id = {builder_id:String}
-         AND timestamp >= parseDateTimeBestEffort({from:String})
-         AND timestamp <  parseDateTimeBestEffort({to:String})`,
+         AND timestamp >= parseDateTimeBestEffort({from:String}, 'UTC')
+         AND timestamp <  parseDateTimeBestEffort({to:String}, 'UTC')`,
       { from, to },
       { queryLabel: 'event_cap_seed' },
     );

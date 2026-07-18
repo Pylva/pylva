@@ -10,6 +10,7 @@ import { ensureRlsTestRole, rlsDatabaseUrl } from '../helpers/rls-test-role.js';
 
 const DATABASE_URL =
   process.env['DATABASE_URL'] ?? 'postgresql://pylva:pylva_dev@localhost:5432/pylva';
+const TEST_DATABASE_URL = process.env['PYLVA_TEST_DATABASE_URL'] ?? DATABASE_URL;
 const ARGON2_SECRET = process.env['ARGON2_SECRET'] ?? 'dev-secret-change-in-prod';
 
 let adminSql: ReturnType<typeof postgres> | undefined;
@@ -18,9 +19,9 @@ let builderAId = '';
 let builderBId = '';
 
 beforeAll(async () => {
-  adminSql = postgres(DATABASE_URL);
+  adminSql = postgres(TEST_DATABASE_URL);
   await ensureRlsTestRole(adminSql);
-  rlsSql = postgres(rlsDatabaseUrl(DATABASE_URL));
+  rlsSql = postgres(rlsDatabaseUrl(TEST_DATABASE_URL));
 
   // Create test builders
   const [a] = await adminSql!`

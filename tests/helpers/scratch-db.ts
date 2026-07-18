@@ -5,6 +5,8 @@ import postgres, { type Sql } from 'postgres';
 
 const DEFAULT_DATABASE_URL = 'postgresql://pylva:pylva_dev@localhost:5432/pylva';
 
+export const TEST_DATABASE_ADMIN_URL_ENV = 'PYLVA_TEST_DATABASE_ADMIN_URL' as const;
+
 export interface ScratchDb {
   name: string;
   url: string;
@@ -24,8 +26,26 @@ function quoteIdentifier(identifier: string): string {
   return `"${identifier.replaceAll('"', '""')}"`;
 }
 
+function nonBlank(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+/**
+ * Scratch databases need an identity that can CREATE/DROP DATABASE and apply
+ * migrations. CI's general application login deliberately cannot do that, so
+ * tests may supply a separate, test-only administrative URL.
+ */
+export function resolveScratchDatabaseAdminUrl(source: NodeJS.ProcessEnv = process.env): string {
+  return (
+    nonBlank(source[TEST_DATABASE_ADMIN_URL_ENV]) ??
+    nonBlank(source['DATABASE_URL']) ??
+    DEFAULT_DATABASE_URL
+  );
+}
+
 export async function createScratchDb(opts?: { prefix?: string }): Promise<ScratchDb> {
-  const baseUrl = process.env['DATABASE_URL'] ?? DEFAULT_DATABASE_URL;
+  const baseUrl = resolveScratchDatabaseAdminUrl();
   const prefix = opts?.prefix ?? 'pylva_scratch';
   const safePrefix = prefix.replace(/[^a-zA-Z0-9_]/g, '_');
   const name = `${safePrefix}_${randomBytes(6).toString('hex')}`;

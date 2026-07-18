@@ -21,6 +21,9 @@ import {
   type ChannelRow,
   type WebhookOption,
 } from '@/components/rules/RuleChannelsManager';
+import { BudgetActivityPanel } from '@/components/budget-activity/BudgetActivityPanel';
+import { parseBudgetActivityQuery } from '@/lib/budget-activity/query';
+import { getBudgetAccountState, listBudgetActivity } from '@/lib/budget-activity/read-model';
 
 export const metadata: Metadata = { title: 'Rule' };
 
@@ -35,7 +38,10 @@ export default async function RuleDetailPage({
   const rule = await getRule(builderId, id);
   if (!rule) notFound();
 
-  const [channelRows, webhookRows] = await Promise.all([
+  const activityQuery = parseBudgetActivityQuery(
+    new URLSearchParams({ rule_key: id, page_size: '10' }),
+  );
+  const [channelRows, webhookRows, activityPage, accounts] = await Promise.all([
     listChannelsForRule(builderId, id),
     withRLS(builderId, async (tx) =>
       tx
@@ -47,6 +53,8 @@ export default async function RuleDetailPage({
         .from(webhookConfigs)
         .where(eq(webhookConfigs.builder_id, builderId)),
     ),
+    listBudgetActivity(builderId, activityQuery),
+    getBudgetAccountState(builderId, { rule_key: id, limit: 8 }),
   ]);
 
   const channels: ChannelRow[] = channelRows.map((c) => ({
@@ -108,6 +116,13 @@ export default async function RuleDetailPage({
         channels={channels}
         webhookOptions={webhookOptions}
         canMutate={isOwner}
+      />
+
+      <BudgetActivityPanel
+        activities={activityPage.activities}
+        accounts={accounts}
+        slug={slug}
+        title="Rule budget control"
       />
     </>
   );

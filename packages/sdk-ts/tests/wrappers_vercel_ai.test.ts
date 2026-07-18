@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { Framework } from '@pylva/shared';
 
 const cachedRules: unknown[] = [];
+const configState = vi.hoisted(() => ({ generation: 1 }));
 
 vi.mock('../src/wrappers/_load.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/wrappers/_load.js')>();
@@ -26,6 +27,7 @@ vi.mock('../src/core/budget_accumulator.js', () => ({
 
 vi.mock('../src/core/config.js', () => ({
   isInitialized: () => true,
+  getConfigGeneration: () => configState.generation,
 }));
 
 vi.mock('../src/core/telemetry.js', () => ({
@@ -77,6 +79,7 @@ function getStreamCallArg(streamText: ReturnType<typeof vi.fn>): {
 }
 
 beforeEach(() => {
+  configState.generation = 1;
   cachedRules.length = 0;
   _resetVercelAiPatchForTests();
   vi.mocked(enqueue).mockClear();
@@ -265,6 +268,29 @@ describe('applyVercelAiPatch', () => {
     expect(event.metadata?.token_count_source).toBe('exact');
   });
 
+  it('streamText: preserves the host callback but drops an old-identity terminal event', () => {
+    const onFinish = vi.fn();
+    const streamText = vi.fn(() => ({ modelId: 'gpt-4o-2024-08-06' }));
+    const mod = buildFakeAiModule(vi.fn(async () => ({})));
+    mod.streamText = streamText;
+    vi.mocked(loadPeer).mockReturnValue(mod);
+
+    applyVercelAiPatch();
+    mod.streamText({
+      model: { provider: 'openai', modelId: 'gpt-4o' },
+      onFinish,
+    });
+    configState.generation += 1;
+    const finish = {
+      response: { modelId: 'gpt-4o-2024-08-06' },
+      totalUsage: { inputTokens: 34, outputTokens: 55 },
+    };
+    getStreamCallArg(streamText).onFinish?.(finish);
+
+    expect(onFinish).toHaveBeenCalledWith(finish);
+    expect(vi.mocked(enqueue)).not.toHaveBeenCalled();
+  });
+
   it('streamText: emits FAILURE once and preserves user onError', () => {
     const onError = vi.fn();
     const streamText = vi.fn(() => ({ modelId: 'gpt-4o-2024-08-06' }));
@@ -327,6 +353,26 @@ describe('applyVercelAiPatch', () => {
     expect(event.status).toBe('aborted');
     expect(event.tokens_in).toBe(0);
     expect(event.tokens_out).toBe(0);
+  });
+
+  it('uses the installed manifest when the public JSON module is cache-poisoned', () => {
+    const onAbort = vi.fn();
+    const streamText = vi.fn(() => ({ modelId: 'gpt-4o-2024-08-06' }));
+    const mod = buildFakeAiModule(vi.fn(async () => ({})));
+    mod.streamText = streamText;
+    vi.mocked(loadPeer).mockImplementation(((specifier: string) =>
+      specifier === 'ai' ? mod : { version: '3.0.0-poisoned' }) as typeof loadPeer);
+
+    applyVercelAiPatch();
+    mod.streamText({ model: { provider: 'openai', modelId: 'gpt-4o' }, onAbort });
+    const abortEvent = { steps: [] };
+    getStreamCallArg(streamText).onAbort?.(abortEvent);
+    getStreamCallArg(streamText).onAbort?.(abortEvent);
+
+    expect(vi.mocked(loadPeer)).not.toHaveBeenCalledWith('ai/package.json');
+    expect(onAbort).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(enqueue)).toHaveBeenCalledTimes(1);
+    expect(lastEvent().status).toBe('aborted');
   });
 
   it('is idempotent — applying twice does not double-wrap', async () => {

@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+. /app/docker-runtime-db-guard.sh
+assert_runtime_database_isolation
+
 JWT_KEY_DIR="${JWT_KEY_DIR:-/app/.keys}"
 JWT_PRIVATE_KEY_PATH="${JWT_PRIVATE_KEY:-$JWT_KEY_DIR/private.pem}"
 JWT_PUBLIC_KEY_PATH="${JWT_PUBLIC_KEY:-$JWT_KEY_DIR/public.pem}"
@@ -44,11 +47,11 @@ export HOSTNAME="${NEXT_BIND_HOST:-0.0.0.0}"
 unset JWT_PRIVATE_KEY_PEM
 unset JWT_PUBLIC_KEY_PEM
 
-# DATABASE_URL assembly + urlencode() are shared with the Step 6 migration
-# image (which has no Next.js runtime entrypoint) via docker-db-url.sh —
-# single source of truth so the two images can't drift. Sourced here so the
+# Assemble only the general application DATABASE_URL. Migration credentials
+# use a separate image/entrypoint and are rejected above. Sourced here so the
 # REDIS block below also gets urlencode(). REDIS_URL/CACHE_* stays app-only.
 . /app/docker-db-url.sh
+assert_runtime_database_isolation
 
 if [ -z "${REDIS_URL:-}" ] && [ -n "${CACHE_HOST:-}" ]; then
   if [ -z "${CACHE_AUTH_TOKEN:-}" ]; then

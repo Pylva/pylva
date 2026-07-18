@@ -2,8 +2,8 @@
 // B2b T2-B — GET /api/v1/billing/pricing/preview
 //
 // I-T2-11 side-effect-free: no DB writes, no Stripe calls. Reads last-30-day
-// priced usage from cost_events, applies the active version and a proposed
-// version, returns delta.
+// priced usage from the canonical legacy-plus-controlled event view, applies
+// the active version and a proposed version, returns delta.
 //
 // Query params:
 //   customer_id — UUID

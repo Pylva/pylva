@@ -46,12 +46,21 @@ def test_cached_rules_empty_by_default() -> None:
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int, payload: Any) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        payload: Any = None,
+        *,
+        json_error: ValueError | None = None,
+    ) -> None:
         self.status_code = status_code
         self._payload = payload
+        self._json_error = json_error
         self.is_success = 200 <= status_code < 300
 
     def json(self) -> Any:
+        if self._json_error is not None:
+            raise self._json_error
         return self._payload
 
 
@@ -183,14 +192,56 @@ async def test_non_success_response_enters_passthrough(
     assert rules_cache.is_passthrough() is True
 
 
-async def test_malformed_rules_field_enters_passthrough(
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"rules": {"id": "not-a-list"}},
+        {"rules": None},
+        {},
+        [],
+        None,
+    ],
+)
+async def test_malformed_rules_response_enters_passthrough(
     patched_httpx: dict[str, _FakeAsyncClient],
+    payload: Any,
 ) -> None:
     patched_httpx["client"] = _FakeAsyncClient(
-        response=_FakeResponse(200, {"rules": {"id": "not-a-list"}}),
+        response=_FakeResponse(200, payload),
     )
 
     await rules_cache.ensure_rules_cache()
 
     assert rules_cache.get_cached_rules() == []
+    assert rules_cache.is_passthrough() is True
+
+
+async def test_json_decode_failure_enters_passthrough(
+    patched_httpx: dict[str, _FakeAsyncClient],
+) -> None:
+    patched_httpx["client"] = _FakeAsyncClient(
+        response=_FakeResponse(200, json_error=ValueError("invalid json")),
+    )
+
+    await rules_cache.ensure_rules_cache()
+
+    assert rules_cache.get_cached_rules() == []
+    assert rules_cache.is_passthrough() is True
+
+
+async def test_malformed_refresh_preserves_last_valid_rules(
+    patched_httpx: dict[str, _FakeAsyncClient],
+) -> None:
+    patched_httpx["client"] = _FakeAsyncClient(
+        response=_FakeResponse(200, {"rules": [{"id": "known-good"}]}),
+    )
+    await rules_cache.ensure_rules_cache()
+
+    rules_cache._fetched_at -= rules_cache.RULES_CACHE_TTL_SEC + 1  # type: ignore[attr-defined]
+    patched_httpx["client"] = _FakeAsyncClient(
+        response=_FakeResponse(200, {"rules": {"id": "not-a-list"}}),
+    )
+    await rules_cache.ensure_rules_cache()
+
+    assert rules_cache.get_cached_rules() == [{"id": "known-good"}]
     assert rules_cache.is_passthrough() is True

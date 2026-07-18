@@ -6,7 +6,7 @@
 -- Decision #19: Separate builder_id column for efficient builder-scoped queries
 
 CREATE TABLE IF NOT EXISTS cost_events (
-  timestamp             DateTime,
+  timestamp             DateTime('UTC'),
   builder_id            String,                    -- Separate column for efficient filtering
   trace_id              UUID,
   span_id               UUID,

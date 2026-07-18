@@ -1,4 +1,4 @@
-// Period-aggregation queries over `cost_events` for the anomaly cron.
+// Period-aggregation queries over the canonical mixed event view for the anomaly cron.
 // Tenant safety: every query goes through `queryCostEvents`, which
 // injects `builder_id` as a parameterized binding, and the SQL itself
 // pins `WHERE builder_id = {builder_id:String}` — both gates are
@@ -7,7 +7,7 @@
 //
 // is_demo = 0 on every read: anomaly detection acts on REAL traffic
 // only, exactly like previewRule, aggregateSpendForRule (PR #229), and
-// every dashboard query. Without it, seeded demo cost_events (is_demo=1,
+// every dashboard query. Without it, seeded demo events (is_demo=1,
 // never purged) feed the cost_spike / cost_drop baselines and the
 // builder-discovery / cold-start sweep: as static demo rows age out of
 // the trailing-24h window but stay in the 30-day baseline, currentCost
@@ -113,11 +113,11 @@ export async function fetchPeriodAggregates(
          sum(cost_usd) AS total_cost_usd,
          sum(tokens_in) AS total_tokens_in,
          sum(tokens_out) AS total_tokens_out
-       FROM cost_events
+       FROM cost_events_with_control
        WHERE builder_id = {builder_id:String}
          AND is_demo = 0
-         AND timestamp >= {from:DateTime}
-         AND timestamp <  {to:DateTime}`,
+         AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
+         AND timestamp <  parseDateTime64BestEffort({to:String}, 3, 'UTC')`,
       { from: fromIso, to: toIso },
     ) as Promise<RawTotalsRow[]>,
     queryCostEvents(
@@ -127,11 +127,11 @@ export async function fetchPeriodAggregates(
          step_name,
          sum(cost_usd) AS cost_usd,
          count() AS iterations
-       FROM cost_events
+       FROM cost_events_with_control
        WHERE builder_id = {builder_id:String}
          AND is_demo = 0
-         AND timestamp >= {from:DateTime}
-         AND timestamp <  {to:DateTime}
+         AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
+         AND timestamp <  parseDateTime64BestEffort({to:String}, 3, 'UTC')
        GROUP BY customer_id, step_name`,
       { from: fromIso, to: toIso },
     ) as Promise<RawStepRow[]>,
@@ -142,11 +142,11 @@ export async function fetchPeriodAggregates(
          provider,
          model,
          sum(cost_usd) AS cost_usd
-       FROM cost_events
+       FROM cost_events_with_control
        WHERE builder_id = {builder_id:String}
          AND is_demo = 0
-         AND timestamp >= {from:DateTime}
-         AND timestamp <  {to:DateTime}
+         AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
+         AND timestamp <  parseDateTime64BestEffort({to:String}, 3, 'UTC')
        GROUP BY customer_id, provider, model`,
       { from: fromIso, to: toIso },
     ) as Promise<RawModelRow[]>,
@@ -160,11 +160,11 @@ export async function fetchPeriodAggregates(
          customer_id,
          cost_source AS source,
          sum(cost_usd) AS cost_usd
-       FROM cost_events
+       FROM cost_events_with_control
        WHERE builder_id = {builder_id:String}
          AND is_demo = 0
-         AND timestamp >= {from:DateTime}
-         AND timestamp <  {to:DateTime}
+         AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
+         AND timestamp <  parseDateTime64BestEffort({to:String}, 3, 'UTC')
        GROUP BY customer_id, cost_source`,
       { from: fromIso, to: toIso },
     ) as Promise<RawSourceRow[]>,
@@ -302,9 +302,9 @@ export async function listBuildersWithEvents(
     // clear the 7-day cold-start gate and get anomalies computed on sparse
     // real data against a demo-padded baseline.
     `SELECT builder_id, min(timestamp) AS earliest
-     FROM cost_events
+     FROM cost_events_with_control
      WHERE is_demo = 0
-       AND timestamp >= {from:DateTime}
+       AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
      GROUP BY builder_id`,
     { from: chTimestamp(new Date(now.getTime() - 60 * DAY_MS)) },
   )) as RawDistinctBuilderRow[];
@@ -325,7 +325,7 @@ export interface SourceLastSeen {
 }
 
 /**
- * D56: source silence is re-derived from cost_events here so the cron
+ * D56: source silence is re-derived from canonical mixed events here so the cron
  * doesn't depend on the B3-T4b health table's status column.
  */
 export async function fetchSourceLastSeen(
@@ -338,15 +338,15 @@ export async function fetchSourceLastSeen(
   const rows = (await queryCostEvents(
     builderId,
     `SELECT
-       source,
+       cost_source AS source,
        max(timestamp) AS last_seen,
-       sum(if(timestamp >= {day_cutoff:DateTime}, 1, 0)) AS events_last_24h
-     FROM cost_events
+       sum(if(timestamp >= parseDateTime64BestEffort({day_cutoff:String}, 3, 'UTC'), 1, 0)) AS events_last_24h
+     FROM cost_events_with_control
      WHERE builder_id = {builder_id:String}
        AND is_demo = 0
-       AND timestamp >= {from:DateTime}
-       AND source <> ''
-     GROUP BY source`,
+       AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
+       AND cost_source <> ''
+     GROUP BY cost_source`,
     { from, day_cutoff: dayCutoff },
   )) as Array<{ source: string; last_seen: string; events_last_24h: string }>;
 
@@ -378,10 +378,10 @@ export async function fetchDeployValidationSignal(
   const rows = (await queryCostEvents(
     builderId,
     `SELECT max(timestamp) AS deploy_at
-     FROM cost_events
+     FROM cost_events_with_control
      WHERE builder_id = {builder_id:String}
        AND is_demo = 0
-       AND timestamp >= {from:DateTime}
+       AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
        AND step_name = 'pylva:ci'`,
     { from },
   )) as Array<{ deploy_at: string | null }>;

@@ -1,9 +1,7 @@
 // Regression test: getOverview must never report seeded demo events as real
-// spend. cost_daily_agg_v2 mirrors the legacy aggregate and has no is_demo
-// dimension, so it cannot exclude demo rows. For the default
-// includeDemo:false path it MUST read cost_events directly (with
-// `is_demo = 0`) for every range — including historical-only ranges that
-// exclude today — exactly like every sibling dashboard query.
+// spend. Legacy daily aggregates do not include authoritative controlled
+// commits, so every range must read cost_events_with_control directly; the
+// default includeDemo:false path also applies `is_demo = 0`.
 //
 // The bug: getOverview routed any range that excluded today to
 // cost_daily_agg_v2, summing demo spend as real total_spend_usd and returning
@@ -47,11 +45,11 @@ describe('getOverview — demo isolation on historical ranges', () => {
     ({ getOverview } = await import('../../src/lib/clickhouse/dashboard-queries.js'));
   });
 
-  it('reads cost_events with is_demo filter for historical includeDemo:false', async () => {
+  it('reads canonical mixed events with is_demo filter for historical includeDemo:false', async () => {
     await getOverview(BUILDER_ID, HISTORICAL_RANGE, { includeDemo: false });
 
     const sql = queryCostEventsMock.mock.calls[0]?.[1] as string;
-    expect(sql).toContain('FROM cost_events');
+    expect(sql).toContain('FROM cost_events_with_control');
     expect(sql).toContain('is_demo = 0');
     expect(sql).not.toContain('cost_daily_agg');
   });
@@ -61,7 +59,6 @@ describe('getOverview — demo isolation on historical ranges', () => {
     queryCostEventsMock.mockReset();
     queryCostEventsMock
       .mockResolvedValueOnce([{ total_spend_usd: '0', event_count: '0', customer_count: '0' }])
-      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([]);
 
     const result = await getOverview(BUILDER_ID, HISTORICAL_RANGE, {
@@ -69,9 +66,9 @@ describe('getOverview — demo isolation on historical ranges', () => {
     });
 
     expect(result.demo_only).toBe(true);
-    const rawFallbackSql = queryCostEventsMock.mock.calls[2]?.[1] as string;
-    expect(rawFallbackSql).toContain('FROM cost_events');
-    expect(rawFallbackSql).toContain('is_demo = 0');
+    const existenceSql = queryCostEventsMock.mock.calls[1]?.[1] as string;
+    expect(existenceSql).toContain('FROM cost_events_with_control');
+    expect(existenceSql).toContain('is_demo = 0');
   });
 
   it('uses a bounded existence probe for real-event detection', async () => {
@@ -99,10 +96,12 @@ describe('getOverview — demo isolation on historical ranges', () => {
     expect(options.queryId).toMatch(/^dashboard\.has_any_real_events\.[0-9a-f-]{36}$/);
   });
 
-  it('still uses cost_daily_agg_v2 for historical includeDemo:true', async () => {
+  it('uses the mixed view without a demo predicate for historical includeDemo:true', async () => {
     await getOverview(BUILDER_ID, HISTORICAL_RANGE, { includeDemo: true });
 
     const sql = queryCostEventsMock.mock.calls[0]?.[1] as string;
-    expect(sql).toContain('cost_daily_agg_v2');
+    expect(sql).toContain('FROM cost_events_with_control');
+    expect(sql).not.toContain('is_demo = 0');
+    expect(sql).not.toContain('cost_daily_agg_v2');
   });
 });

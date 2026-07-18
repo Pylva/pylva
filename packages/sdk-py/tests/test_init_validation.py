@@ -23,7 +23,9 @@ def _reset_validation() -> None:
     _reset_init_validation_for_tests()
 
 
-def test_warns_when_backup_neither_patched_nor_registered(capsys: pytest.CaptureFixture[str]) -> None:
+def test_warns_when_backup_neither_patched_nor_registered(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     validate_failover_wrappers([failover_rule()])
     captured = capsys.readouterr()
     assert 'reliability_failover rule "f1"' in captured.out

@@ -3,7 +3,7 @@
 // empty state. Error containment lives in end-users-page-error.test.ts.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { formatUsd } from '../../src/lib/formatting.js';
+import { formatTelemetryUsd } from '../../src/lib/formatting.js';
 import { TableCell, TableContainer } from '../../src/components/ui/table.js';
 import { anchorHrefs, byType, findAll, textContent } from '../_helpers/rsc-tree.js';
 import {
@@ -61,13 +61,13 @@ describe('/o/[slug]/dashboard/end-users happy path', () => {
     const text = textContent(element);
 
     expect(text).toContain('acme-corp');
-    expect(text).toContain(formatUsd(1234.5678));
+    expect(text).toContain(formatTelemetryUsd(1234.5678));
     expect(text).toContain((4821).toLocaleString());
     // zero row: $0 spend, 0 events, em dash for never-seen
-    expect(text).toContain(formatUsd(0));
+    expect(text).toContain(formatTelemetryUsd(0));
     expect(text).toContain('—');
     // huge row survives formatting
-    expect(text).toContain(formatUsd(9876543.21));
+    expect(text).toContain(formatTelemetryUsd(9876543.21));
     expect(text).toContain((12345678).toLocaleString());
 
     // Composed from the shared primitives: container present, 4 cells per row.

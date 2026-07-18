@@ -18,7 +18,7 @@ import {
   type ModelRoutingTarget,
   type ReliabilityFailoverConfig,
   type RuleType as RuleTypeT,
-} from '@pylva/shared';
+} from '@pylva/shared/rules';
 
 // Minimal cached-rule shape. We narrow at the engine boundary so the
 // rest of the engine can rely on the typed config without re-checking.
