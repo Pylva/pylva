@@ -161,7 +161,7 @@
   "devDependencies": {
     "@ai-sdk/anthropic": "^3.0.96",
     "@ai-sdk/openai": "^3.0.84",
-    "terser": "5.46.1",
+    "terser": "5.49.0",
     "yaml": "2.9.0"
   }
 }
