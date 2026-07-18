@@ -5,6 +5,7 @@ import { apiError, validationError } from '@/lib/errors';
 import { BudgetActivityQueryError, parseBudgetActivityQuery } from '@/lib/budget-activity/query';
 import { listBudgetActivity } from '@/lib/budget-activity/read-model';
 import { logger } from '@/lib/logger';
+import { logBudgetActivityUnavailable } from '@/lib/budget-activity/safe-log';
 
 const log = logger.child({ module: 'api.budget_activity' });
 const NO_STORE = 'private, no-store, max-age=0';
@@ -34,12 +35,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       headers: { 'Cache-Control': NO_STORE },
     });
   } catch (error) {
-    log.warn(
-      {
-        builder_id: context.builderId,
-        error: error instanceof Error ? error.message : String(error),
-      },
-      'authoritative budget activity unavailable',
+    logBudgetActivityUnavailable(
+      log,
+      { builderId: context.builderId, actorId: context.userId, surface: 'api' },
+      error,
     );
     return noStore(
       apiError(

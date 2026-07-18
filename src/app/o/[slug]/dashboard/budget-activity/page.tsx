@@ -6,7 +6,7 @@ import type { BudgetActivityPage } from '@/lib/budget-activity/types';
 import { PageHeader } from '@/components/dashboard/PageHeader';
 import { BudgetActivityExplorer } from '@/components/budget-activity/BudgetActivityExplorer';
 import { logger } from '@/lib/logger';
-import { randomUUID } from 'node:crypto';
+import { logBudgetActivityUnavailable } from '@/lib/budget-activity/safe-log';
 
 export const metadata: Metadata = { title: 'Budget activity' };
 
@@ -35,7 +35,7 @@ export default async function BudgetActivityPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const [{ builderId }, rawSearchParams] = await Promise.all([
+  const [{ builderId, userId }, rawSearchParams] = await Promise.all([
     readDashboardHeaders(),
     searchParams,
   ]);
@@ -52,13 +52,10 @@ export default async function BudgetActivityPage({
         ? error.message
         : 'Budget activity is temporarily unavailable';
     if (!(error instanceof BudgetActivityQueryError)) {
-      log.warn(
-        {
-          builder_id: builderId,
-          error_code: 'budget_activity_unavailable',
-          error_ref: randomUUID(),
-        },
-        'dashboard budget activity unavailable',
+      logBudgetActivityUnavailable(
+        log,
+        { builderId, actorId: userId, surface: 'dashboard' },
+        error,
       );
     }
   }

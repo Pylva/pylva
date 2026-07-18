@@ -65,7 +65,21 @@ describe('GET /api/v1/budget-activity', () => {
   });
 
   it('contains PostgreSQL failures behind a stable 503', async () => {
-    mocks.list.mockRejectedValue(new Error('connection secret must not leak'));
+    const secret = 'postgres://operator:password@internal/authority';
+    const hostile = Object.create(null, {
+      message: {
+        get: () => {
+          throw new Error('message inspected');
+        },
+      },
+      toString: {
+        value: () => {
+          throw new Error('stringified');
+        },
+      },
+      secret: { value: secret, enumerable: true },
+    });
+    mocks.list.mockRejectedValue(hostile);
     const response = await GET(request());
     expect(response.status).toBe(503);
     expect(response.headers.get('cache-control')).toBe('private, no-store, max-age=0');
@@ -75,9 +89,15 @@ describe('GET /api/v1/budget-activity', () => {
         message: 'Budget activity is temporarily unavailable',
       },
     });
-    expect(mocks.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ builder_id: BUDGET_FIXTURE_IDS.builder }),
-      'authoritative budget activity unavailable',
-    );
+    expect(mocks.warn).toHaveBeenCalledTimes(1);
+    const [fields, message] = mocks.warn.mock.calls[0] as [Record<string, unknown>, string];
+    expect(fields).toMatchObject({
+      builder_id: BUDGET_FIXTURE_IDS.builder,
+      actor_id: 'user-1',
+      error_code: 'budget_activity_unavailable',
+    });
+    expect(fields['error_ref']).toEqual(expect.stringMatching(/^[0-9a-f-]{36}$/u));
+    expect(fields).not.toHaveProperty('error');
+    expect(`${JSON.stringify(fields)} ${message}`).not.toContain(secret);
   });
 });

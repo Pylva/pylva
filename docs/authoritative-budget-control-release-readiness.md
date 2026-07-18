@@ -51,16 +51,20 @@ Close every item below before recording candidate CI:
 - [ ] Add release regressions for real Redis throttling, expiry-created unresolved dashboard
       activity, direct/async Tavily denial, span/parent-span service identity, and streaming
       wrapper-plus-callback deduplication.
-- [x] Run `tests/security/middleware-budget-control-auth.test.ts` in a required workflow.
+- [ ] Run `tests/security/middleware-budget-control-auth.test.ts` in a required workflow. The source
+      wiring is present; mark complete only after the repaired exact-SHA `ci-db-security` job passes.
 - [x] Make both publish workflows attest focused, fast/security, integration, and ordinary E2E
       success for the exact release SHA.
 - [x] Add byte equality for both packaged SDK READMEs and an explicit non-`latest` npm dist-tag
       procedure for prereleases.
-- [ ] Provide and rehearse the audited activation command. The read-only
-      `pnpm budget-control:doctor` now reports production posture and builder readiness, but it does
-      not replace the authenticated/audited create-refresh-mark lifecycle required for activation.
+- [x] Provide the source-controlled restricted activation command. `pnpm budget:readiness` calls
+      only the locked readiness services, requires the dedicated attested production credential and
+      platform actor/run/candidate identity, and emits canonical hash-addressed audit records.
+- [ ] Rehearse that activation command through the authenticated operator platform and retain its
+      immutable logs. Source tests and the read-only `pnpm budget-control:doctor` are not production
+      activation evidence.
 
-The detailed durable lessons are D100–D114 in the decision log. The recorded 2026-07-15 pass counts
+The detailed durable lessons are D100–D115 in the decision log. The recorded 2026-07-15 pass counts
 remain valid evidence for the paths they exercised, but they do not override this blocker list.
 
 ## CI surface added for the candidate
@@ -94,6 +98,34 @@ merge and release. Main, scheduled, and manual runs execute the full jobs automa
 
 A workflow definition is not evidence of a passing run: record the commit SHA and URLs for every
 required green job below.
+
+## Restricted activation command
+
+Run `pnpm budget:readiness` only as an authenticated one-off platform task from the exact reviewed
+image. The task must inject `NODE_ENV=production`, a dedicated `BUDGET_CONTROL_DATABASE_URL`,
+`ALLOW_BUDGET_CONTROL_DATABASE_URL_FALLBACK=false`, `PYLVA_OPERATOR_ACTOR`,
+`PYLVA_OPERATOR_RUN_ID`, and the exact 40-hex `PYLVA_CANDIDATE_SHA`. Do not inject a migration
+credential. The supported source interface is:
+
+```text
+pnpm budget:readiness -- --action inspect --builder <uuid>
+pnpm budget:readiness -- --action create --builder <uuid> --mode next_period|exact_backfill
+pnpm budget:readiness -- --action refresh --builder <uuid>
+pnpm budget:readiness -- --action mark-ready --builder <uuid>
+```
+
+`create` is idempotent only for the builder's immutable existing mode. `refresh` accepts only a
+pending cutover. `mark-ready` additionally requires
+`PYLVA_OPERATOR_CONFIRM_MARK_READY=mark-ready:<builder-uuid>:<candidate-sha>`, rejects a missing
+cutover, and preserves the service's idempotent ready result. A pending `exact_backfill` transition
+also requires the deployment-owned durable fence/reconciliation adapter to have been installed in
+that command process; the repository does not ship a generic adapter or invent opening balances.
+
+The command first emits a canonical `budget_readiness.before` JSON record, then a canonical
+`budget_readiness.result` record chained to the first record's SHA-256. Records contain only the
+validated actor, run, candidate, builder, action, mode, typed readiness fields, fixed error codes,
+and an opaque error reference. The operator platform owns actor authentication and immutable log
+retention. A source-level success does not check the rehearsal item below.
 
 ## Candidate preparation
 
@@ -266,9 +298,10 @@ automated evidence checklist above. A local pass is not a release record.
       target, exit status, and success marker; verify migration/provisioning credentials are never
       injected into the application runtime.
 - [ ] Record a shadow comparison period and an internal canary using the rollout checklist.
-- [ ] Provide and rehearse an audited, authenticated operator API or command for
-      `createBudgetControlCutover`, `refreshBudgetControlCutover`, and `markBudgetControlReady`.
-      Direct SQL updates to `budget_control_cutovers` are not acceptable evidence.
+- [ ] Rehearse `pnpm budget:readiness` through the authenticated operator platform for inspect,
+      idempotent create/refresh, early-transition refusal, confirmed mark-ready, and retry. Retain
+      the actor, run ID, exact candidate SHA, canonical before/result hashes, output, and exit status
+      in immutable logs. Direct SQL updates to `budget_control_cutovers` are not acceptable evidence.
 
 These are stable-release blockers because they require deployment and operational evidence outside
 the public source tree. They cannot be waived by renaming a job or by treating local tests as a

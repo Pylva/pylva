@@ -6,6 +6,7 @@ import {
   listBudgetActivity,
 } from '../../src/lib/budget-activity/read-model.js';
 import { parseBudgetActivityQuery } from '../../src/lib/budget-activity/query.js';
+import { readCostSourceAuthority } from '../../src/lib/cost-sources/authority-read-model.js';
 
 const DATABASE_URL =
   process.env['DATABASE_URL'] ?? 'postgresql://pylva:pylva_dev@localhost:5432/pylva';
@@ -47,6 +48,11 @@ describe('budget activity runtime credential boundary', () => {
         return transaction`SELECT COUNT(*) FROM public.budget_reservations`;
       }),
     ).rejects.toMatchObject({ code: '42501' });
+    for (const table of ['budget_control_cutovers', 'budget_rule_revisions']) {
+      await expect(
+        general.unsafe(`SELECT builder_id FROM public.${table} LIMIT 1`),
+      ).rejects.toMatchObject({ code: '42501' });
+    }
 
     await expect(
       listBudgetActivity(builderId, parseBudgetActivityQuery(new URLSearchParams())),
@@ -58,5 +64,9 @@ describe('budget activity runtime credential boundary', () => {
     await expect(
       getBudgetAccountState(builderId, { customer_id: 'no-authority-events' }),
     ).resolves.toEqual([]);
+    await expect(readCostSourceAuthority(builderId)).resolves.toEqual({
+      workspaceControlReady: false,
+      hasActiveHardStopBudget: false,
+    });
   });
 });

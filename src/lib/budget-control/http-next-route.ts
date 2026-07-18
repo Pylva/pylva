@@ -1,43 +1,20 @@
-import { NextResponse, type NextRequest } from 'next/server.js';
-import { readBuilderContext } from '../auth/builder-context.js';
+import type { NextRequest } from 'next/server.js';
 import {
   createBudgetControlHttpHandler,
   defaultBudgetControlServiceAdapter,
   readBoundedBudgetControlBody,
-  type BudgetControlServiceContext,
   type CommitBudgetUsageService,
   type ExtendBudgetUsageService,
   type ReleaseBudgetUsageService,
   type ReserveBudgetUsageService,
 } from './http-handler.js';
-import { readBudgetControlSdkIdentity } from './sdk-identity.js';
-import { internalErrorResponse, toNextResponse, withNoStore } from '../public-http/response.js';
+import { toNextResponse } from '../public-http/response.js';
+import {
+  readAuthenticatedBudgetControlRouteContext,
+  sanitizedBudgetControlInternalResponse,
+} from './authenticated-next-route.js';
 
 export type BudgetControlLifecycleRouteContext = { params: Promise<{ id: string }> };
-
-type AuthenticatedRouteContext =
-  | { success: true; context: BudgetControlServiceContext }
-  | { success: false; response: Response };
-
-function sanitizedInternalResponse(): Response {
-  return toNextResponse(withNoStore(internalErrorResponse()));
-}
-
-function readAuthenticatedRouteContext(request: NextRequest): AuthenticatedRouteContext {
-  const context = readBuilderContext(request);
-  if (context instanceof NextResponse) {
-    // Missing trusted headers indicate a deployment/middleware fault. Do not
-    // expose the internal header contract in the public response.
-    return { success: false, response: sanitizedInternalResponse() };
-  }
-  return {
-    success: true,
-    context: {
-      ...context,
-      sdkIdentity: readBudgetControlSdkIdentity(request.headers),
-    },
-  };
-}
 
 export function createReserveBudgetControlPOST(
   reserveBudgetUsage: ReserveBudgetUsageService = defaultBudgetControlServiceAdapter.reserveBudgetUsage,
@@ -48,7 +25,7 @@ export function createReserveBudgetControlPOST(
 
   return async function POST(request: NextRequest): Promise<Response> {
     try {
-      const authenticated = readAuthenticatedRouteContext(request);
+      const authenticated = readAuthenticatedBudgetControlRouteContext(request);
       if (!authenticated.success) return authenticated.response;
       const body = await readBoundedBudgetControlBody(request);
       if (!body.success) return toNextResponse(body.response);
@@ -59,7 +36,7 @@ export function createReserveBudgetControlPOST(
         }),
       );
     } catch {
-      return sanitizedInternalResponse();
+      return sanitizedBudgetControlInternalResponse();
     }
   };
 }
@@ -76,7 +53,7 @@ export function createCommitBudgetControlPOST(
     route: BudgetControlLifecycleRouteContext,
   ): Promise<Response> {
     try {
-      const authenticated = readAuthenticatedRouteContext(request);
+      const authenticated = readAuthenticatedBudgetControlRouteContext(request);
       if (!authenticated.success) return authenticated.response;
       const { id } = await route.params;
       const body = await readBoundedBudgetControlBody(request);
@@ -89,7 +66,7 @@ export function createCommitBudgetControlPOST(
         }),
       );
     } catch {
-      return sanitizedInternalResponse();
+      return sanitizedBudgetControlInternalResponse();
     }
   };
 }
@@ -106,7 +83,7 @@ export function createReleaseBudgetControlPOST(
     route: BudgetControlLifecycleRouteContext,
   ): Promise<Response> {
     try {
-      const authenticated = readAuthenticatedRouteContext(request);
+      const authenticated = readAuthenticatedBudgetControlRouteContext(request);
       if (!authenticated.success) return authenticated.response;
       const { id } = await route.params;
       const body = await readBoundedBudgetControlBody(request);
@@ -119,7 +96,7 @@ export function createReleaseBudgetControlPOST(
         }),
       );
     } catch {
-      return sanitizedInternalResponse();
+      return sanitizedBudgetControlInternalResponse();
     }
   };
 }
@@ -136,7 +113,7 @@ export function createExtendBudgetControlPOST(
     route: BudgetControlLifecycleRouteContext,
   ): Promise<Response> {
     try {
-      const authenticated = readAuthenticatedRouteContext(request);
+      const authenticated = readAuthenticatedBudgetControlRouteContext(request);
       if (!authenticated.success) return authenticated.response;
       const { id } = await route.params;
       const body = await readBoundedBudgetControlBody(request);
@@ -149,7 +126,7 @@ export function createExtendBudgetControlPOST(
         }),
       );
     } catch {
-      return sanitizedInternalResponse();
+      return sanitizedBudgetControlInternalResponse();
     }
   };
 }

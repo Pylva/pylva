@@ -28,6 +28,7 @@ except ModuleNotFoundError:  # Python 3.10 matrix leg
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 DEFAULT_PACKAGE_DIR = REPO_ROOT / "packages" / "sdk-py"
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+PRERELEASE_PATTERN = re.compile(r"(?:a|b|rc)\d|(?:^|[._-])dev\d", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,10 @@ def normalized_dist_name(name: str) -> str:
     return re.sub(r"[-_.]+", "_", name).lower()
 
 
+def is_prerelease_version(version: str) -> bool:
+    return PRERELEASE_PATTERN.search(version) is not None
+
+
 def assert_distribution_metadata(
     metadata: Any, name: str, version: str, artifact_label: str
 ) -> None:
@@ -157,6 +162,10 @@ def assert_readme_bytes(actual: bytes, expected: bytes, artifact_label: str) -> 
         raise AssertionError(
             f"{artifact_label} README bytes do not match packages/sdk-py/README.md"
         )
+
+
+def normalized_metadata_description(payload: str) -> bytes:
+    return payload.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
 
 
 def inspect_wheel(
@@ -204,7 +213,9 @@ def inspect_wheel(
         payload = metadata.get_payload()
         if not isinstance(payload, str):
             raise AssertionError("wheel METADATA has a non-text description payload")
-        assert_readme_bytes(payload.encode(), expected_readme, "wheel METADATA")
+        assert_readme_bytes(
+            normalized_metadata_description(payload), expected_readme, "wheel METADATA"
+        )
         license_files = [
             entry for entry in files if entry.endswith(".dist-info/licenses/LICENSE")
         ]
@@ -290,6 +301,8 @@ import asyncio
 import importlib.metadata
 import json
 import os
+import pathlib
+import sys
 
 import anthropic
 import httpx
@@ -301,6 +314,11 @@ from pylva.wrappers import _controlled_provider, anthropic_wrapper, openai_wrapp
 expected = os.environ["PYLVA_EXPECTED_VERSION"]
 assert importlib.metadata.version("pylva-sdk") == expected
 assert pylva.__version__ == expected
+installed_path = pathlib.Path(pylva.__file__ or "").resolve()
+repository_path = pathlib.Path(os.environ["PYLVA_REPO_ROOT"]).resolve()
+environment_path = pathlib.Path(sys.prefix).resolve()
+assert repository_path not in installed_path.parents, installed_path
+assert environment_path in installed_path.parents, installed_path
 
 
 def normalized_release(value):
@@ -726,7 +744,8 @@ print(
     "installed provider smoke passed: "
     f"{os.environ['PYLVA_PROVIDER_MATRIX']} "
     f"openai@{importlib.metadata.version('openai')} "
-    f"anthropic@{importlib.metadata.version('anthropic')}"
+    f"anthropic@{importlib.metadata.version('anthropic')} "
+    f"pylva-sdk@{expected} path={installed_path}"
 )
 """
 
@@ -867,6 +886,10 @@ def smoke_artifact(
             ],
             cwd=environment_dir,
         )
+        run(
+            [str(python), "-m", "pip", "check"],
+            cwd=environment_dir,
+        )
         environment = os.environ.copy()
         environment.pop("PYTHONPATH", None)
         environment["PYLVA_EXPECTED_VERSION"] = version
@@ -877,8 +900,13 @@ def smoke_artifact(
         environment["PYLVA_EXPECTED_ANTHROPIC_FLOOR"] = provider_requirements[1].split(
             "=="
         )[-1]
+        environment["PYLVA_REPO_ROOT"] = str(REPO_ROOT)
         environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
-        run([str(python), "-c", SMOKE_CODE], cwd=environment_dir, env=environment)
+        run(
+            [str(python), "-I", "-c", SMOKE_CODE],
+            cwd=environment_dir,
+            env=environment,
+        )
     finally:
         # Keep peak disk usage bounded while all four artifact/matrix legs run.
         shutil.rmtree(environment_dir, ignore_errors=True)
@@ -895,6 +923,79 @@ def discover_built_artifacts(
             f"expected one wheel and one sdist, found {sorted(dist.iterdir())}"
         )
     return wheels[0], sdists[0]
+
+
+def assert_pip_prerelease_policy(
+    wheel: ArtifactProof, version: str, root: pathlib.Path
+) -> None:
+    links = root / "resolver-links"
+    links.mkdir()
+    candidate = links / wheel.path.name
+    shutil.copy2(wheel.path, candidate)
+    environment_dir = root / "venv-resolver-policy"
+    venv.EnvBuilder(with_pip=True, clear=True).create(environment_dir)
+    python = python_in(environment_dir)
+    base = [
+        str(python),
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-input",
+        "--no-index",
+        "--no-deps",
+        "--find-links",
+        str(links),
+    ]
+
+    def resolve(*, allow_prerelease: bool) -> subprocess.CompletedProcess[str]:
+        args = [*base]
+        if allow_prerelease:
+            args.append("--pre")
+        args.append("pylva-sdk>=0")
+        return subprocess.run(
+            args,
+            cwd=environment_dir,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+
+    prerelease = is_prerelease_version(version)
+    default = resolve(allow_prerelease=False)
+    if prerelease:
+        if default.returncode == 0:
+            raise AssertionError(
+                f"pip selected prerelease pylva-sdk@{version} without --pre"
+            )
+        allowed = resolve(allow_prerelease=True)
+        if allowed.returncode != 0:
+            raise AssertionError(
+                f"pip did not select prerelease pylva-sdk@{version} with --pre:\n"
+                f"{allowed.stdout}"
+            )
+    elif default.returncode != 0:
+        raise AssertionError(
+            f"pip did not select stable pylva-sdk@{version} without --pre:\n"
+            f"{default.stdout}"
+        )
+
+    check_environment = os.environ.copy()
+    check_environment.pop("PYTHONPATH", None)
+    check_environment["PYLVA_EXPECTED_VERSION"] = version
+    run(
+        [
+            str(python),
+            "-I",
+            "-c",
+            "import importlib.metadata,os; "
+            "assert importlib.metadata.version('pylva-sdk') == "
+            "os.environ['PYLVA_EXPECTED_VERSION']",
+        ],
+        cwd=environment_dir,
+        env=check_environment,
+    )
 
 
 def verify_artifacts(
@@ -918,6 +1019,12 @@ def verify_artifacts(
         inspect_sdist(sdist.path, name, version, expected_readme)
     finally:
         assert_artifact_pair(proofs, "after archive inspection")
+
+    run_verified_leg(
+        proofs,
+        "pip prerelease resolver policy",
+        lambda: assert_pip_prerelease_policy(wheel, version, smoke_root),
+    )
 
     for matrix_name, requirements in provider_matrix(project):
         for proof in proofs:
@@ -1001,7 +1108,8 @@ def main(argv: list[str] | None = None) -> None:
     version = project.get("version")
     print(
         f"packed Python SDK smoke passed: {name}@{version} "
-        f"({mode}; wheel + sdist; provider floor + current; sync + async)"
+        f"({mode}; immutable wheel + sdist installs; "
+        f"provider floor + current; sync + async)"
     )
 
 

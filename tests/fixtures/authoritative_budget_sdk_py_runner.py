@@ -10,10 +10,24 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-import pylva
+from python_sdk_artifact import verify_python_sdk_artifact
+from service_runner_egress_guard import (
+    assert_egress_sentinel_blocked,
+    install_service_runner_egress_guard,
+)
 
+_ENDPOINT = os.environ.get("PYLVA_RUNNER_ENDPOINT")
+if _ENDPOINT is None:
+    raise RuntimeError("invalid Python SDK runner configuration")
+install_service_runner_egress_guard(_ENDPOINT)
+assert_egress_sentinel_blocked(os.environ.get("PYLVA_EGRESS_SENTINEL_URL"))
+ARTIFACT_EVIDENCE = verify_python_sdk_artifact()
+
+import pylva  # noqa: E402 - guards must run before importing the tested wheel
 
 SDK_PATH = Path(pylva.__file__ or "").resolve().as_posix()
+if pylva.__version__ != ARTIFACT_EVIDENCE["python_artifact_version"]:
+    raise RuntimeError("immutable Python SDK artifact import version mismatch")
 
 
 def _write(value: dict[str, Any]) -> None:
@@ -44,8 +58,13 @@ def _reserve_one(prefix: str, index: int) -> dict[str, Any]:
         result = pylva.reserve_usage_sync(_reserve_input(prefix, index))
     except pylva.PylvaBudgetExceeded:
         return {"decision": "denied"}
-    except pylva.PylvaControlUnavailableError:
-        return {"decision": "unavailable"}
+    except pylva.PylvaControlUnavailableError as error:
+        return {
+            "decision": "unavailable",
+            "reason": error.reason.value,
+            "retryable": error.retryable,
+            "status": error.status,
+        }
     return {
         "decision": result.decision,
         "reservation_id": getattr(result, "reservation_id", None),
@@ -55,17 +74,16 @@ def _reserve_one(prefix: str, index: int) -> dict[str, Any]:
 
 def main() -> None:
     mode = os.environ.get("PYLVA_RUNNER_MODE", "contend")
-    endpoint = os.environ.get("PYLVA_RUNNER_ENDPOINT")
     api_key = os.environ.get("PYLVA_RUNNER_API_KEY")
     count = int(os.environ.get("PYLVA_RUNNER_COUNT", "0"))
     prefix = os.environ.get("PYLVA_RUNNER_PREFIX", "python")
-    if endpoint is None or api_key is None or count < 0 or count > 1000:
+    if api_key is None or count < 0 or count > 1000:
         raise RuntimeError("invalid Python SDK runner configuration")
 
     legacy = mode == "legacy"
     pylva.init(
         api_key,
-        endpoint=endpoint,
+        endpoint=_ENDPOINT,
         control={
             "mode": "legacy" if legacy else "enforce",
             "on_unavailable": "allow" if mode == "old_backend" else "deny",
@@ -79,6 +97,7 @@ def main() -> None:
             {
                 "event": "result",
                 "runtime": "python",
+                **ARTIFACT_EVIDENCE,
                 "sdk_path": SDK_PATH,
                 "sdk_version": pylva.__version__,
                 "decision": result.decision,
@@ -94,6 +113,7 @@ def main() -> None:
             {
                 "event": "result",
                 "runtime": "python",
+                **ARTIFACT_EVIDENCE,
                 "sdk_path": SDK_PATH,
                 "sdk_version": pylva.__version__,
                 "decision": result.decision,
@@ -110,6 +130,7 @@ def main() -> None:
         {
             "event": "ready",
             "runtime": "python",
+            **ARTIFACT_EVIDENCE,
             "sdk_path": SDK_PATH,
             "sdk_version": pylva.__version__,
         }
@@ -128,6 +149,7 @@ def main() -> None:
         {
             "event": "result",
             "runtime": "python",
+            **ARTIFACT_EVIDENCE,
             "sdk_path": SDK_PATH,
             "sdk_version": pylva.__version__,
             "decisions": decisions,
@@ -143,6 +165,15 @@ def main() -> None:
                     if isinstance(result.get("reserved_usd"), str)
                 }
             ),
+            "unavailable_evidence": [
+                {
+                    "reason": result.get("reason"),
+                    "retryable": result.get("retryable"),
+                    "status": result.get("status"),
+                }
+                for result in results
+                if result["decision"] == "unavailable"
+            ],
         }
     )
 

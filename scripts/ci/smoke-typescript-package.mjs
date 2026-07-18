@@ -16,6 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const exactConsumerTypescriptVersion = '6.0.2';
 
 const usage = `Usage:
   node scripts/ci/smoke-typescript-package.mjs [package-dir]
@@ -220,8 +221,24 @@ function run(command, args, options = {}) {
   });
 }
 
+function runBytes(command, args, options = {}) {
+  return execFileSync(command, args, {
+    cwd: options.cwd ?? repoRoot,
+    env: { ...process.env, NODE_PATH: '', ...options.env },
+    stdio: options.stdio ?? ['ignore', 'pipe', 'inherit'],
+  });
+}
+
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+function assertExactBytes(actual, expected, label) {
+  assert(
+    Buffer.isBuffer(actual) && Buffer.isBuffer(expected),
+    `${label} must compare byte buffers`,
+  );
+  assert(actual.equals(expected), `${label} bytes differ from the release source`);
 }
 
 function installedPeerSpec(name) {
@@ -448,6 +465,7 @@ function assertPackedManifest(manifest, files, tarball, expectedVersion) {
 }
 
 const scratch = mkdtempSync(path.join(tmpdir(), 'pylva-ts-package-smoke-'));
+let verifiedArtifact = null;
 
 try {
   const artifactDir =
@@ -476,6 +494,7 @@ try {
     tarball = path.join(artifactDir, filename);
   }
   const artifactSha256 = sha256(tarball);
+  verifiedArtifact = { tarball, sha256: artifactSha256 };
   if (options.expectedSha256 !== null) {
     assert(
       /^[a-f0-9]{64}$/u.test(options.expectedSha256),
@@ -490,6 +509,19 @@ try {
   const files = new Set(run('tar', ['-tzf', tarball]).split('\n').filter(Boolean));
   const packedManifest = JSON.parse(run('tar', ['-xzOf', tarball, 'package/package.json']));
   assertPackedManifest(packedManifest, files, tarball, sourceManifest?.version ?? null);
+  const sourceReadme = readFileSync(path.join(packageDir, 'README.md'));
+  const packedReadme = runBytes('tar', ['-xzOf', tarball, 'package/README.md']);
+  assertExactBytes(packedReadme, sourceReadme, 'packed README.md');
+  assert(sourceReadme.length > 0, 'release README.md must not be empty');
+  const oneByteMismatch = Buffer.from(sourceReadme);
+  oneByteMismatch[oneByteMismatch.length - 1] ^= 1;
+  let mismatchRejected = false;
+  try {
+    assertExactBytes(oneByteMismatch, sourceReadme, 'README one-byte negative self-test');
+  } catch {
+    mismatchRejected = true;
+  }
+  assert(mismatchRejected, 'README byte-identity gate accepted a one-byte mismatch');
   if (options.metadataOutput !== null) {
     const metadataPath = path.resolve(repoRoot, options.metadataOutput);
     const metadataDirectory = path.dirname(metadataPath);
@@ -547,6 +579,24 @@ try {
       cwd: installDir,
       stdio: 'inherit',
     });
+    const typescriptInstallArguments = [
+      'install',
+      `typescript@${exactConsumerTypescriptVersion}`,
+      '--save-dev',
+      '--save-exact',
+      '--ignore-scripts',
+      '--no-audit',
+      '--no-fund',
+    ];
+    if (options.profile === 'optional-free') typescriptInstallArguments.push('--omit=optional');
+    run('npm', typescriptInstallArguments, { cwd: installDir, stdio: 'inherit' });
+    const installedTypescript = JSON.parse(
+      readFileSync(path.join(installDir, 'node_modules', 'typescript', 'package.json'), 'utf8'),
+    );
+    assert(
+      installedTypescript.version === exactConsumerTypescriptVersion,
+      `consumer TypeScript installed ${installedTypescript.version}, expected ${exactConsumerTypescriptVersion}`,
+    );
     const peerVersions =
       options.profile === 'optional-free'
         ? {}
@@ -776,14 +826,111 @@ const descriptorEqual = (left, right) =>
   left?.writable === right?.writable &&
   left?.enumerable === right?.enumerable &&
   left?.configurable === right?.configurable;
-// Initialize Node's lazy Fetch/Undici globals before taking the SDK mutation
-// baseline. The exact internal symbols added by this built-in initialization
-// are Node-version details; the security invariant below is that importing
-// Pylva cannot add or mutate globals after the platform has initialized.
+const fetchPrimeProfiles = new Map([
+  ['20.18.1', {
+    additions: ['Symbol(undici.globalDispatcher.1)'],
+    materializations: [
+      'AbortController',
+      'AbortSignal',
+      'TextEncoder',
+      'TextDecoder',
+      'ReadableStream',
+      'File',
+      'Request',
+    ],
+  }],
+  ['22.23.1', {
+    additions: ['Symbol(undici.globalDispatcher.1)'],
+    materializations: [],
+  }],
+  ['24.18.0', {
+    additions: [
+      'Symbol(undici.globalDispatcher.1)',
+      'Symbol(undici.globalDispatcher.2)',
+    ],
+    materializations: [],
+  }],
+]);
+const fetchPrimeProfile = fetchPrimeProfiles.get(process.versions.node);
+if (fetchPrimeProfile === undefined) {
+  throw new Error('no exact Fetch/Undici global profile for Node ' + process.versions.node);
+}
+const fetchPrimeSnapshot = new Map(
+  Reflect.ownKeys(globalThis).map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]),
+);
 void globalThis.fetch;
 new Request('https://pylva.invalid');
 if (typeof globalThis.fetch !== 'function') {
   throw new Error('the supported Node runtime does not expose builtin fetch');
+}
+const fetchPrimeKeys = Reflect.ownKeys(globalThis);
+const fetchPrimeAdditions = fetchPrimeKeys.filter((key) => !fetchPrimeSnapshot.has(key));
+const fetchPrimeRemovals = [...fetchPrimeSnapshot.keys()].filter(
+  (key) => !Object.prototype.hasOwnProperty.call(globalThis, key),
+);
+const fetchPrimeMutations = fetchPrimeKeys.filter(
+  (key) =>
+    fetchPrimeSnapshot.has(key) &&
+    !descriptorEqual(
+      Object.getOwnPropertyDescriptor(globalThis, key),
+      fetchPrimeSnapshot.get(key),
+    ),
+);
+const keyLabels = (keys) => keys.map((key) => String(key)).sort();
+const exactStringArray = (left, right) =>
+  left.length === right.length && left.every((value, index) => value === right[index]);
+const observedAdditions = keyLabels(fetchPrimeAdditions);
+const expectedAdditions = [...fetchPrimeProfile.additions].sort();
+const observedMutations = keyLabels(fetchPrimeMutations);
+const expectedMutations = [...fetchPrimeProfile.materializations].sort();
+if (
+  fetchPrimeRemovals.length !== 0 ||
+  !exactStringArray(observedAdditions, expectedAdditions) ||
+  !exactStringArray(observedMutations, expectedMutations)
+) {
+  throw new Error(
+    'builtin Fetch/Undici global delta differs for Node ' + process.versions.node + ': ' +
+    JSON.stringify({
+      additions: observedAdditions,
+      expectedAdditions,
+      removals: keyLabels(fetchPrimeRemovals),
+      materializations: observedMutations,
+      expectedMaterializations: expectedMutations,
+    }),
+  );
+}
+for (const key of fetchPrimeAdditions) {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+  if (
+    !Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
+    descriptor.value === null ||
+    typeof descriptor.value !== 'object' ||
+    descriptor.writable !== true ||
+    descriptor.enumerable !== false ||
+    descriptor.configurable !== false
+  ) {
+    throw new Error('builtin Fetch/Undici installed an invalid dispatcher: ' + String(key));
+  }
+}
+for (const name of fetchPrimeProfile.materializations) {
+  const before = fetchPrimeSnapshot.get(name);
+  const after = Object.getOwnPropertyDescriptor(globalThis, name);
+  if (
+    before === undefined ||
+    after === undefined ||
+    Object.prototype.hasOwnProperty.call(before, 'value') ||
+    typeof before?.get !== 'function' ||
+    typeof before?.set !== 'function' ||
+    before.enumerable !== false ||
+    before.configurable !== true ||
+    !Object.prototype.hasOwnProperty.call(after, 'value') ||
+    typeof after.value !== 'function' ||
+    after.writable !== true ||
+    after.enumerable !== false ||
+    after.configurable !== true
+  ) {
+    throw new Error('builtin Fetch/Undici materialized an invalid lazy global: ' + name);
+  }
 }
 
 let providerIo = 0;
@@ -3630,7 +3777,7 @@ void [readiness, ErrorConstructor];
         ? ['consumer-core.mts', 'consumer-core.cts']
         : ['consumer.mts', 'consumer.cts'];
     run(
-      path.join(repoRoot, 'node_modules', '.bin', 'tsc'),
+      path.join(installDir, 'node_modules', '.bin', 'tsc'),
       [
         '--noEmit',
         '--strict',
@@ -3657,10 +3804,15 @@ void [readiness, ErrorConstructor];
       `packed TypeScript SDK smoke passed: @pylva/sdk@${packedManifest.version} (ESM, CJS, ESM/CJS types, all public subpaths, CLI)`,
     );
   }
-  assert(
-    sha256(tarball) === artifactSha256,
-    'immutable TypeScript tarball changed while it was being verified',
-  );
 } finally {
-  rmSync(scratch, { recursive: true, force: true });
+  try {
+    if (verifiedArtifact !== null) {
+      assert(
+        sha256(verifiedArtifact.tarball) === verifiedArtifact.sha256,
+        'immutable TypeScript tarball changed while it was being verified',
+      );
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }

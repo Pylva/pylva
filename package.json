@@ -36,6 +36,7 @@
     "db:reset": "ALLOW_MIGRATION_DATABASE_URL_FALLBACK=true tsx db/setup.ts && tsx db/seed.ts",
     "clickhouse:doctor": "tsx scripts/clickhouse-doctor.ts",
     "budget-control:doctor": "tsx scripts/authoritative-budget-control-doctor.ts",
+    "budget:readiness": "tsx scripts/budget-readiness.ts",
     "clickhouse:provision-budget-rbac": "tsx scripts/provision-authoritative-budget-clickhouse-rbac.ts",
     "clickhouse:backfill-customer-daily": "tsx scripts/backfill-cost-customer-daily-agg.ts",
     "clickhouse:backfill-daily-agg-v2": "tsx scripts/backfill-cost-daily-agg-v2.ts",
