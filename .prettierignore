@@ -6,6 +6,7 @@ build
 coverage
 .turbo
 dist-tsc
+**/dist-full
 db/migrations
 
 # Hand-formatted aligned-column style; prettier reflows 665 -> 878 lines.
@@ -15,4 +16,5 @@ src/lib/db/schema.ts
 # Harness-managed dirs (settings edited by stacked PRs; receipts are scratch)
 .claude/
 .codex/
+.codex-worktrees/
 .context/

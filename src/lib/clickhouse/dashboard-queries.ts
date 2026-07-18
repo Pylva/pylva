@@ -1,14 +1,11 @@
 // B2a T1 — dashboard read queries. Every export takes `builderId` as first
-// required param (I-T1-1); the middleware injects x-builder-id. Query routing
-// per D21: getOverview uses cost_events for live/default demo-excluded reads
-// and cost_daily_agg_v2 only for historical include-demo reads. Customer-level
-// existence checks read cost_customer_daily_agg, populated near-real-time by
-// cost_customer_daily_agg_mv. Customer ranking/summary queries combine
-// full-day aggregate rows with raw boundary-day events so partial-day range
-// bounds stay exact. Model breakdown does the same only after its aggregate
-// has a trusted backfill marker; otherwise it reads exact raw events.
-// `cost_events.cost_usd` is Nullable(Decimal); SUM treats NULL as 0 naturally
-// — do NOT wrap with `ifNull` in read queries.
+// required param (I-T1-1); the middleware injects x-builder-id. Dashboard
+// spend/event reads use cost_events_with_control: the canonical union of
+// legacy telemetry and the deduplicated authoritative budget projection.
+// Existing daily/customer/model aggregates are intentionally bypassed because
+// their materialized views consume legacy cost_events only. `cost_usd` is
+// Nullable(Decimal); SUM treats NULL as 0 naturally — do NOT wrap it with
+// `ifNull` in read queries.
 
 import { randomUUID } from 'node:crypto';
 import { cache } from 'react';
@@ -26,11 +23,10 @@ export interface DateRange {
 // Local alias preserves callsite readability while dedup'ing the helper.
 const iso = chTimestamp;
 
-function rangeIncludesToday(range: DateRange): boolean {
-  const today = new Date();
-  today.setUTCHours(0, 0, 0, 0);
-  return range.to >= today;
-}
+// Date bounds are sent as UTC text and every query parses them with an
+// explicit UTC timezone. A natively typed DateTime query parameter is interpreted in the
+// ClickHouse server timezone, which can hide the newest projected events when
+// the application host and server are not configured for UTC.
 
 function dashboardQueryOptions(label: string) {
   const queryLabel = `dashboard.${label}`;
@@ -52,50 +48,19 @@ function dashboardQueryOptions(label: string) {
   };
 }
 
-async function isModelDailyAggregateTrusted(builderId: string): Promise<boolean> {
-  try {
-    const rows = await queryCostEvents(
-      builderId,
-      `SELECT status
-       FROM cost_model_daily_agg_backfill_status
-       ORDER BY checked_at DESC
-       LIMIT 1`,
-      {},
-      dashboardQueryOptions('model_breakdown_aggregate_trust'),
-    );
-    const status = (rows[0] as { status?: string } | undefined)?.status;
-    return status === 'trusted';
-  } catch {
-    return false;
-  }
-}
-
 /** I-T1-13 demo auto-hide predicate. Request-memoized via React cache()
  * during RSC rendering. Uses an existence probe instead of count() so large
  * builders do not scan more rows than needed just to decide empty-state UX. */
 export const hasAnyRealEvents = cache(async (builderId: string): Promise<boolean> => {
-  const aggregateRows = await queryCostEvents(
+  const rows = await queryCostEvents(
     builderId,
-    `SELECT 1 AS has_real FROM cost_customer_daily_agg
+    `SELECT 1 AS has_real FROM cost_events_with_control
        WHERE builder_id = {builder_id:String} AND is_demo = 0
        LIMIT 1`,
     {},
     dashboardQueryOptions('has_any_real_events'),
   );
-  if (aggregateRows.length > 0) return true;
-
-  // ClickHouse materialized views do not backfill existing cost_events rows
-  // when the view is created. Preserve correctness until the one-time
-  // customer aggregate backfill has run.
-  const rawRows = await queryCostEvents(
-    builderId,
-    `SELECT 1 AS has_real FROM cost_events
-       WHERE builder_id = {builder_id:String} AND is_demo = 0
-       LIMIT 1`,
-    {},
-    dashboardQueryOptions('has_any_real_events_raw_fallback'),
-  );
-  return rawRows.length > 0;
+  return rows.length > 0;
 });
 
 export interface OverviewKpis {
@@ -111,68 +76,20 @@ export async function getOverview(
   range: DateRange,
   opts: { includeDemo: boolean; hasRealEvents?: boolean } = { includeDemo: false },
 ): Promise<OverviewKpis> {
-  const live = rangeIncludesToday(range);
   const demoFilter = opts.includeDemo ? '' : 'AND is_demo = 0';
-
-  // cost_daily_agg_v2 has NO is_demo dimension (db/clickhouse/008 mirrors the
-  // legacy aggregate shape), so it physically cannot exclude seeded demo
-  // events. Read it only when demo rows are explicitly wanted AND the range is
-  // historical (the agg legitimately holds every event). Otherwise read
-  // cost_events directly — it works for any range and honours `is_demo = 0`,
-  // exactly like every sibling query in this file.
-  //
-  // Without this guard, a builder with only demo data who requests a
-  // historical range (e.g. GET /api/v1/costs?from=..&to=<before today>)
-  // hit cost_daily_agg_v2, saw fabricated demo spend reported as a real
-  // total_spend_usd, and got demo_only:false (banner suppressed). Migration
-  // 003's "demo builders never view historical ranges" carve-out was wrong:
-  // routing keys on rangeIncludesToday, not builder age.
-  const useAgg = !live && opts.includeDemo;
-
-  if (!useAgg) {
-    const rows = await queryCostEvents(
-      builderId,
-      `SELECT
-         sum(cost_usd) AS total_spend_usd,
-         count() AS event_count,
-         uniqExact(customer_id) AS customer_count
-       FROM cost_events
-      WHERE builder_id = {builder_id:String}
-         AND timestamp >= {from:DateTime}
-         AND timestamp <= {to:DateTime}
-         ${demoFilter}`,
-      { from: iso(range.from), to: iso(range.to) },
-      dashboardQueryOptions('overview'),
-    );
-    const row =
-      (rows[0] as
-        | {
-            total_spend_usd?: string;
-            event_count?: string;
-            customer_count?: string;
-          }
-        | undefined) ?? {};
-    return {
-      total_spend_usd: Number(row.total_spend_usd ?? 0),
-      event_count: Number(row.event_count ?? 0),
-      customer_count: Number(row.customer_count ?? 0),
-      range,
-      demo_only: !(opts.hasRealEvents ?? (await hasAnyRealEvents(builderId))),
-    };
-  }
-
   const rows = await queryCostEvents(
     builderId,
     `SELECT
-       sum(total_cost_usd) AS total_spend_usd,
-       sum(event_count) AS event_count,
+       sum(cost_usd) AS total_spend_usd,
+       count() AS event_count,
        uniqExact(customer_id) AS customer_count
-     FROM cost_daily_agg_v2
+     FROM cost_events_with_control
      WHERE builder_id = {builder_id:String}
-       AND day >= toDate({from:DateTime})
-       AND day <= toDate({to:DateTime})`,
+       AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
+       AND timestamp <= parseDateTime64BestEffort({to:String}, 3, 'UTC')
+       ${demoFilter}`,
     { from: iso(range.from), to: iso(range.to) },
-    dashboardQueryOptions('overview_aggregate'),
+    dashboardQueryOptions('overview'),
   );
   const row =
     (rows[0] as
@@ -187,7 +104,7 @@ export async function getOverview(
     event_count: Number(row.event_count ?? 0),
     customer_count: Number(row.customer_count ?? 0),
     range,
-    demo_only: false,
+    demo_only: !(opts.hasRealEvents ?? (await hasAnyRealEvents(builderId))),
   };
 }
 
@@ -208,32 +125,13 @@ export async function getTopEndUsers(
     builderId,
     `SELECT
        customer_id,
-       sum(spend_usd) AS total_spend_usd,
-       sum(events) AS event_count
-     FROM (
-       SELECT
-         customer_id,
-         sum(total_cost_usd) AS spend_usd,
-         sum(event_count) AS events
-       FROM cost_customer_daily_agg
-       WHERE builder_id = {builder_id:String}
-         AND day > toDate({from:DateTime})
-         AND day < toDate({to:DateTime})
-         ${demoFilter}
-       GROUP BY customer_id
-       UNION ALL
-       SELECT
-         customer_id,
-         sum(cost_usd) AS spend_usd,
-         count() AS events
-       FROM cost_events
-       WHERE builder_id = {builder_id:String}
-         AND timestamp >= {from:DateTime}
-         AND timestamp <= {to:DateTime}
-         AND (toDate(timestamp) = toDate({from:DateTime}) OR toDate(timestamp) = toDate({to:DateTime}))
-         ${demoFilter}
-       GROUP BY customer_id
-     ) AS top_end_user_parts
+       sum(cost_usd) AS total_spend_usd,
+       count() AS event_count
+     FROM cost_events_with_control
+     WHERE builder_id = {builder_id:String}
+       AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
+       AND timestamp <= parseDateTime64BestEffort({to:String}, 3, 'UTC')
+       ${demoFilter}
      GROUP BY customer_id
      ORDER BY total_spend_usd DESC
      LIMIT {limit:UInt32}`,
@@ -272,35 +170,14 @@ export async function getCustomerCostSummary(
     builderId,
     `SELECT
        customer_id,
-       sum(spend_usd) AS total_spend_usd,
-       sum(events) AS event_count,
-       max(last_seen_at) AS last_seen_at
-     FROM (
-       SELECT
-         customer_id,
-         sum(total_cost_usd) AS spend_usd,
-         sum(event_count) AS events,
-         max(last_seen_at) AS last_seen_at
-       FROM cost_customer_daily_agg
-       WHERE builder_id = {builder_id:String}
-         AND day > toDate({from:DateTime})
-         AND day < toDate({to:DateTime})
-         ${demoFilter}
-       GROUP BY customer_id
-       UNION ALL
-       SELECT
-         customer_id,
-         sum(cost_usd) AS spend_usd,
-         count() AS events,
-         max(timestamp) AS last_seen_at
-       FROM cost_events
-       WHERE builder_id = {builder_id:String}
-         AND timestamp >= {from:DateTime}
-         AND timestamp <= {to:DateTime}
-         AND (toDate(timestamp) = toDate({from:DateTime}) OR toDate(timestamp) = toDate({to:DateTime}))
-         ${demoFilter}
-       GROUP BY customer_id
-     ) AS customer_summary_parts
+       sum(cost_usd) AS total_spend_usd,
+       count() AS event_count,
+       max(timestamp) AS last_seen_at
+     FROM cost_events_with_control
+     WHERE builder_id = {builder_id:String}
+       AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
+       AND timestamp <= parseDateTime64BestEffort({to:String}, 3, 'UTC')
+       ${demoFilter}
      GROUP BY customer_id
      ORDER BY total_spend_usd DESC
      LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
@@ -352,11 +229,11 @@ export async function getCustomerDetail(
   opts: { includeDemo: boolean } = { includeDemo: false },
 ): Promise<CustomerDetail> {
   const demoFilter = opts.includeDemo ? '' : 'AND is_demo = 0';
-  const base = `FROM cost_events
+  const base = `FROM cost_events_with_control
      WHERE builder_id = {builder_id:String}
        AND customer_id = {customer_id:String}
-       AND timestamp >= {from:DateTime}
-       AND timestamp <= {to:DateTime}
+       AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
+       AND timestamp <= parseDateTime64BestEffort({to:String}, 3, 'UTC')
        ${demoFilter}`;
   const p = {
     customer_id: customerId,
@@ -455,61 +332,20 @@ export async function getModelBreakdown(
   opts: { includeDemo: boolean } = { includeDemo: false },
 ): Promise<ModelBreakdownRow[]> {
   const demoFilter = opts.includeDemo ? '' : 'AND is_demo = 0';
-  const useAggregate = await isModelDailyAggregateTrusted(builderId);
-  const query = useAggregate
-    ? `SELECT
-         provider,
-         model,
-         sum(spend_usd) AS total_spend_usd,
-         sum(tokens_in) AS tokens_in,
-         sum(tokens_out) AS tokens_out,
-         sum(call_count) AS call_count
-       FROM (
-         SELECT
-           provider,
-           model,
-           sum(total_cost_usd) AS spend_usd,
-           sum(total_tokens_in) AS tokens_in,
-           sum(total_tokens_out) AS tokens_out,
-           sum(call_count) AS call_count
-         FROM cost_model_daily_agg
-         WHERE builder_id = {builder_id:String}
-           AND day > toDate({from:DateTime})
-           AND day < toDate({to:DateTime})
-           ${demoFilter}
-         GROUP BY provider, model
-         UNION ALL
-         SELECT
-           provider,
-           model,
-           sum(cost_usd) AS spend_usd,
-           sum(tokens_in) AS tokens_in,
-           sum(tokens_out) AS tokens_out,
-           count() AS call_count
-         FROM cost_events
-         WHERE builder_id = {builder_id:String}
-           AND timestamp >= {from:DateTime}
-           AND timestamp <= {to:DateTime}
-           AND (toDate(timestamp) = toDate({from:DateTime}) OR toDate(timestamp) = toDate({to:DateTime}))
-           ${demoFilter}
-         GROUP BY provider, model
-       ) AS model_breakdown_parts
-       GROUP BY provider, model
-       ORDER BY total_spend_usd DESC`
-    : `SELECT
-         provider,
-         model,
-         sum(cost_usd) AS total_spend_usd,
-         sum(tokens_in) AS tokens_in,
-         sum(tokens_out) AS tokens_out,
-         count() AS call_count
-       FROM cost_events
-       WHERE builder_id = {builder_id:String}
-         AND timestamp >= {from:DateTime}
-         AND timestamp <= {to:DateTime}
-         ${demoFilter}
-       GROUP BY provider, model
-       ORDER BY total_spend_usd DESC`;
+  const query = `SELECT
+       provider,
+       model,
+       sum(cost_usd) AS total_spend_usd,
+       sum(tokens_in) AS tokens_in,
+       sum(tokens_out) AS tokens_out,
+       count() AS call_count
+     FROM cost_events_with_control
+     WHERE builder_id = {builder_id:String}
+       AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
+       AND timestamp <= parseDateTime64BestEffort({to:String}, 3, 'UTC')
+       ${demoFilter}
+     GROUP BY provider, model
+     ORDER BY total_spend_usd DESC`;
   const rows = await queryCostEvents(
     builderId,
     query,
@@ -565,7 +401,7 @@ export async function getTraceTree(
   const [countRows, rows] = await Promise.all([
     queryCostEvents(
       builderId,
-      `SELECT count() AS c FROM cost_events
+      `SELECT count() AS c FROM cost_events_with_control
        WHERE builder_id = {builder_id:String} AND trace_id = {trace_id:String}`,
       { trace_id: traceId },
       dashboardQueryOptions('trace_tree_count'),
@@ -574,7 +410,7 @@ export async function getTraceTree(
       builderId,
       `SELECT trace_id, span_id, parent_span_id, step_name, provider, model,
          tokens_in, tokens_out, cost_usd, latency_ms, status, timestamp
-       FROM cost_events
+       FROM cost_events_with_control
        WHERE builder_id = {builder_id:String} AND trace_id = {trace_id:String}
        ORDER BY timestamp ASC
        LIMIT {limit:UInt32}`,
@@ -630,10 +466,10 @@ export async function getRecentTraces(
        count() AS span_count,
        sum(cost_usd) AS total_spend_usd,
        sum(latency_ms) AS total_latency_ms
-     FROM cost_events
+     FROM cost_events_with_control
      WHERE builder_id = {builder_id:String}
-       AND timestamp >= {from:DateTime}
-       AND timestamp <= {to:DateTime}
+       AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
+       AND timestamp <= parseDateTime64BestEffort({to:String}, 3, 'UTC')
        ${demoFilter}
        ${customerFilter}
      GROUP BY trace_id

@@ -22,7 +22,18 @@ export const env = createEnv({
     // password per connection so a rotation is picked up without a restart
     // (db/credentials.ts). Unset in local/dev/test → static DATABASE_URL.
     DB_MASTER_USER_SECRET_ARN: v.optional(v.string()),
+    // Dedicated NOBYPASS/NOSUPER login for authoritative budget mutation,
+    // projection, and expiry. Production never falls back to DATABASE_URL.
+    BUDGET_CONTROL_DATABASE_URL: v.optional(v.pipe(v.string(), v.minLength(1))),
+    BUDGET_CONTROL_DB_RUNTIME_USER_SECRET_ARN: v.optional(v.pipe(v.string(), v.minLength(1))),
+    // Local/CI-only compatibility for throwaway databases; rejected in prod.
+    ALLOW_BUDGET_CONTROL_DATABASE_URL_FALLBACK: v.optional(boolEnv, false),
     CLICKHOUSE_URL: v.pipe(v.string(), v.minLength(1)),
+    // Dedicated ClickHouse principal for authoritative outbox projection.
+    // Production posture rejects a missing/reused principal; local/CI may
+    // deliberately reuse CLICKHOUSE_URL only behind the explicit flag.
+    BUDGET_PROJECTION_CLICKHOUSE_URL: v.optional(v.pipe(v.string(), v.minLength(1))),
+    ALLOW_BUDGET_PROJECTION_CLICKHOUSE_URL_FALLBACK: v.optional(boolEnv, false),
     REDIS_URL: v.pipe(v.string(), v.minLength(1)),
 
     // --- JWT keys (file paths; prod container writes PEM env values here) ---
@@ -142,6 +153,11 @@ export const env = createEnv({
     // builders are not limited by Pylva Cloud plan tiers.
     // Retention stamping is not behind this flag.
     ENABLE_EVENT_LIMITS: v.optional(boolEnv, false),
+
+    // --- Authoritative budget control (pre-roll) ---
+    // Fail-safe rollout default: schema and edge authentication may deploy
+    // before reservation business logic is enabled for any workspace.
+    ENABLE_AUTHORITATIVE_BUDGET_CONTROL: v.optional(boolEnv, false),
 
     // --- B4: Feature kill switches (b4 plan §3.6, D16) ---
     // Default false — features are dormant until operator opts in. Each flag

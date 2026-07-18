@@ -7,6 +7,8 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
+const configState = vi.hoisted(() => ({ generation: 1 }));
+
 const esmResources = vi.hoisted(() => {
   const state = {
     openaiCompletions: undefined as unknown,
@@ -51,6 +53,7 @@ vi.mock('../src/core/budget_accumulator.js', () => ({
 
 vi.mock('../src/core/config.js', () => ({
   isInitialized: () => true,
+  getConfigGeneration: () => configState.generation,
 }));
 
 vi.mock('../src/core/telemetry.js', () => ({
@@ -64,6 +67,7 @@ const { applyAnthropicPatch, _resetAnthropicPatchForTests } =
 const { enqueue } = await import('../src/core/telemetry.js');
 
 beforeEach(() => {
+  configState.generation = 1;
   _resetOpenAiPatchForTests();
   _resetAnthropicPatchForTests();
   esmResources.state.openaiCompletions = undefined;
@@ -123,6 +127,71 @@ describe('openai v5 instance-field shape', () => {
     expect(event.provider).toBe('openai');
     expect(event.tokens_in).toBe(7);
     expect(event.tokens_out).toBe(3);
+  });
+
+  it('preserves native APIPromise asResponse/withResponse on the legacy auto patch', async () => {
+    const data = {
+      model: 'gpt-4o-mini',
+      usage: { prompt_tokens: 7, completion_tokens: 3 },
+    };
+    const response = new Response(JSON.stringify(data), {
+      headers: { 'content-type': 'application/json', 'x-request-id': 'req_auto' },
+    });
+    const create = vi.fn(() => {
+      const promise = Promise.resolve(data) as Promise<typeof data> & {
+        asResponse(): Promise<Response>;
+        withResponse(): Promise<{ data: typeof data; response: Response }>;
+      };
+      promise.asResponse = async () => response;
+      promise.withResponse = async () => ({ data, response });
+      return promise;
+    });
+    class Completions {
+      create(...args: unknown[]) {
+        return create.apply(this, args);
+      }
+    }
+    class OpenAI {
+      chat = { completions: new Completions() };
+    }
+    vi.mocked(loadPeer).mockImplementation((spec: string) => {
+      if (spec === 'openai') return { default: OpenAI };
+      if (spec === 'openai/resources/chat/completions') return { Completions };
+      return undefined;
+    });
+
+    applyOpenAiPatch();
+    const promise = new OpenAI().chat.completions.create({ model: 'gpt-4o-mini' });
+    expect(typeof promise.asResponse).toBe('function');
+    expect(typeof promise.withResponse).toBe('function');
+    const withResponse = await promise.withResponse();
+    expect(withResponse.data).toMatchObject({ model: 'gpt-4o-mini' });
+    expect(await promise.asResponse()).toBe(response);
+  });
+
+  it('drops a delayed old-identity success instead of enqueuing it for the new tenant', async () => {
+    let resolveCreate!: (value: unknown) => void;
+    const create = vi.fn(
+      () =>
+        new Promise<unknown>((resolve) => {
+          resolveCreate = resolve;
+        }),
+    );
+    const { OpenAI, Completions } = buildV5Peer(create);
+    vi.mocked(loadPeer).mockImplementation((spec: string) => {
+      if (spec === 'openai') return { default: OpenAI };
+      if (spec === 'openai/resources/chat/completions') return { Completions };
+      return undefined;
+    });
+
+    applyOpenAiPatch();
+    const client = new OpenAI();
+    const pending = client.chat.completions.create({ model: 'gpt-4o-mini' });
+    configState.generation += 1;
+    resolveCreate({ model: 'gpt-4o-mini', usage: { prompt_tokens: 7, completion_tokens: 3 } });
+
+    await expect(pending).resolves.toMatchObject({ model: 'gpt-4o-mini' });
+    expect(vi.mocked(enqueue)).not.toHaveBeenCalled();
   });
 
   it('does not double-instrument when the class patch already covers an instance', async () => {
@@ -227,6 +296,45 @@ describe('anthropic instance-field shape', () => {
     expect(event.provider).toBe('anthropic');
     expect(event.tokens_in).toBe(11);
     expect(event.tokens_out).toBe(5);
+  });
+
+  it('preserves APIPromise helpers used by native messages.stream()', async () => {
+    const data = {
+      model: 'claude-3-5-sonnet-20241022',
+      usage: { input_tokens: 11, output_tokens: 5 },
+    };
+    const response = new Response(JSON.stringify(data), {
+      headers: { 'content-type': 'application/json', 'request-id': 'req_auto' },
+    });
+    class Messages {
+      create(..._args: unknown[]) {
+        const promise = Promise.resolve(data) as Promise<typeof data> & {
+          asResponse(): Promise<Response>;
+          withResponse(): Promise<{ data: typeof data; response: Response }>;
+        };
+        promise.asResponse = async () => response;
+        promise.withResponse = async () => ({ data, response });
+        return promise;
+      }
+      stream() {
+        return this.create().withResponse();
+      }
+    }
+    class Anthropic {
+      messages = new Messages();
+    }
+    vi.mocked(loadPeer).mockImplementation((spec: string) => {
+      if (spec === '@anthropic-ai/sdk') return { default: Anthropic };
+      if (spec === '@anthropic-ai/sdk/resources/messages') return { Messages };
+      return undefined;
+    });
+
+    applyAnthropicPatch();
+    const client = new Anthropic();
+    const promise = client.messages.create({ model: data.model });
+    expect(typeof promise.asResponse).toBe('function');
+    expect(typeof promise.withResponse).toBe('function');
+    await expect(client.messages.stream()).resolves.toMatchObject({ data: { model: data.model } });
   });
 
   it('launches the async ESM patch only once when sync patching finds no resource class', async () => {

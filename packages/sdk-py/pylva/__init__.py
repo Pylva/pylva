@@ -18,13 +18,28 @@ import asyncio
 from collections.abc import Mapping
 from typing import Any
 
+from ._version import SDK_VERSION
+from .adapters.tavily import (
+    TAVILY_BASIC_SEARCH_CREDITS,
+    TAVILY_SEARCH_COST_SOURCE_SLUG,
+    TAVILY_SEARCH_METRIC,
+    TAVILY_SEARCH_TOOL_NAME,
+    TavilyAsyncSearchClient,
+    TavilySyncSearchClient,
+    controlled_tavily_search,
+    controlled_tavily_search_sync,
+)
 from .core.budget_accumulator import init_accumulator as _init_accumulator
 from .core.client_registry import (
     get_registered_client,
     has_registered_client,
 )
 from .core.config import (
+    ControlConfig,
+    ControlMode,
+    ControlUnavailablePolicy,
     InvalidApiKeyError,
+    InvalidControlConfigError,
     is_initialized,
 )
 from .core.config import (
@@ -35,6 +50,61 @@ from .core.context import (
     current_context,
     track,
     track_context,
+)
+from .core.control_client import (
+    commit_usage,
+    commit_usage_sync,
+    extend_usage,
+    extend_usage_sync,
+    ready,
+    ready_sync,
+    release_usage,
+    release_usage_sync,
+    reserve_usage,
+    reserve_usage_sync,
+)
+from .core.control_ownership import (
+    ControlledAttemptContext,
+    ControlledOperationOwnership,
+    controlled_operation_ownership,
+    current_controlled_attempt,
+    current_controlled_operation,
+    should_suppress_legacy_telemetry,
+)
+from .core.control_schema import (
+    BudgetCapabilitiesResponse,
+    BudgetCommitRequest,
+    BudgetCommitResponse,
+    BudgetControlError,
+    BudgetControlErrorResponse,
+    BudgetControlWarning,
+    BudgetExtendRequest,
+    BudgetExtendResponse,
+    BudgetReleaseRequest,
+    BudgetReleaseResponse,
+    BudgetReservationRequest,
+    BudgetReservationResponse,
+    BudgetRuleSnapshot,
+    BypassedBudgetDecision,
+    DeniedBudgetDecision,
+    LlmBudgetCommitRequest,
+    LlmBudgetReservationRequest,
+    ReservedBudgetDecision,
+    ToolBudgetCommitRequest,
+    ToolBudgetReservationRequest,
+    UnavailableBudgetDecision,
+)
+from .core.controlled_usage import (
+    ControlledUsageDecision,
+    ControlledUsageIssue,
+    ControlledUsageOutcome,
+    ControlledUsageResult,
+    ControlledUsageSettlement,
+    ExactDecimalInput,
+    controlled_exact_usage,
+    controlled_exact_usage_sync,
+    controlled_usage,
+    controlled_usage_sync,
 )
 from .core.non_llm_policy import (
     NonLlmConfig,
@@ -65,6 +135,18 @@ from .errors.budget_exceeded import (
     BudgetExceededSource,
     PylvaBudgetExceeded,
 )
+from .errors.control import (
+    PYLVA_CONTROL_UNAVAILABLE_CODE,
+    PylvaControlApiError,
+    PylvaControlUnavailableError,
+    PylvaControlUnavailableReason,
+    PylvaControlValidationError,
+)
+from .errors.strict_provider import (
+    PYLVA_STRICT_PROVIDER_UNSUPPORTED_CODE,
+    PylvaStrictProviderError,
+    StrictProviderReason,
+)
 from .pylva import Pylva
 from .reporting.usage import report_usage
 from .webhooks.verify import (
@@ -75,8 +157,10 @@ from .webhooks.verify import (
 )
 from .wrappers._init_validation import refresh_and_validate_once
 from .wrappers._patch import apply_all_patches
+from .wrappers.anthropic_controlled import ControlledAnthropic, wrap_anthropic
+from .wrappers.openai_controlled import ControlledOpenAI, wrap_openai
 
-__version__ = "1.1.0"
+__version__ = SDK_VERSION
 
 __all__ = [
     "__version__",
@@ -86,6 +170,10 @@ __all__ = [
     "has_registered_client",
     "is_initialized",
     "InvalidApiKeyError",
+    "InvalidControlConfigError",
+    "ControlConfig",
+    "ControlMode",
+    "ControlUnavailablePolicy",
     "track",
     "track_context",
     "current_context",
@@ -95,6 +183,36 @@ __all__ = [
     "buffer_size",
     "is_degraded",
     "report_usage",
+    "ready",
+    "ready_sync",
+    "reserve_usage",
+    "reserve_usage_sync",
+    "commit_usage",
+    "commit_usage_sync",
+    "release_usage",
+    "release_usage_sync",
+    "extend_usage",
+    "extend_usage_sync",
+    "ControlledAttemptContext",
+    "ControlledOperationOwnership",
+    "controlled_operation_ownership",
+    "current_controlled_attempt",
+    "current_controlled_operation",
+    "should_suppress_legacy_telemetry",
+    "ControlledUsageDecision",
+    "ControlledUsageIssue",
+    "ControlledUsageOutcome",
+    "ControlledUsageResult",
+    "ControlledUsageSettlement",
+    "ExactDecimalInput",
+    "controlled_exact_usage",
+    "controlled_exact_usage_sync",
+    "controlled_usage",
+    "controlled_usage_sync",
+    "ControlledOpenAI",
+    "ControlledAnthropic",
+    "wrap_openai",
+    "wrap_anthropic",
     "flush_non_llm_discoveries",
     "normalize_non_llm_matcher",
     "NonLlmConfig",
@@ -102,6 +220,14 @@ __all__ = [
     "NonLlmPolicyOverrideSource",
     "NonLlmToolContext",
     "NonLlmUsageExtractor",
+    "TAVILY_BASIC_SEARCH_CREDITS",
+    "TAVILY_SEARCH_COST_SOURCE_SLUG",
+    "TAVILY_SEARCH_METRIC",
+    "TAVILY_SEARCH_TOOL_NAME",
+    "TavilyAsyncSearchClient",
+    "TavilySyncSearchClient",
+    "controlled_tavily_search",
+    "controlled_tavily_search_sync",
     "verify_webhook",
     "sign_webhook",
     "SignWebhookResult",
@@ -111,6 +237,36 @@ __all__ = [
     "IngestResponse",
     "IngestError",
     "IngestWarning",
+    # Authoritative-control wire models
+    "BudgetCapabilitiesResponse",
+    "BudgetReservationRequest",
+    "BudgetReservationResponse",
+    "LlmBudgetReservationRequest",
+    "ToolBudgetReservationRequest",
+    "ReservedBudgetDecision",
+    "DeniedBudgetDecision",
+    "BypassedBudgetDecision",
+    "UnavailableBudgetDecision",
+    "BudgetRuleSnapshot",
+    "BudgetControlWarning",
+    "BudgetCommitRequest",
+    "LlmBudgetCommitRequest",
+    "ToolBudgetCommitRequest",
+    "BudgetCommitResponse",
+    "BudgetReleaseRequest",
+    "BudgetReleaseResponse",
+    "BudgetExtendRequest",
+    "BudgetExtendResponse",
+    "BudgetControlError",
+    "BudgetControlErrorResponse",
+    "PylvaControlUnavailableError",
+    "PylvaControlUnavailableReason",
+    "PylvaControlApiError",
+    "PylvaControlValidationError",
+    "PYLVA_CONTROL_UNAVAILABLE_CODE",
+    "PylvaStrictProviderError",
+    "StrictProviderReason",
+    "PYLVA_STRICT_PROVIDER_UNSUPPORTED_CODE",
     # B2a budget primitives
     "PylvaBudgetExceeded",
     "BudgetExceededSource",
@@ -126,6 +282,7 @@ def init(
     flush_interval: float = 5.0,
     local_mode: bool = False,
     non_llm: NonLlmConfig | Mapping[str, Any] | None = None,
+    control: ControlConfig | Mapping[str, Any] | None = None,
 ) -> None:
     """Configure the SDK and (re-)apply provider patches.
 
@@ -140,6 +297,7 @@ def init(
         flush_interval=flush_interval,
         local_mode=local_mode,
         non_llm=non_llm,
+        control=control,
     )
     configure_non_llm_policy(non_llm)
     try:

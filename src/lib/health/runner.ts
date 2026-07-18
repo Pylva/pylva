@@ -203,10 +203,10 @@ async function loadDailyAggregates(
        metric,
        count() AS event_count,
        sum(cost_usd) AS cost_usd
-     FROM cost_events
+     FROM cost_events_with_control
      WHERE builder_id = {builder_id:String}
-       AND timestamp >= {from:DateTime}
-       AND timestamp <= {to:DateTime}
+       AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
+       AND timestamp <= parseDateTime64BestEffort({to:String}, 3, 'UTC')
      GROUP BY day, provider, metric
      ORDER BY day ASC`,
     { from, to },

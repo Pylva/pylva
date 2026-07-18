@@ -14,7 +14,7 @@ vi.mock('../../src/lib/clickhouse/client.js', () => ({
   queryCostEvents: queryCostEventsMock,
 }));
 
-describe('dashboard customer daily aggregate reads', () => {
+describe('dashboard canonical legacy-plus-controlled reads', () => {
   let queries: typeof import('../../src/lib/clickhouse/dashboard-queries.js');
 
   beforeEach(async () => {
@@ -23,35 +23,27 @@ describe('dashboard customer daily aggregate reads', () => {
     queries = await import('../../src/lib/clickhouse/dashboard-queries.js');
   });
 
-  it('checks real-event existence from the demo-aware customer aggregate', async () => {
+  it('checks real-event existence once against the canonical mixed view', async () => {
     queryCostEventsMock.mockResolvedValue([{ has_real: 1 }]);
 
-    const result = await queries.hasAnyRealEvents(BUILDER_ID);
+    await expect(queries.hasAnyRealEvents(BUILDER_ID)).resolves.toBe(true);
 
-    expect(result).toBe(true);
     const sql = queryCostEventsMock.mock.calls[0]?.[1] as string;
-    expect(sql).toContain('FROM cost_customer_daily_agg');
+    expect(sql).toContain('FROM cost_events_with_control');
     expect(sql).toContain('is_demo = 0');
-    expect(sql).not.toContain('FROM cost_events');
+    expect(sql).toContain('LIMIT 1');
+    expect(sql).not.toContain('cost_customer_daily_agg');
     expect(queryCostEventsMock).toHaveBeenCalledTimes(1);
   });
 
-  it('falls back to raw events before the customer aggregate is backfilled', async () => {
-    queryCostEventsMock.mockResolvedValueOnce([]).mockResolvedValueOnce([{ has_real: 1 }]);
+  it('returns false without consulting a legacy-only aggregate fallback', async () => {
+    queryCostEventsMock.mockResolvedValue([]);
 
-    const result = await queries.hasAnyRealEvents(BUILDER_ID);
-
-    expect(result).toBe(true);
-    const aggregateSql = queryCostEventsMock.mock.calls[0]?.[1] as string;
-    const rawSql = queryCostEventsMock.mock.calls[1]?.[1] as string;
-    const rawOptions = queryCostEventsMock.mock.calls[1]?.[3] as { queryLabel?: string };
-    expect(aggregateSql).toContain('FROM cost_customer_daily_agg');
-    expect(rawSql).toContain('FROM cost_events');
-    expect(rawSql).toContain('is_demo = 0');
-    expect(rawOptions.queryLabel).toBe('dashboard.has_any_real_events_raw_fallback');
+    await expect(queries.hasAnyRealEvents(BUILDER_ID)).resolves.toBe(false);
+    expect(queryCostEventsMock).toHaveBeenCalledTimes(1);
   });
 
-  it('combines top end-user aggregates with exact boundary timestamp reads', async () => {
+  it('reads top end-users over the exact timestamp window from mixed events', async () => {
     queryCostEventsMock.mockResolvedValue([
       { customer_id: COMPOSITE_ID, total_spend_usd: '5.00', event_count: '10' },
     ]);
@@ -60,20 +52,14 @@ describe('dashboard customer daily aggregate reads', () => {
 
     expect(rows[0]).toMatchObject({ customer_id: EXTERNAL_ID, total_spend_usd: 5 });
     const sql = queryCostEventsMock.mock.calls[0]?.[1] as string;
-    expect(sql).toContain('FROM cost_customer_daily_agg');
-    expect(sql).toContain('FROM cost_events');
-    expect(sql).toContain('day > toDate({from:DateTime})');
-    expect(sql).toContain('day < toDate({to:DateTime})');
-    expect(sql).toContain('timestamp >= {from:DateTime}');
-    expect(sql).toContain('timestamp <= {to:DateTime}');
-    expect(sql).toContain('toDate(timestamp) = toDate({from:DateTime})');
-    expect(sql).toContain('toDate(timestamp) = toDate({to:DateTime})');
-    expect(sql).not.toContain('day >= toDate({from:DateTime})');
-    expect(sql).not.toContain('day <= toDate({to:DateTime})');
+    expect(sql).toContain('FROM cost_events_with_control');
+    expect(sql).toContain("timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')");
+    expect(sql).toContain("timestamp <= parseDateTime64BestEffort({to:String}, 3, 'UTC')");
     expect(sql).toContain('is_demo = 0');
+    expect(sql).not.toContain('cost_customer_daily_agg');
   });
 
-  it('combines full-day aggregates with exact boundary timestamp reads', async () => {
+  it('reads paginated customer summaries from the same canonical view', async () => {
     queryCostEventsMock.mockResolvedValue([
       {
         customer_id: COMPOSITE_ID,
@@ -97,32 +83,14 @@ describe('dashboard customer daily aggregate reads', () => {
     });
     const sql = queryCostEventsMock.mock.calls[0]?.[1] as string;
     const params = queryCostEventsMock.mock.calls[0]?.[2] as Record<string, unknown>;
-    expect(sql).toContain('FROM cost_customer_daily_agg');
-    expect(sql).toContain('FROM cost_events');
-    expect(sql).toContain('day > toDate({from:DateTime})');
-    expect(sql).toContain('day < toDate({to:DateTime})');
-    expect(sql).toContain('timestamp >= {from:DateTime}');
-    expect(sql).toContain('timestamp <= {to:DateTime}');
-    expect(sql).toContain('toDate(timestamp) = toDate({from:DateTime})');
-    expect(sql).toContain('toDate(timestamp) = toDate({to:DateTime})');
-    expect(sql).not.toContain('day >= toDate({from:DateTime})');
-    expect(sql).not.toContain('day <= toDate({to:DateTime})');
+    expect(sql).toContain('FROM cost_events_with_control');
     expect(sql).toContain('OFFSET {offset:UInt32}');
+    expect(sql).not.toContain('cost_customer_daily_agg');
     expect(params).toMatchObject({ limit: 100, offset: 20 });
   });
-});
 
-describe('dashboard model daily aggregate reads', () => {
-  let queries: typeof import('../../src/lib/clickhouse/dashboard-queries.js');
-
-  beforeEach(async () => {
-    vi.resetModules();
-    queryCostEventsMock.mockReset();
-    queries = await import('../../src/lib/clickhouse/dashboard-queries.js');
-  });
-
-  it('combines trusted full-day model aggregates with exact boundary timestamp reads', async () => {
-    queryCostEventsMock.mockResolvedValueOnce([{ status: 'trusted' }]).mockResolvedValueOnce([
+  it('reads the model breakdown once without a legacy aggregate trust probe', async () => {
+    queryCostEventsMock.mockResolvedValue([
       {
         provider: 'openai',
         model: 'gpt-4o-mini',
@@ -144,111 +112,27 @@ describe('dashboard model daily aggregate reads', () => {
       call_count: 5,
       avg_usd_per_call: 2.5,
     });
-    const trustSql = queryCostEventsMock.mock.calls[0]?.[1] as string;
-    const trustOptions = queryCostEventsMock.mock.calls[0]?.[3] as {
-      queryLabel?: string;
-      timeoutMs?: number;
-    };
-    const sql = queryCostEventsMock.mock.calls[1]?.[1] as string;
-    const options = queryCostEventsMock.mock.calls[1]?.[3] as {
+    const sql = queryCostEventsMock.mock.calls[0]?.[1] as string;
+    const options = queryCostEventsMock.mock.calls[0]?.[3] as {
       queryLabel?: string;
       queryId?: string;
       timeoutMs?: number;
     };
-    expect(trustSql).toContain('FROM cost_model_daily_agg_backfill_status');
-    expect(trustOptions).toMatchObject({
-      queryLabel: 'dashboard.model_breakdown_aggregate_trust',
-      timeoutMs: 8_000,
-    });
-    expect(sql).toContain('FROM cost_model_daily_agg');
-    expect(sql).toContain('FROM cost_events');
-    expect(sql).toContain('day > toDate({from:DateTime})');
-    expect(sql).toContain('day < toDate({to:DateTime})');
-    expect(sql).toContain('timestamp >= {from:DateTime}');
-    expect(sql).toContain('timestamp <= {to:DateTime}');
-    expect(sql).toContain('toDate(timestamp) = toDate({from:DateTime})');
-    expect(sql).toContain('toDate(timestamp) = toDate({to:DateTime})');
+    expect(sql).toContain('FROM cost_events_with_control');
+    expect(sql).not.toContain('cost_model_daily_agg');
     expect(sql).toContain('is_demo = 0');
-    expect(sql).not.toContain('cost_daily_agg_v2');
-    expect(options).toMatchObject({
-      queryLabel: 'dashboard.model_breakdown',
-      timeoutMs: 8_000,
-    });
+    expect(options).toMatchObject({ queryLabel: 'dashboard.model_breakdown', timeoutMs: 8_000 });
     expect(options.queryId).toMatch(/^dashboard\.model_breakdown\./);
+    expect(queryCostEventsMock).toHaveBeenCalledTimes(1);
   });
 
-  it('falls back to exact raw events when the model aggregate is untrusted', async () => {
-    queryCostEventsMock.mockResolvedValueOnce([{ status: 'untrusted' }]).mockResolvedValueOnce([
-      {
-        provider: 'anthropic',
-        model: 'claude-3-haiku',
-        total_spend_usd: '4.00',
-        tokens_in: '20',
-        tokens_out: '10',
-        call_count: '2',
-      },
-    ]);
-
-    const rows = await queries.getModelBreakdown(BUILDER_ID, RANGE, { includeDemo: false });
-
-    expect(rows[0]).toMatchObject({
-      provider: 'anthropic',
-      model: 'claude-3-haiku',
-      total_spend_usd: 4,
-      tokens_in: 20,
-      tokens_out: 10,
-      call_count: 2,
-      avg_usd_per_call: 2,
-    });
-    const sql = queryCostEventsMock.mock.calls[1]?.[1] as string;
-    const options = queryCostEventsMock.mock.calls[1]?.[3] as {
-      queryLabel?: string;
-      queryId?: string;
-      timeoutMs?: number;
-    };
-    expect(sql).toContain('FROM cost_events');
-    expect(sql).not.toContain('FROM cost_model_daily_agg');
-    expect(sql).toContain('timestamp >= {from:DateTime}');
-    expect(sql).toContain('timestamp <= {to:DateTime}');
-    expect(sql).not.toContain('toDate(timestamp) = toDate({from:DateTime})');
-    expect(sql).not.toContain('toDate(timestamp) = toDate({to:DateTime})');
-    expect(sql).toContain('is_demo = 0');
-    expect(options).toMatchObject({
-      queryLabel: 'dashboard.model_breakdown',
-      timeoutMs: 8_000,
-    });
-    expect(options.queryId).toMatch(/^dashboard\.model_breakdown\./);
-  });
-
-  it('falls back to exact raw events when the trust marker is missing', async () => {
-    queryCostEventsMock.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
-
-    await queries.getModelBreakdown(BUILDER_ID, RANGE, { includeDemo: false });
-
-    const sql = queryCostEventsMock.mock.calls[1]?.[1] as string;
-    expect(sql).toContain('FROM cost_events');
-    expect(sql).not.toContain('FROM cost_model_daily_agg');
-  });
-
-  it('falls back to exact raw events when the trust probe fails', async () => {
-    queryCostEventsMock
-      .mockRejectedValueOnce(new Error('status table missing'))
-      .mockResolvedValueOnce([]);
-
-    await queries.getModelBreakdown(BUILDER_ID, RANGE, { includeDemo: false });
-
-    const sql = queryCostEventsMock.mock.calls[1]?.[1] as string;
-    expect(sql).toContain('FROM cost_events');
-    expect(sql).not.toContain('FROM cost_model_daily_agg');
-  });
-
-  it('does not apply the real-data filter when demo rows are explicitly included', async () => {
-    queryCostEventsMock.mockResolvedValueOnce([{ status: 'trusted' }]).mockResolvedValueOnce([]);
+  it('omits only the demo predicate when demo rows are explicitly requested', async () => {
+    queryCostEventsMock.mockResolvedValue([]);
 
     await queries.getModelBreakdown(BUILDER_ID, RANGE, { includeDemo: true });
 
-    const sql = queryCostEventsMock.mock.calls[1]?.[1] as string;
-    expect(sql).toContain('FROM cost_model_daily_agg');
+    const sql = queryCostEventsMock.mock.calls[0]?.[1] as string;
+    expect(sql).toContain('FROM cost_events_with_control');
     expect(sql).not.toContain('is_demo = 0');
   });
 });

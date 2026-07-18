@@ -106,7 +106,7 @@ describe('telemetry HTTP exporter', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(new Response('', { status: 401 }) as Response);
+      .mockImplementation(async () => new Response('', { status: 401 }));
     init({ apiKey: VALID_KEY, endpoint: 'http://mock', batchSize: 1, flushInterval: 60_000 });
     enqueue(makeEvent(makeSpanId(42)));
     await flush();
@@ -119,26 +119,61 @@ describe('telemetry HTTP exporter', () => {
     (fetchSpy as any).mockRestore?.();
   });
 
+  it('resumes telemetry after re-init following a 401', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let telemetryRequests = 0;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const href = input instanceof Request ? input.url : String(input);
+      if (!new URL(href).pathname.endsWith('/api/v1/events')) {
+        return new Response(JSON.stringify({ models: [] }), { status: 200 });
+      }
+      telemetryRequests += 1;
+      return telemetryRequests === 1
+        ? new Response('', { status: 401 })
+        : new Response(JSON.stringify({ accepted: 1, rejected: 0 }), { status: 200 });
+    });
+    init({ apiKey: VALID_KEY, endpoint: 'http://mock', batchSize: 100, flushInterval: 60_000 });
+    enqueue(makeEvent(makeSpanId(45)));
+    await flush();
+    expect(isDegraded()).toBe(true);
+
+    init({
+      apiKey: 'pv_live_11223344_' + 'b'.repeat(32),
+      endpoint: 'http://mock',
+      batchSize: 100,
+      flushInterval: 60_000,
+    });
+    expect(isDegraded()).toBe(false);
+    enqueue(makeEvent(makeSpanId(46)));
+    await flush();
+
+    expect(telemetryRequests).toBe(2);
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(bufferSize()).toBe(0);
+    warnSpy.mockRestore();
+  });
+
   it('applies backend budget_exceeded flags to the local accumulator', async () => {
     const periodStart = '2026-04-01T00:00:00.000Z';
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          accepted: 1,
-          rejected: 0,
-          budget_exceeded: [
-            {
-              rule_id: 'rule-1',
-              customer_id: 'cust_test',
-              limit_usd: 10,
-              accumulated_usd: 12,
-              period: 'day',
-              period_start: periodStart,
-            },
-          ],
-        }),
-        { status: 200 },
-      ) as Response,
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({
+            accepted: 1,
+            rejected: 0,
+            budget_exceeded: [
+              {
+                rule_id: 'rule-1',
+                customer_id: 'cust_test',
+                limit_usd: 10,
+                accumulated_usd: 12,
+                period: 'day',
+                period_start: periodStart,
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
     );
     init({ apiKey: VALID_KEY, endpoint: 'http://mock', batchSize: 100, flushInterval: 60_000 });
     enqueue(makeEvent(makeSpanId(43)));
@@ -159,36 +194,37 @@ describe('telemetry HTTP exporter', () => {
 
   it('ignores malformed budget_exceeded flags without corrupting the accumulator', async () => {
     const periodStart = '2026-04-01T00:00:00.000Z';
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          accepted: 1,
-          rejected: 0,
-          budget_exceeded: [
-            null,
-            {
-              rule_id: 'rule-2',
-              customer_id: 'cust_test',
-              period_start: periodStart,
-            },
-            {
-              rule_id: 'rule-2',
-              customer_id: 'cust_test',
-              limit_usd: '10',
-              period_start: periodStart,
-            },
-            {
-              rule_id: 'rule-2',
-              customer_id: 'cust_test',
-              limit_usd: 10,
-              accumulated_usd: 12,
-              period: 'day',
-              period_start: periodStart,
-            },
-          ],
-        }),
-        { status: 200 },
-      ) as Response,
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({
+            accepted: 1,
+            rejected: 0,
+            budget_exceeded: [
+              null,
+              {
+                rule_id: 'rule-2',
+                customer_id: 'cust_test',
+                period_start: periodStart,
+              },
+              {
+                rule_id: 'rule-2',
+                customer_id: 'cust_test',
+                limit_usd: '10',
+                period_start: periodStart,
+              },
+              {
+                rule_id: 'rule-2',
+                customer_id: 'cust_test',
+                limit_usd: 10,
+                accumulated_usd: 12,
+                period: 'day',
+                period_start: periodStart,
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
     );
     init({ apiKey: VALID_KEY, endpoint: 'http://mock', batchSize: 100, flushInterval: 60_000 });
     enqueue(makeEvent(makeSpanId(44)));

@@ -21,6 +21,7 @@ import {
   readLedger,
   withMigrationAdvisoryLock,
 } from '../scripts/db-migrate-core.js';
+import { parseMigrationDatabaseEnv } from '../scripts/migration-database-env.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -111,8 +112,6 @@ export async function commandWithClickHouseRetry(
 }
 
 async function setup() {
-  const databaseUrl =
-    process.env['DATABASE_URL'] ?? 'postgresql://pylva:pylva_dev@localhost:5432/pylva';
   const clickhouseUrl = process.env['CLICKHOUSE_URL'] ?? 'http://localhost:8123';
 
   // --- PostgreSQL Migrations ---
@@ -121,6 +120,7 @@ async function setup() {
     console.log(`[PostgreSQL] SKIPPED — ${skipPg.reason}.\n`);
   } else {
     console.log('Running PostgreSQL migrations...');
+    const { databaseUrl } = parseMigrationDatabaseEnv(process.env);
     const sql = postgres(databaseUrl);
     const migrationsDir = path.join(__dirname, 'migrations');
     let exitCode = 0;

@@ -15,14 +15,20 @@ permissions:
   pull-requests: read
 
 env:
-  DATABASE_URL: postgresql://pylva:pylva_test@localhost:5432/pylva_test
+  DATABASE_URL: postgresql://pylva_app_ci:pylva_app_ci_test@localhost:5432/pylva_test
+  BUDGET_CONTROL_DATABASE_URL: postgresql://pylva_budget_control_ci:pylva_budget_control_ci_test@localhost:5432/pylva_test
+  ALLOW_BUDGET_CONTROL_DATABASE_URL_FALLBACK: 'false'
   CLICKHOUSE_URL: http://default:test@localhost:8123
+  BUDGET_PROJECTION_CLICKHOUSE_URL: http://default:test@localhost:8123
+  ALLOW_BUDGET_PROJECTION_CLICKHOUSE_URL_FALLBACK: 'true'
   REDIS_URL: redis://localhost:6379
   JWT_PRIVATE_KEY: /tmp/pylva-ci-private.pem
   JWT_PUBLIC_KEY: /tmp/pylva-ci-public.pem
   ARGON2_SECRET: ci-test-secret-must-be-32-bytes-long!!
   SESSION_COOKIE_SECURE: 'false'
   E2E_DASHBOARD: 'true'
+  ENABLE_AUTHORITATIVE_BUDGET_CONTROL: 'false'
+  NODE_ENV: test
 
 jobs:
   ci-e2e-smoke:
@@ -65,7 +71,7 @@ jobs:
           --health-timeout 3s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -102,10 +108,10 @@ jobs:
         if: steps.scope.outputs.should_run != 'true'
         run: echo "Skipping E2E smoke; no e2e label or frontend/auth/marketing path changes."
 
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         if: steps.scope.outputs.should_run == 'true'
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         if: steps.scope.outputs.should_run == 'true'
         with:
           node-version: 20
@@ -114,6 +120,13 @@ jobs:
       - name: Install dependencies
         if: steps.scope.outputs.should_run == 'true'
         run: pnpm install --frozen-lockfile
+
+      - name: Bootstrap isolated non-superuser migration principal
+        if: steps.scope.outputs.should_run == 'true'
+        env:
+          CI_POSTGRES_ADMIN_URL: postgresql://pylva:pylva_test@localhost:5432/pylva_test
+          MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
+        run: pnpm exec tsx scripts/ci/bootstrap-authoritative-budget-migration-role.ts
 
       - name: Install Playwright browsers
         if: steps.scope.outputs.should_run == 'true'
@@ -144,7 +157,22 @@ jobs:
 
       - name: Run migrations
         if: steps.scope.outputs.should_run == 'true'
+        env:
+          MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
         run: pnpm db:setup
+
+      - name: Provision ordinary general-app runtime login
+        if: steps.scope.outputs.should_run == 'true'
+        env:
+          MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
+          GENERAL_APP_DATABASE_URL: postgresql://pylva_app_ci:pylva_app_ci_test@localhost:5432/pylva_test
+        run: pnpm exec tsx scripts/ci/provision-general-app-runtime.ts
+
+      - name: Provision isolated authoritative PostgreSQL runtime login
+        if: steps.scope.outputs.should_run == 'true'
+        env:
+          MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
+        run: pnpm exec tsx scripts/ci/provision-authoritative-budget-runtime.ts
 
       - name: ClickHouse doctor
         if: steps.scope.outputs.should_run == 'true'
@@ -182,7 +210,7 @@ jobs:
 
       - name: Upload Playwright report
         if: failure() && steps.scope.outputs.should_run == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report
           path: |

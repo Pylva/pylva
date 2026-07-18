@@ -55,7 +55,7 @@ vi.mock('@/lib/db/audit-partitions', () => ({
   isValidPartitionSpec: mocks.isValidPartitionSpec,
 }));
 
-const { POST } = await import('../../src/app/api/cron/ensure-audit-partitions/route.js');
+const { GET, POST } = await import('../../src/app/api/cron/ensure-audit-partitions/route.js');
 
 function makeRequest(authorization?: string): import('next/server.js').NextRequest {
   const headers: Record<string, string> = {};
@@ -66,14 +66,12 @@ function makeRequest(authorization?: string): import('next/server.js').NextReque
   }) as unknown as import('next/server.js').NextRequest;
 }
 
-function duplicateTableError(): Error & { code: string } {
-  const err = new Error('relation already exists') as Error & { code: string };
-  err.code = '42P07';
-  return err;
-}
-
 async function authorizedPost(): Promise<Response> {
   return POST(makeRequest('Bearer test-secret-min-32-chars-aaaaaaaaaaa'));
+}
+
+function expectNoStore(response: Response): void {
+  expect(response.headers.get('Cache-Control')).toBe('no-store');
 }
 
 describe('POST /api/cron/ensure-audit-partitions', () => {
@@ -95,6 +93,7 @@ describe('POST /api/cron/ensure-audit-partitions', () => {
     const response = await POST(makeRequest());
 
     expect(response.status).toBe(401);
+    expectNoStore(response);
     expect(mocks.dbExecute).not.toHaveBeenCalled();
   });
 
@@ -102,17 +101,29 @@ describe('POST /api/cron/ensure-audit-partitions', () => {
     const response = await POST(makeRequest('Bearer wrong-token'));
 
     expect(response.status).toBe(401);
+    expectNoStore(response);
+    expect(mocks.dbExecute).not.toHaveBeenCalled();
+  });
+
+  it('marks an unauthorized GET response as no-store', async () => {
+    const response = await GET(makeRequest());
+
+    expect(response.status).toBe(401);
+    expectNoStore(response);
     expect(mocks.dbExecute).not.toHaveBeenCalled();
   });
 
   it('counts absent partitions as created on a fresh run', async () => {
-    mocks.dbExecute.mockResolvedValue([]);
+    mocks.dbExecute
+      .mockResolvedValueOnce([{ created: true }])
+      .mockResolvedValueOnce([{ created: true }]);
 
     const response = await authorizedPost();
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(mocks.dbExecute).toHaveBeenCalledTimes(3);
+    expectNoStore(response);
+    expect(mocks.dbExecute).toHaveBeenCalledTimes(2);
     expect(body).toEqual({
       requested: 2,
       ensured: 2,
@@ -124,15 +135,16 @@ describe('POST /api/cron/ensure-audit-partitions', () => {
   });
 
   it('counts steady-state partitions as existing without issuing create DDL', async () => {
-    mocks.dbExecute.mockResolvedValueOnce(
-      PARTITION_SPECS.map((spec) => ({ partition_name: spec.name })),
-    );
+    mocks.dbExecute
+      .mockResolvedValueOnce([{ created: false }])
+      .mockResolvedValueOnce([{ created: false }]);
 
     const response = await authorizedPost();
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(mocks.dbExecute).toHaveBeenCalledTimes(1);
+    expectNoStore(response);
+    expect(mocks.dbExecute).toHaveBeenCalledTimes(2);
     expect(body).toEqual({
       requested: 2,
       ensured: 2,
@@ -145,8 +157,7 @@ describe('POST /api/cron/ensure-audit-partitions', () => {
 
   it('reports 500 when a partition create fails so EventBridge retries', async () => {
     mocks.dbExecute
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ created: true }])
       .mockRejectedValueOnce(new Error('boom'));
 
     const response = await authorizedPost();
@@ -155,6 +166,7 @@ describe('POST /api/cron/ensure-audit-partitions', () => {
     };
 
     expect(response.status).toBe(500);
+    expectNoStore(response);
     expect(body.error?.message).toContain('ensured 1 of 2');
     expect(mocks.warn).toHaveBeenCalledTimes(1);
     expect(mocks.error).toHaveBeenCalledWith(
@@ -170,16 +182,16 @@ describe('POST /api/cron/ensure-audit-partitions', () => {
     );
   });
 
-  it('treats duplicate-table races as existing partitions', async () => {
+  it('treats a serialized existing result as an existing partition', async () => {
     mocks.dbExecute
-      .mockResolvedValueOnce([])
-      .mockRejectedValueOnce(duplicateTableError())
-      .mockResolvedValueOnce([]);
+      .mockResolvedValueOnce([{ created: false }])
+      .mockResolvedValueOnce([{ created: true }]);
 
     const response = await authorizedPost();
     const body = await response.json();
 
     expect(response.status).toBe(200);
+    expectNoStore(response);
     expect(body).toEqual({
       requested: 2,
       ensured: 2,
@@ -199,7 +211,25 @@ describe('POST /api/cron/ensure-audit-partitions', () => {
         to: '2026-08-01',
       },
     ]);
-    mocks.dbExecute.mockResolvedValueOnce([]);
+    const response = await authorizedPost();
+    const body = (await response.json()) as {
+      error?: { message?: string };
+    };
+
+    expect(response.status).toBe(500);
+    expectNoStore(response);
+    expect(mocks.dbExecute).not.toHaveBeenCalled();
+    expect(body.error?.message).toContain('ensured 0 of 1');
+    expect(mocks.error).toHaveBeenCalledWith(
+      { partition: 'invalid_partition' },
+      'refusing malformed audit_log partition spec',
+    );
+  });
+
+  it('marks an unexpected internal crash as no-store', async () => {
+    mocks.auditLogPartitionSpecs.mockImplementationOnce(() => {
+      throw new Error('unexpected crash');
+    });
 
     const response = await authorizedPost();
     const body = (await response.json()) as {
@@ -207,11 +237,32 @@ describe('POST /api/cron/ensure-audit-partitions', () => {
     };
 
     expect(response.status).toBe(500);
-    expect(mocks.dbExecute).toHaveBeenCalledTimes(1);
-    expect(body.error?.message).toContain('ensured 0 of 1');
+    expectNoStore(response);
+    expect(body.error?.message).toBe('ensure-audit-partitions crashed');
+    expect(mocks.dbExecute).not.toHaveBeenCalled();
     expect(mocks.error).toHaveBeenCalledWith(
-      { partition: 'invalid_partition' },
-      'refusing malformed audit_log partition spec',
+      { error: 'unexpected crash' },
+      'ensure-audit-partitions crashed',
     );
+  });
+
+  it('marks GET success responses as no-store without changing the route result', async () => {
+    mocks.dbExecute
+      .mockResolvedValueOnce([{ created: true }])
+      .mockResolvedValueOnce([{ created: false }]);
+
+    const response = await GET(makeRequest('Bearer test-secret-min-32-chars-aaaaaaaaaaa'));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expectNoStore(response);
+    expect(body).toEqual({
+      requested: 2,
+      ensured: 2,
+      created: 1,
+      existing: 1,
+      failed: 0,
+      invalid: 0,
+    });
   });
 });

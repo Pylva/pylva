@@ -5,6 +5,8 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
+const configState = vi.hoisted(() => ({ generation: 1 }));
+
 vi.mock('../src/wrappers/_load.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/wrappers/_load.js')>();
   return { ...actual, loadPeer: vi.fn() };
@@ -22,6 +24,7 @@ vi.mock('../src/core/budget_accumulator.js', () => ({
 
 vi.mock('../src/core/config.js', () => ({
   isInitialized: () => true,
+  getConfigGeneration: () => configState.generation,
 }));
 
 vi.mock('../src/core/telemetry.js', () => ({
@@ -49,6 +52,7 @@ function buildFakePeer(create: FakeCreate): { default: FakeAnthropicCtor } {
 }
 
 beforeEach(() => {
+  configState.generation = 1;
   _resetAnthropicPatchForTests();
   vi.mocked(enqueue).mockClear();
   vi.mocked(loadPeer).mockReset();
@@ -103,6 +107,27 @@ describe('applyAnthropicPatch', () => {
     const event = vi.mocked(enqueue).mock.calls[0]?.[0] as { status: string; provider: string };
     expect(event.status).toBe('failure');
     expect(event.provider).toBe('anthropic');
+  });
+
+  it('drops a delayed old-identity failure instead of enqueuing it for the new tenant', async () => {
+    let rejectCreate!: (reason: unknown) => void;
+    const create = vi.fn(
+      () =>
+        new Promise<unknown>((_resolve, reject) => {
+          rejectCreate = reject;
+        }),
+    );
+    const peer = buildFakePeer(create);
+    vi.mocked(loadPeer).mockReturnValue(peer);
+
+    applyAnthropicPatch();
+    const client = new peer.default();
+    const pending = client.messages.create({ model: 'claude-3-5-sonnet-20241022' });
+    configState.generation += 1;
+    rejectCreate(new Error('old tenant upstream failure'));
+
+    await expect(pending).rejects.toThrow('old tenant upstream failure');
+    expect(vi.mocked(enqueue)).not.toHaveBeenCalled();
   });
 
   it('falls through to original SDK when args[0] is not an object (R1)', async () => {

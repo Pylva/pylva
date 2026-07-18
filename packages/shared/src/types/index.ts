@@ -13,3 +13,4 @@ export * from './portal.js';
 export * from './simulator.js';
 export * from './realtime.js';
 export * from './cost-sources.js';
+export * from './budget-control.js';

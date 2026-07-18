@@ -17,7 +17,8 @@
 // after `recovery_probe_after_seconds` on backup, the wrapper attempts
 // one primary call; on success the recovery window starts.
 
-import type { ReliabilityFailoverConfig } from '@pylva/shared';
+import type { ReliabilityFailoverConfig } from '@pylva/shared/rules';
+import { registerIdentityResetter } from './identity_registry.js';
 
 export interface FailoverEventResult {
   /** The provider the wrapper should target on the next call. */
@@ -150,3 +151,5 @@ export function isActive(cfg: ReliabilityFailoverConfig): boolean {
 export function _resetFailoverForTests(): void {
   STATE.clear();
 }
+
+registerIdentityResetter(_resetFailoverForTests);

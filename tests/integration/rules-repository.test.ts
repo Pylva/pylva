@@ -3,26 +3,44 @@
 // filters, enforcement defaults, status promotion stamps, and the
 // dangling-external-id semantics rules rely on.
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import crypto from 'node:crypto';
-import postgres from 'postgres';
+import type { Sql } from 'postgres';
 import { RuleEnforcement, RuleStatus, RuleType, type Rule } from '@pylva/shared';
-import {
-  createRule,
-  deleteRule,
-  getRule,
-  listActiveRulesForCustomer,
-  listRules,
-  markRuleTriggered,
-  promoteRuleStatus,
-  toggleRule,
-  updateRule,
-} from '../../src/lib/rules/repository.js';
+import { applyMigrationsThrough, createScratchDb, type ScratchDb } from '../helpers/scratch-db.js';
 
-const DATABASE_URL =
-  process.env['DATABASE_URL'] ?? 'postgresql://pylva:pylva_dev@localhost:5432/pylva';
+// This repository suite uses the local PostgreSQL URL and never exercises the
+// production Secrets Manager password refresher. Keep that unrelated optional
+// AWS dependency out of the focused integration-test module graph.
+vi.mock('../../src/lib/db/credentials.js', () => ({ getDbPassword: vi.fn() }));
 
-let sql: ReturnType<typeof postgres>;
+type RulesRepository = typeof import('../../src/lib/rules/repository.js');
+
+const ORIGINAL_DATABASE_URL = process.env['DATABASE_URL'];
+const ORIGINAL_MIGRATION_DATABASE_URL = process.env['MIGRATION_DATABASE_URL'];
+const ORIGINAL_BUDGET_CONTROL_DATABASE_URL = process.env['BUDGET_CONTROL_DATABASE_URL'];
+const ORIGINAL_BUDGET_CONTROL_SECRET_ARN = process.env['BUDGET_CONTROL_DB_RUNTIME_USER_SECRET_ARN'];
+const ORIGINAL_ALLOW_BUDGET_CONTROL_FALLBACK =
+  process.env['ALLOW_BUDGET_CONTROL_DATABASE_URL_FALLBACK'];
+
+function restoreEnvironment(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
+let scratch: ScratchDb | undefined;
+let sql: Sql;
+let closeDb: (() => Promise<void>) | undefined;
+let closeBudgetControlDb: (() => Promise<void>) | undefined;
+let createRule: RulesRepository['createRule'];
+let deleteRule: RulesRepository['deleteRule'];
+let getRule: RulesRepository['getRule'];
+let listActiveRulesForCustomer: RulesRepository['listActiveRulesForCustomer'];
+let listRules: RulesRepository['listRules'];
+let markRuleTriggered: RulesRepository['markRuleTriggered'];
+let promoteRuleStatus: RulesRepository['promoteRuleStatus'];
+let toggleRule: RulesRepository['toggleRule'];
+let updateRule: RulesRepository['updateRule'];
 let builderA = '';
 let builderB = '';
 
@@ -51,7 +69,50 @@ function budgetConfig(limit = 5): Record<string, unknown> {
 }
 
 beforeAll(async () => {
-  sql = postgres(DATABASE_URL);
+  const candidate = await createScratchDb({ prefix: 'rules_repository' });
+  try {
+    await applyMigrationsThrough(candidate, '051');
+    process.env['DATABASE_URL'] = candidate.url;
+    process.env['ALLOW_BUDGET_CONTROL_DATABASE_URL_FALLBACK'] = 'true';
+    // Keep this disposable local integration suite pinned to its scratch
+    // database even when the parent shell has production credentials set.
+    delete process.env['BUDGET_CONTROL_DATABASE_URL'];
+    delete process.env['BUDGET_CONTROL_DB_RUNTIME_USER_SECRET_ARN'];
+    delete process.env['MIGRATION_DATABASE_URL'];
+    const repository = await import('../../src/lib/rules/repository.js');
+    ({
+      createRule,
+      deleteRule,
+      getRule,
+      listActiveRulesForCustomer,
+      listRules,
+      markRuleTriggered,
+      promoteRuleStatus,
+      toggleRule,
+      updateRule,
+    } = repository);
+    ({ closeDb } = await import('../../src/lib/db/client.js'));
+    ({ closeBudgetControlDb } = await import('../../src/lib/budget-control/client.js'));
+    scratch = candidate;
+    sql = candidate.sql;
+  } catch (error) {
+    await closeBudgetControlDb?.();
+    await closeDb?.();
+    await candidate.drop();
+    restoreEnvironment('DATABASE_URL', ORIGINAL_DATABASE_URL);
+    restoreEnvironment('MIGRATION_DATABASE_URL', ORIGINAL_MIGRATION_DATABASE_URL);
+    restoreEnvironment('BUDGET_CONTROL_DATABASE_URL', ORIGINAL_BUDGET_CONTROL_DATABASE_URL);
+    restoreEnvironment(
+      'BUDGET_CONTROL_DB_RUNTIME_USER_SECRET_ARN',
+      ORIGINAL_BUDGET_CONTROL_SECRET_ARN,
+    );
+    restoreEnvironment(
+      'ALLOW_BUDGET_CONTROL_DATABASE_URL_FALLBACK',
+      ORIGINAL_ALLOW_BUDGET_CONTROL_FALLBACK,
+    );
+    throw error;
+  }
+
   builderA = await createBuilder('rules-repo-a');
   builderB = await createBuilder('rules-repo-b');
   await seedCustomer(builderA, 'cust_x');
@@ -60,8 +121,20 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await sql`DELETE FROM builders WHERE id IN (${builderA}, ${builderB})`;
-  await sql.end();
+  await closeBudgetControlDb?.();
+  await closeDb?.();
+  await scratch?.drop();
+  restoreEnvironment('DATABASE_URL', ORIGINAL_DATABASE_URL);
+  restoreEnvironment('MIGRATION_DATABASE_URL', ORIGINAL_MIGRATION_DATABASE_URL);
+  restoreEnvironment('BUDGET_CONTROL_DATABASE_URL', ORIGINAL_BUDGET_CONTROL_DATABASE_URL);
+  restoreEnvironment(
+    'BUDGET_CONTROL_DB_RUNTIME_USER_SECRET_ARN',
+    ORIGINAL_BUDGET_CONTROL_SECRET_ARN,
+  );
+  restoreEnvironment(
+    'ALLOW_BUDGET_CONTROL_DATABASE_URL_FALLBACK',
+    ORIGINAL_ALLOW_BUDGET_CONTROL_FALLBACK,
+  );
 });
 
 describe('createRule enforcement defaults', () => {
@@ -235,7 +308,7 @@ describe('rule lifecycle mutations', () => {
     await deleteRule(builderA, draft.id);
   });
 
-  it('retarget round-trip: cust_x -> cust_y -> all customers', async () => {
+  it('rejects retargeting an authoritative identity without a partial mutable write', async () => {
     const rule = await createRule({
       builder_id: builderA,
       type: RuleType.BUDGET_LIMIT,
@@ -244,18 +317,14 @@ describe('rule lifecycle mutations', () => {
       config: budgetConfig(),
     });
 
-    const toY = await updateRule(builderA, rule.id, { customer_id: 'cust_y' });
-    expect(toY?.customer_id).toBe('cust_y');
-    expect((await listActiveRulesForCustomer(builderA, 'cust_x')).map((r) => r.id)).not.toContain(
-      rule.id,
+    await expect(updateRule(builderA, rule.id, { customer_id: 'cust_y' })).rejects.toThrow(
+      'require a new budget rule identity',
     );
-    expect((await listActiveRulesForCustomer(builderA, 'cust_y')).map((r) => r.id)).toContain(
-      rule.id,
-    );
-
-    const toAll = await updateRule(builderA, rule.id, { customer_id: null });
-    expect(toAll?.customer_id).toBeNull();
+    expect((await getRule(builderA, rule.id))?.customer_id).toBe('cust_x');
     expect((await listActiveRulesForCustomer(builderA, 'cust_x')).map((r) => r.id)).toContain(
+      rule.id,
+    );
+    expect((await listActiveRulesForCustomer(builderA, 'cust_y')).map((r) => r.id)).not.toContain(
       rule.id,
     );
     await deleteRule(builderA, rule.id);

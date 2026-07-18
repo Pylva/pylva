@@ -14,6 +14,8 @@
 // Pylva instances in the same process share the registry — the last
 // registered client wins per provider.
 
+import { registerIdentityResetter } from './identity_registry.js';
+
 export type RegisteredProvider = string;
 
 const registry = new Map<string, unknown>();
@@ -41,3 +43,5 @@ export function hasRegisteredClient(provider: string): boolean {
 export function _resetClientRegistry(): void {
   registry.clear();
 }
+
+registerIdentityResetter(_resetClientRegistry);

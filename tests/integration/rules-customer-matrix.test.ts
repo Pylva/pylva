@@ -17,12 +17,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import crypto from 'node:crypto';
 import postgres from 'postgres';
 import { NextRequest } from 'next/server.js';
-import {
-  RuleEnforcement,
-  RuleStatus,
-  RuleType,
-  type Rule,
-} from '@pylva/shared';
+import { RuleEnforcement, RuleStatus, RuleType, type Rule } from '@pylva/shared';
 import { queryCostEvents } from '../../src/lib/clickhouse/client.js';
 import { handleTelemetryIngest } from '../../src/lib/ingest/public-handler.js';
 import { resetPricingCaches } from '../../src/lib/ingest/pricing-lookup.js';
@@ -59,6 +54,7 @@ import { _resetConfigForTests } from '../../packages/sdk-ts/src/core/config.js';
 
 const DATABASE_URL =
   process.env['DATABASE_URL'] ?? 'postgresql://pylva:pylva_dev@localhost:5432/pylva';
+const TEST_DATABASE_URL = process.env['PYLVA_TEST_DATABASE_URL'] ?? DATABASE_URL;
 const MATRIX_N = Number(process.env['MATRIX_N'] ?? 400);
 const AUTO_REGISTERED = 20;
 
@@ -278,9 +274,7 @@ function installSdkFetchMock(): void {
     if (href === `${SDK_ENDPOINT}/api/v1/pricing`) {
       return new Response(
         JSON.stringify({
-          models: [
-            { provider: PROVIDER, model: MODEL, input_per_1m: 5000, output_per_1m: 5000 },
-          ],
+          models: [{ provider: PROVIDER, model: MODEL, input_per_1m: 5000, output_per_1m: 5000 }],
         }),
         { status: 200 },
       );
@@ -306,7 +300,7 @@ function installSdkFetchMock(): void {
 }
 
 beforeAll(async () => {
-  sql = postgres(DATABASE_URL);
+  sql = postgres(TEST_DATABASE_URL);
 
   const suffix = crypto.randomBytes(5).toString('hex');
   const [rowA] = await sql<{ id: string }[]>`
@@ -415,10 +409,9 @@ describe('per-customer rules matrix (420 customers)', () => {
     `;
     expect(rows.length).toBe(MATRIX_N);
     for (const row of rows) {
-      expect(
-        Number(row.rule_count),
-        `rule count for ${row.external_id}`,
-      ).toBe(expectedActiveRuleIds(row.external_id).length);
+      expect(Number(row.rule_count), `rule count for ${row.external_id}`).toBe(
+        expectedActiveRuleIds(row.external_id).length,
+      );
     }
   });
 
@@ -704,7 +697,10 @@ describe('per-customer rules matrix (420 customers)', () => {
          AND customer_id = {customer_id:String}
          AND is_demo = 0
          AND timestamp >= {from:DateTime}`,
-      { customer_id: `${builderA}:cust_0100`, from: periodStart.toISOString().replace('T', ' ').slice(0, 19) },
+      {
+        customer_id: `${builderA}:cust_0100`,
+        from: periodStart.toISOString().replace('T', ' ').slice(0, 19),
+      },
     );
     const chTruth = Number((rows[0] as { s: string | null }).s ?? 0);
     expect(chTruth).toBeGreaterThanOrEqual(50);

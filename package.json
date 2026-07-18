@@ -5,7 +5,7 @@
   "type": "module",
   "packageManager": "pnpm@10.31.0",
   "engines": {
-    "node": ">=20.18.1"
+    "node": ">=20.19.0"
   },
   "scripts": {
     "dev": "next dev",
@@ -25,16 +25,18 @@
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,css,json}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,css,json}\"",
     "typecheck": "tsc -b",
-    "db:setup": "tsx db/setup.ts",
-    "db:apply:migration": "tsx scripts/apply-postgres-migration.ts",
+    "db:setup": "ALLOW_MIGRATION_DATABASE_URL_FALLBACK=true tsx db/setup.ts",
+    "db:apply:migration": "ALLOW_MIGRATION_DATABASE_URL_FALLBACK=true tsx scripts/apply-postgres-migration.ts",
     "db:manifest": "tsx scripts/generate-migration-manifest.ts",
-    "db:migrate": "tsx scripts/db-migrate.ts",
-    "db:migrate:status": "tsx scripts/db-migrate.ts --status",
-    "db:migrate:verify-physical": "tsx scripts/verify-physical-schema-contract.ts",
+    "db:migrate": "ALLOW_MIGRATION_DATABASE_URL_FALLBACK=true tsx scripts/db-migrate.ts",
+    "db:migrate:status": "ALLOW_MIGRATION_DATABASE_URL_FALLBACK=true tsx scripts/db-migrate.ts --status",
+    "db:migrate:verify-physical": "ALLOW_MIGRATION_DATABASE_URL_FALLBACK=true tsx scripts/verify-physical-schema-contract.ts",
     "db:setup:clickhouse": "SKIP_POSTGRES=true pnpm db:setup",
     "db:seed": "tsx db/seed.ts",
-    "db:reset": "tsx db/setup.ts && tsx db/seed.ts",
+    "db:reset": "ALLOW_MIGRATION_DATABASE_URL_FALLBACK=true tsx db/setup.ts && tsx db/seed.ts",
     "clickhouse:doctor": "tsx scripts/clickhouse-doctor.ts",
+    "budget-control:doctor": "tsx scripts/authoritative-budget-control-doctor.ts",
+    "clickhouse:provision-budget-rbac": "tsx scripts/provision-authoritative-budget-clickhouse-rbac.ts",
     "clickhouse:backfill-customer-daily": "tsx scripts/backfill-cost-customer-daily-agg.ts",
     "clickhouse:backfill-daily-agg-v2": "tsx scripts/backfill-cost-daily-agg-v2.ts",
     "clickhouse:backfill-model-daily": "tsx scripts/backfill-cost-model-daily-agg.ts",
@@ -45,8 +47,8 @@
     "cron:reconcile-cost-daily-agg": "tsx scripts/reconcile-cost-daily-agg.ts"
   },
   "dependencies": {
-    "@aws-sdk/client-lambda": "^3.1089.0",
-    "@aws-sdk/client-secrets-manager": "^3.1089.0",
+    "@aws-sdk/client-lambda": "^3.1090.0",
+    "@aws-sdk/client-secrets-manager": "^3.1090.0",
     "@clickhouse/client": "^1.23.1",
     "@pylva/shared": "workspace:*",
     "@sentry/nextjs": "^10.66.0",
@@ -87,9 +89,9 @@
     "clsx": "^2.1.1",
     "drizzle-kit": "^0.31.0",
     "esbuild": "^0.28.1",
-    "eslint": "^9.28.0",
+    "eslint": "^10.7.0",
     "jsdom": "^29.1.1",
-    "lucide-react": "^0.400.0",
+    "lucide-react": "^1.25.0",
     "msw": "^2.15.0",
     "pino-pretty": "^11.3.0",
     "postcss": "^8.5.19",
@@ -103,6 +105,6 @@
     "turbo": "^2.10.5",
     "typescript": "^6.0.2",
     "vite": "^7.3.5",
-    "vitest": "^3.2.6"
+    "vitest": "^4.1.10"
   }
 }

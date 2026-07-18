@@ -87,11 +87,11 @@ export async function getPortalOverview(
   const rows = await queryCostEvents(
     builderId,
     `SELECT sum(cost_usd) AS total_cost_usd, count() AS event_count
-     FROM cost_events
+     FROM cost_events_with_control
      WHERE builder_id = {builder_id:String}
        AND customer_id = {customer_id:String}
-       AND timestamp >= {from:DateTime}
-       AND timestamp <  {to:DateTime}`,
+       AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
+       AND timestamp <  parseDateTime64BestEffort({to:String}, 3, 'UTC')`,
     {
       builder_id: builderId,
       customer_id: composite,
@@ -117,11 +117,11 @@ export async function getPortalBreakdownByModel(
   const rows = await queryCostEvents(
     builderId,
     `SELECT model, sum(cost_usd) AS cost_usd, count() AS event_count
-     FROM cost_events
+     FROM cost_events_with_control
      WHERE builder_id = {builder_id:String}
        AND customer_id = {customer_id:String}
-       AND timestamp >= {from:DateTime}
-       AND timestamp <  {to:DateTime}
+       AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
+       AND timestamp <  parseDateTime64BestEffort({to:String}, 3, 'UTC')
        AND model IS NOT NULL
      GROUP BY model
      ORDER BY cost_usd DESC
@@ -163,11 +163,11 @@ export async function getPortalDailyTrend(
     `SELECT toDate(timestamp) AS day,
             sum(cost_usd) AS cost_usd,
             count() AS event_count
-     FROM cost_events
+     FROM cost_events_with_control
      WHERE builder_id = {builder_id:String}
        AND customer_id = {customer_id:String}
-       AND timestamp >= {from:DateTime}
-       AND timestamp <  {to:DateTime}
+       AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
+       AND timestamp <  parseDateTime64BestEffort({to:String}, 3, 'UTC')
      GROUP BY day
      ORDER BY day ASC`,
     {
@@ -203,11 +203,11 @@ export async function getPortalBreakdownByStep(
     // because Nullable(String) accepts '' as a non-null value, which
     // surfaces as a blank row in the by-step list.
     `SELECT step_name, sum(cost_usd) AS cost_usd, count() AS event_count
-     FROM cost_events
+     FROM cost_events_with_control
      WHERE builder_id = {builder_id:String}
        AND customer_id = {customer_id:String}
-       AND timestamp >= {from:DateTime}
-       AND timestamp <  {to:DateTime}
+       AND timestamp >= parseDateTime64BestEffort({from:String}, 3, 'UTC')
+       AND timestamp <  parseDateTime64BestEffort({to:String}, 3, 'UTC')
        AND step_name IS NOT NULL
        AND step_name != ''
      GROUP BY step_name

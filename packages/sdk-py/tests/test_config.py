@@ -3,7 +3,11 @@
 import pytest
 
 import pylva
-from pylva.core.config import InvalidApiKeyError, _reset_config_for_tests
+from pylva.core.config import (
+    InvalidApiKeyError,
+    InvalidControlConfigError,
+    _reset_config_for_tests,
+)
 
 VALID_KEY = "pv_live_12345678_" + "a" * 32
 
@@ -59,3 +63,20 @@ def test_stores_non_llm_config() -> None:
     cfg = __import__("pylva").core.config.get_config()
     assert cfg is not None
     assert cfg.non_llm == {"mode": "policy", "refresh_interval": 30}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("mode", []),
+        ("mode", {}),
+        ("on_unavailable", []),
+        ("on_unavailable", {}),
+    ],
+)
+def test_malformed_unhashable_control_values_use_documented_error(
+    field: str,
+    value: object,
+) -> None:
+    with pytest.raises(InvalidControlConfigError):
+        pylva.init(VALID_KEY, control={field: value})  # type: ignore[arg-type]

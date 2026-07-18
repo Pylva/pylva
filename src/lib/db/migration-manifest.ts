@@ -232,8 +232,33 @@ export const EXPECTED_MIGRATIONS: readonly MigrationManifestEntry[] = [
   {
     filename: '049_backfill_builder_owner_memberships.sql',
     sha256: 'be2ab84f5df894efb2d911e1edf237eda09259ec7f46aca50508b85215f3bb91',
+    phase: 'post_roll',
+  },
+  {
+    filename: '050_authoritative_budget_control_ledger.sql',
+    sha256: '3bd8b69ef1b09814e6cc0645b2eb188504fc84b4e15abbe5e42ddf704619218e',
+    phase: 'pre_roll',
+  },
+  {
+    filename: '051_authoritative_budget_control_runtime.sql',
+    sha256: '3fabbc1236e562eddd1b83e4c8826abfb61d0eca73b8e4773b10d94599055af8',
+    phase: 'pre_roll',
+  },
+  {
+    filename: '052_authoritative_budget_control_runtime_roles.sql',
+    sha256: '3cc7efe258ceb49e9fd56789c3fdb9a0f6cd76e990d5f5681ecc24cde4172be6',
+    phase: 'pre_roll',
+  },
+  {
+    filename: '053_legacy_catalog_owner_rls_compatibility.sql',
+    sha256: 'ba598fab2d79316926ebce3e853c61a1408dae14cd4bb40a0a572f0a90bb431f',
+    phase: 'pre_roll',
+  },
+  {
+    filename: '054_general_app_runtime_owner_boundary.sql',
+    sha256: 'f6e3be6b0a190f00a2f620fdacbacbb34cdbfcc522a9d138a59e1142b7cd8dbb',
     phase: 'pre_roll',
   },
 ] as const;
 
-export const EXPECTED_SCHEMA_HEAD: string = '049_backfill_builder_owner_memberships.sql';
+export const EXPECTED_SCHEMA_HEAD: string = '054_general_app_runtime_owner_boundary.sql';

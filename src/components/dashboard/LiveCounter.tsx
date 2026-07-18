@@ -7,7 +7,7 @@
 // dashboards burn one frame every 16ms forever (60fps × N counters × N tabs).
 
 import { useEffect, useRef, useState } from 'react';
-import { formatUsd as sharedFormatUsd, formatInt } from '@/lib/formatting';
+import { formatLiveInteger, formatLiveTelemetryUsd } from '@/lib/live-number-formatting';
 
 interface LiveCounterProps {
   value: number;
@@ -48,6 +48,7 @@ export function LiveCounter({ value, format }: LiveCounterProps): React.ReactEle
     };
   }, [value]);
 
-  const formatted = format === 'usd' ? sharedFormatUsd(displayed) : formatInt(displayed);
+  const formatted =
+    format === 'usd' ? formatLiveTelemetryUsd(displayed) : formatLiveInteger(displayed);
   return <span className="text-3xl font-semibold tabular-nums">{formatted}</span>;
 }

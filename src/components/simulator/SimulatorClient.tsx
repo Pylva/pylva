@@ -12,7 +12,7 @@ import {
   type SimulatorResult,
   type ModelSwap,
 } from '@pylva/shared';
-import { formatUsd } from '@/lib/formatting';
+import { formatTelemetryUsd } from '@/lib/formatting';
 import {
   Table,
   TableBody,
@@ -338,11 +338,14 @@ export function SimulatorClient({ modelsByProvider }: Props) {
         <div className="space-y-6">
           {/* Summary cards */}
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
-            <ResultCard label="Actual cost" value={formatUsd(result.original_cost_usd)} />
-            <ResultCard label="Projected cost" value={formatUsd(result.simulated_cost_usd)} />
+            <ResultCard label="Actual cost" value={formatTelemetryUsd(result.original_cost_usd)} />
+            <ResultCard
+              label="Projected cost"
+              value={formatTelemetryUsd(result.simulated_cost_usd)}
+            />
             <ResultCard
               label="Savings"
-              value={formatUsd(result.savings_usd)}
+              value={formatTelemetryUsd(result.savings_usd)}
               accent={result.savings_usd > 0 ? 'green' : result.savings_usd < 0 ? 'red' : undefined}
             />
             <ResultCard label="Savings %" value={`${result.savings_percent}%`} />
@@ -388,9 +391,11 @@ export function SimulatorClient({ modelsByProvider }: Props) {
                     <TableCell>{b.step_name ?? 'unattributed'}</TableCell>
                     <TableCell>{b.original_model}</TableCell>
                     <TableCell>{b.simulated_model}</TableCell>
-                    <TableCell className="tabular-nums">{formatUsd(b.original_cost_usd)}</TableCell>
                     <TableCell className="tabular-nums">
-                      {formatUsd(b.simulated_cost_usd)}
+                      {formatTelemetryUsd(b.original_cost_usd)}
+                    </TableCell>
+                    <TableCell className="tabular-nums">
+                      {formatTelemetryUsd(b.simulated_cost_usd)}
                     </TableCell>
                     <TableCell className="tabular-nums">{b.event_count.toLocaleString()}</TableCell>
                     <TableCell>

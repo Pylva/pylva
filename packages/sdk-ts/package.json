@@ -1,43 +1,94 @@
 {
   "name": "@pylva/sdk",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Pylva SDK — cost infrastructure for AI agent businesses",
   "license": "MIT",
   "type": "module",
   "sideEffects": false,
+  "engines": {
+    "node": ">=20.18.1"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "imports": {
+    "#pylva/core-runtime": "./dist/internal/core-runtime.cjs",
+    "#pylva/execution-runtime": "./dist/internal/execution-runtime.cjs",
+    "#pylva/public-errors": "./dist/internal/public-errors.cjs",
+    "#pylva/budget-runtime": "./dist/internal/budget-runtime.cjs",
+    "#pylva/routing-runtime": "./dist/internal/routing-runtime.cjs",
+    "#pylva/nonllm-runtime": "./dist/internal/nonllm-runtime.cjs",
+    "#pylva/telemetry-runtime": "./dist/internal/telemetry-runtime.cjs",
+    "#pylva/control-runtime": "./dist/internal/control-runtime.cjs",
+    "#pylva/engine-runtime": "./dist/internal/engine-runtime.cjs",
+    "#pylva/budget-enforcement-runtime": "./dist/internal/budget-enforcement-runtime.cjs",
+    "#pylva/usage-snapshot-runtime": "./dist/internal/usage-snapshot-runtime.cjs",
+    "#pylva/init-validation-runtime": "./dist/internal/init-validation-runtime.cjs",
+    "#pylva/strict-unwrapper-runtime": "./dist/internal/strict-unwrapper-runtime.cjs",
+    "#pylva/openai-runtime": "./dist/openai.cjs",
+    "#pylva/anthropic-runtime": "./dist/anthropic.cjs",
+    "#pylva/vercel-ai-runtime": "./dist/vercel-ai.cjs"
+  },
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     },
     "./openai": {
-      "types": "./dist/openai.d.ts",
-      "import": "./dist/openai.js",
-      "require": "./dist/openai.cjs"
+      "import": {
+        "types": "./dist/openai.d.ts",
+        "default": "./dist/openai.js"
+      },
+      "require": {
+        "types": "./dist/openai.d.cts",
+        "default": "./dist/openai.cjs"
+      }
     },
     "./anthropic": {
-      "types": "./dist/anthropic.d.ts",
-      "import": "./dist/anthropic.js",
-      "require": "./dist/anthropic.cjs"
+      "import": {
+        "types": "./dist/anthropic.d.ts",
+        "default": "./dist/anthropic.js"
+      },
+      "require": {
+        "types": "./dist/anthropic.d.cts",
+        "default": "./dist/anthropic.cjs"
+      }
     },
     "./vercel-ai": {
-      "types": "./dist/vercel-ai.d.ts",
-      "import": "./dist/vercel-ai.js",
-      "require": "./dist/vercel-ai.cjs"
+      "import": {
+        "types": "./dist/vercel-ai.d.ts",
+        "default": "./dist/vercel-ai.js"
+      },
+      "require": {
+        "types": "./dist/vercel-ai.d.cts",
+        "default": "./dist/vercel-ai.cjs"
+      }
     },
     "./langgraph": {
-      "types": "./dist/langgraph.d.ts",
-      "import": "./dist/langgraph.js",
-      "require": "./dist/langgraph.cjs"
+      "import": {
+        "types": "./dist/langgraph.d.ts",
+        "default": "./dist/langgraph.js"
+      },
+      "require": {
+        "types": "./dist/langgraph.d.cts",
+        "default": "./dist/langgraph.cjs"
+      }
     },
     "./langchain": {
-      "types": "./dist/langgraph.d.ts",
-      "import": "./dist/langgraph.js",
-      "require": "./dist/langgraph.cjs"
+      "import": {
+        "types": "./dist/langgraph.d.ts",
+        "default": "./dist/langgraph.js"
+      },
+      "require": {
+        "types": "./dist/langgraph.d.cts",
+        "default": "./dist/langgraph.cjs"
+      }
     }
   },
   "bin": {
@@ -69,91 +120,25 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsup",
-    "dev": "tsup --watch",
+    "build": "node scripts/build.mjs",
+    "dev": "node scripts/build.mjs",
     "test": "vitest run",
-    "size": "size-limit",
-    "typecheck": "tsc --noEmit",
+    "size": "node scripts/check-runtime-size.mjs",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.type-tests.json",
     "prepublishOnly": "npm run test && npm run typecheck && npm run build && npm run size"
   },
-  "size-limit": [
-    {
-      "name": "core",
-      "path": "dist/index.js",
-      "limit": "20 KB",
-      "gzip": true,
-      "ignore": [
-        "node:crypto",
-        "node:module",
-        "node:async_hooks",
-        "crypto",
-        "module",
-        "async_hooks"
-      ]
-    },
-    {
-      "name": "openai wrapper",
-      "path": "dist/openai.js",
-      "limit": "15 KB",
-      "gzip": true,
-      "ignore": [
-        "node:crypto",
-        "node:module",
-        "node:async_hooks",
-        "crypto",
-        "module",
-        "async_hooks"
-      ]
-    },
-    {
-      "name": "anthropic wrapper",
-      "path": "dist/anthropic.js",
-      "limit": "15 KB",
-      "gzip": true,
-      "ignore": [
-        "node:crypto",
-        "node:module",
-        "node:async_hooks",
-        "crypto",
-        "module",
-        "async_hooks"
-      ]
-    },
-    {
-      "name": "vercel-ai wrapper",
-      "path": "dist/vercel-ai.js",
-      "limit": "15 KB",
-      "gzip": true,
-      "ignore": [
-        "node:crypto",
-        "node:module",
-        "node:async_hooks",
-        "crypto",
-        "module",
-        "async_hooks"
-      ]
-    },
-    {
-      "name": "langgraph callback",
-      "path": "dist/langgraph.js",
-      "limit": "15 KB",
-      "gzip": true,
-      "ignore": [
-        "node:crypto",
-        "node:async_hooks",
-        "crypto",
-        "async_hooks"
-      ]
-    }
-  ],
   "peerDependencies": {
-    "openai": ">=4 <6",
-    "@anthropic-ai/sdk": ">=0.30",
-    "ai": ">=3",
+    "@ai-sdk/openai": ">=3 <4",
+    "@anthropic-ai/sdk": ">=0.30.1 <1",
     "@langchain/core": ">=1 <2",
-    "@langchain/langgraph": ">=1 <2"
+    "@langchain/langgraph": ">=1 <2",
+    "ai": ">=3",
+    "openai": ">=4.104.0 <6"
   },
   "peerDependenciesMeta": {
+    "@ai-sdk/openai": {
+      "optional": true
+    },
     "openai": {
       "optional": true
     },
@@ -172,5 +157,11 @@
   },
   "dependencies": {
     "valibot": "^1.4.2"
+  },
+  "devDependencies": {
+    "@ai-sdk/anthropic": "^3.0.96",
+    "@ai-sdk/openai": "^3.0.84",
+    "terser": "5.46.1",
+    "yaml": "2.9.0"
   }
 }

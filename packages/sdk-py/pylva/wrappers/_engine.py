@@ -150,7 +150,7 @@ def _setup_engine(ctx: PreCallContext, provider_id: str) -> _EngineSetup:
                         f"→ {failover_cfg.backup_provider}, but no "
                         f"{failover_cfg.backup_provider} client is registered. "
                         f"Pass one via "
-                        f"`Pylva(..., providers={{\"{failover_cfg.backup_provider}\": client}})` "
+                        f'`Pylva(..., providers={{"{failover_cfg.backup_provider}": client}})` '
                         f"so failover can route there."
                     ),
                 )

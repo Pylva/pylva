@@ -7,8 +7,19 @@ const migrateEntrypoint = readFileSync('docker-migrate-entrypoint.sh', 'utf8');
 describe('Dockerfile migrations target', () => {
   it('copies the targeted Postgres migration runner into the migration image', () => {
     expect(dockerfile).toContain(
-      'COPY scripts/apply-postgres-migration.ts scripts/apply-postgres-migration-env.ts scripts/db-migrate.ts scripts/db-migrate-core.ts scripts/db-migrate-env.ts scripts/verify-physical-schema-contract.ts ./scripts/',
+      'COPY scripts/apply-postgres-migration.ts scripts/apply-postgres-migration-env.ts scripts/db-migrate.ts scripts/db-migrate-core.ts scripts/db-migrate-env.ts scripts/migration-database-env.ts scripts/verify-physical-schema-contract.ts ./scripts/',
     );
+  });
+
+  it('copies only the migration credential assembler into the migration image', () => {
+    const migrationStage = dockerfile.slice(
+      dockerfile.indexOf('FROM deps AS migrations'),
+      dockerfile.indexOf('FROM node:20-bookworm-slim AS runner'),
+    );
+    expect(migrationStage).toContain('COPY docker-migration-db-url.sh');
+    expect(migrationStage).not.toContain('COPY docker-db-url.sh');
+    expect(migrateEntrypoint).toContain('. /app/docker-migration-db-url.sh');
+    expect(migrateEntrypoint).not.toContain('. /app/docker-db-url.sh');
   });
 
   it('defaults the migrations image to db:migrate', () => {

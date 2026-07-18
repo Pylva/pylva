@@ -28,7 +28,7 @@ def _sign(body: str, secret: str, timestamp: str) -> str:
 
 
 def _strip_prefix(signature: str) -> str:
-    return signature[len(PREFIX):] if signature.startswith(PREFIX) else signature
+    return signature[len(PREFIX) :] if signature.startswith(PREFIX) else signature
 
 
 def verify_webhook(
@@ -52,7 +52,7 @@ def verify_webhook(
     digest = _strip_prefix(signature) if isinstance(signature, str) else signature
     if not isinstance(digest, str) or not SIGNATURE_RE.match(digest):
         raise InvalidSignatureFormat(
-            'signature must be a 64-character hex HMAC-SHA256 digest '
+            "signature must be a 64-character hex HMAC-SHA256 digest "
             '(optionally prefixed with "sha256=")',
         )
 

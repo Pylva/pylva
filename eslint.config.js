@@ -6,7 +6,8 @@ export default [
   {
     ignores: [
       'node_modules/**',
-      'dist/**',
+      '**/dist/**',
+      '**/dist-full/**',
       'dist-tsc/**',
       '**/dist-tsc/**',
       '.next/**',

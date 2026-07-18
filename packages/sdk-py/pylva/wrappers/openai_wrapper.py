@@ -8,6 +8,7 @@ stays consistent."""
 from __future__ import annotations
 
 import time
+from importlib import import_module
 from typing import Any
 
 from ..core.config import is_initialized
@@ -21,6 +22,7 @@ from ._engine import (
 )
 from ._event import build_llm_event
 from ._init_validation import mark_provider_patched
+from ._strict_context import is_strict_provider_dispatch
 
 _patched = False
 
@@ -32,7 +34,7 @@ def _event_for(
     start: float,
     failure: bool,
     metadata_model: Any | None = None,
-) -> dict:
+) -> dict[str, Any]:
     response_model = getattr(response, "model", None)
     model = response_model or metadata_model or request_model
     usage = getattr(response, "usage", None)
@@ -54,14 +56,11 @@ def try_patch_openai() -> None:
     if _patched:
         return
     try:
-        from openai.resources.chat.completions import Completions  # type: ignore
+        provider_module = import_module("openai.resources.chat.completions")
+        Completions: Any = provider_module.Completions
     except Exception:
         return
-
-    try:
-        from openai.resources.chat.completions import AsyncCompletions  # type: ignore
-    except Exception:
-        AsyncCompletions = None  # type: ignore
+    AsyncCompletions: Any = getattr(provider_module, "AsyncCompletions", None)
 
     sync_original = Completions.create
 
@@ -69,6 +68,12 @@ def try_patch_openai() -> None:
         if not is_initialized():
             return sync_original(self, *args, **kwargs)
         if not kwargs:  # malformed input — let the SDK reject as it would unwrapped
+            return sync_original(self, *args, **kwargs)
+        # The explicit controlled proxy already resolved the final model,
+        # obtained its reservation, and owns rollout telemetry. Re-running the
+        # legacy engine here could route to an unreserved model or emit a
+        # duplicate event.
+        if is_strict_provider_dispatch("openai", kwargs.get("model")):
             return sync_original(self, *args, **kwargs)
         start = time.time()
         request = dict(kwargs)
@@ -111,7 +116,7 @@ def try_patch_openai() -> None:
                 pass
             raise
 
-    Completions.create = sync_patched  # type: ignore[assignment]
+    Completions.create = sync_patched
 
     if AsyncCompletions is not None:
         async_original = AsyncCompletions.create
@@ -120,6 +125,8 @@ def try_patch_openai() -> None:
             if not is_initialized():
                 return await async_original(self, *args, **kwargs)
             if not kwargs:
+                return await async_original(self, *args, **kwargs)
+            if is_strict_provider_dispatch("openai", kwargs.get("model")):
                 return await async_original(self, *args, **kwargs)
             start = time.time()
             request = dict(kwargs)
@@ -165,7 +172,7 @@ def try_patch_openai() -> None:
                     pass
                 raise
 
-        AsyncCompletions.create = async_patched  # type: ignore[assignment]
+        AsyncCompletions.create = async_patched
 
     _patched = True
     mark_provider_patched("openai")

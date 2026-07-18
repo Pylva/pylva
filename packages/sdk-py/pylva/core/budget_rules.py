@@ -36,9 +36,7 @@ def narrow_rule(raw: Any) -> dict[str, Any] | None:
     }
 
 
-def find_applicable_budget_rules(
-    rules: list[Any], customer_id: str | None
-) -> list[dict[str, Any]]:
+def find_applicable_budget_rules(rules: list[Any], customer_id: str | None) -> list[dict[str, Any]]:
     """Every active ``budget_limit`` rule that applies to the customer, in
     cache order. The server (computeBudgetExceededFlags) evaluates ALL
     applicable budget rules per customer, so the SDK must match: a
@@ -114,6 +112,7 @@ def record_llm_spend(
     model: str | None,
     tokens_in: float | None,
     tokens_out: float | None,
+    expected_config_generation: int | None = None,
 ) -> None:
     """Record the actual cost of a completed LLM call against every applicable
     budget rule's accumulator key, priced from the local pricing cache. Keeps
@@ -147,4 +146,5 @@ def record_llm_spend(
                 period_start=period_start_utc(match["period"]),
             ),
             cost,
+            expected_config_generation=expected_config_generation,
         )

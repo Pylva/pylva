@@ -3,7 +3,12 @@
 // rate (or marks pricing_status='needs_input' until rate is set).
 
 import { randomUUID } from 'node:crypto';
-import { CostSource, EventStatus, Framework, InstrumentationTier } from '@pylva/shared';
+import {
+  CostSource,
+  EventStatus,
+  Framework,
+  InstrumentationTier,
+} from '@pylva/shared/telemetry-values';
 import { currentContext } from '../core/context.js';
 import { enqueue } from '../core/telemetry.js';
 

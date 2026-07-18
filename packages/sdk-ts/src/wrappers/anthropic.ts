@@ -3,9 +3,9 @@
 // pre-call enforcement / routing / failover lives in `_engine.ts`; this
 // file is just the patch surface + telemetry emission.
 
-import { EventStatus, Provider, TokenCountSource } from '@pylva/shared';
+import { EventStatus, Provider, TokenCountSource } from '@pylva/shared/telemetry-values';
 import { enqueue } from '../core/telemetry.js';
-import { isInitialized } from '../core/config.js';
+import { getConfigGeneration, isInitialized } from '../core/config.js';
 import { loadPeer, patchResourceProto } from './_load.js';
 import { buildLlmEvent } from './_event.js';
 import {
@@ -15,6 +15,8 @@ import {
   runWithEngine,
 } from './_engine.js';
 import { markProviderPatched } from './_init_validation.js';
+import { originalProviderMethod, registerPatchedOriginal } from './_strict_unwrap.js';
+import { LegacyProviderPromise } from './_legacy_provider_promise.js';
 
 interface AnthropicResponse {
   model?: string;
@@ -27,6 +29,13 @@ interface AnthropicMessages {
 
 let applied = false;
 let esmPatchLaunched = false;
+
+/** Internal strict-wrapper escape hatch: never execute legacy routing twice. */
+export function _originalAnthropicCreate(
+  candidate: AnthropicMessages['create'],
+): AnthropicMessages['create'] | null {
+  return originalProviderMethod(candidate);
+}
 
 export function applyAnthropicPatch(): void {
   if (applied) return;
@@ -109,67 +118,79 @@ function patchMessages(messages: AnthropicMessages): void {
   // function — wrapping again would emit duplicate events.
   if ((messages.create as { __pylva_patched?: boolean }).__pylva_patched) return;
   const original = messages.create;
-  const patched = async function patched(
-    this: unknown,
-    ...args: unknown[]
-  ): Promise<AnthropicResponse> {
+  const patched = function patched(this: unknown, ...args: unknown[]): Promise<AnthropicResponse> {
     // Preserve the caller's `this`: when patching Messages.prototype the
     // receiver is the per-client resource instance (carries auth/transport).
     const self = this ?? messages;
     if (!isInitialized()) return original.apply(self, args);
     if (typeof args[0] !== 'object' || args[0] === null) return original.apply(self, args);
     const start = Date.now();
+    const ownerGeneration = getConfigGeneration();
     const reqArg = args[0] as { model?: string } & Record<string, unknown>;
     const engineCtx = buildEngineCtx(Provider.ANTHROPIC, reqArg.model ?? null);
 
-    try {
-      const { result, metadata } = await runWithEngine<AnthropicResponse>({
-        request: reqArg,
-        providerId: Provider.ANTHROPIC,
-        ctx: engineCtx,
-        call: (req) => original.apply(self, [req, ...args.slice(1)]) as Promise<AnthropicResponse>,
+    let nativePromise:
+      | (Promise<AnthropicResponse> & {
+          asResponse?: () => Promise<Response>;
+        })
+      | null = null;
+    const finalized = runWithEngine<AnthropicResponse>({
+      request: reqArg,
+      providerId: Provider.ANTHROPIC,
+      ctx: engineCtx,
+      call: (req) => {
+        nativePromise = original.apply(self, [req, ...args.slice(1)]) as typeof nativePromise;
+        return nativePromise!;
+      },
+    })
+      .then(({ result, metadata }) => {
+        try {
+          if (ownerGeneration === getConfigGeneration()) {
+            enqueue(
+              buildLlmEvent({
+                provider: Provider.ANTHROPIC,
+                model: result?.model ?? metadata.routed_model ?? metadata.original_model ?? null,
+                tokensIn: result?.usage?.input_tokens ?? 0,
+                tokensOut: result?.usage?.output_tokens ?? 0,
+                latencyMs: Date.now() - start,
+                status: EventStatus.SUCCESS,
+                tokenCountSource: TokenCountSource.EXACT,
+              }),
+            );
+          }
+        } catch (err) {
+          console.warn(
+            `[pylva] anthropic telemetry emit failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        return result && typeof result === 'object'
+          ? attachPylvaMetadata(result, metadata)
+          : result;
+      })
+      .catch((err: unknown) => {
+        if (isIntentionalRefusal(err)) throw err;
+        try {
+          if (ownerGeneration === getConfigGeneration()) {
+            enqueue(
+              buildLlmEvent({
+                provider: Provider.ANTHROPIC,
+                model: reqArg.model ?? null,
+                tokensIn: 0,
+                tokensOut: 0,
+                latencyMs: Date.now() - start,
+                status: EventStatus.FAILURE,
+              }),
+            );
+          }
+        } catch {
+          // swallow
+        }
+        throw err;
       });
-
-      try {
-        enqueue(
-          buildLlmEvent({
-            provider: Provider.ANTHROPIC,
-            model: result?.model ?? metadata.routed_model ?? metadata.original_model ?? null,
-            tokensIn: result?.usage?.input_tokens ?? 0,
-            tokensOut: result?.usage?.output_tokens ?? 0,
-            latencyMs: Date.now() - start,
-            status: EventStatus.SUCCESS,
-            tokenCountSource: TokenCountSource.EXACT,
-          }),
-        );
-      } catch (err) {
-        console.warn(
-          `[pylva] anthropic telemetry emit failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      return result && typeof result === 'object'
-        ? attachPylvaMetadata(result, metadata)
-        : result;
-    } catch (err) {
-      if (isIntentionalRefusal(err)) throw err;
-      try {
-        enqueue(
-          buildLlmEvent({
-            provider: Provider.ANTHROPIC,
-            model: reqArg.model ?? null,
-            tokensIn: 0,
-            tokensOut: 0,
-            latencyMs: Date.now() - start,
-            status: EventStatus.FAILURE,
-          }),
-        );
-      } catch {
-        // swallow
-      }
-      throw err;
-    }
+    return new LegacyProviderPromise(finalized, () => nativePromise);
   };
   (patched as unknown as { __pylva_patched: boolean }).__pylva_patched = true;
+  registerPatchedOriginal(patched, original);
   messages.create = patched;
 }
 
@@ -177,3 +198,10 @@ export function _resetAnthropicPatchForTests(): void {
   applied = false;
   esmPatchLaunched = false;
 }
+
+export {
+  wrapAnthropic,
+  PylvaStrictProviderError,
+  type ControlledAnthropicClient,
+} from './anthropic_controlled.js';
+export type { StrictAnthropicOptions } from './anthropic_controlled.js';
