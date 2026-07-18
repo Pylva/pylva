@@ -72,6 +72,8 @@ export class MigrationApplyError extends Error {
 
 const MIGRATION_ADVISORY_LOCK_ARGS = [1887001718, 1835624306];
 const UNIVERSAL_API_KEY_SCOPE_MIGRATION = '048_universal_api_key_scope.sql';
+const GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION =
+  '054_general_app_runtime_owner_boundary.sql';
 const UNIVERSAL_API_KEY_BACKFILL_BATCH_SIZE = 1_000;
 const ONLINE_DDL_LOCK_TIMEOUT = '1s';
 
@@ -458,7 +460,13 @@ function backfillCount(row: Record<string, unknown> | undefined): number {
 }
 
 export function onlineMigrationLockTimeout(filename: string): string | undefined {
-  return filename === UNIVERSAL_API_KEY_SCOPE_MIGRATION ? ONLINE_DDL_LOCK_TIMEOUT : undefined;
+  // Migration 054 transfers ownership of every legacy application relation.
+  // Each ALTER OWNER needs ACCESS EXCLUSIVE, so fail fast instead of letting a
+  // queued lock request stall new application reads for the default 30 seconds.
+  return filename === UNIVERSAL_API_KEY_SCOPE_MIGRATION ||
+    filename === GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION
+    ? ONLINE_DDL_LOCK_TIMEOUT
+    : undefined;
 }
 
 /**
