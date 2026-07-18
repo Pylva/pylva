@@ -1,6 +1,8 @@
 services:
   postgres:
-    image: postgres:18
+    # PostgreSQL 18 changes PGDATA/VOLUME to /var/lib/postgresql/<major>/docker.
+    # Stay on 16 until self-host upgrades include an explicit pg_upgrade path.
+    image: postgres:16
     ports:
       - "5432:5432"
     environment:
