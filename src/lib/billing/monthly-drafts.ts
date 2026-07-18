@@ -2,10 +2,11 @@
 // B2b T2-E — shared impl for the monthly-drafts cron + ad-hoc CLI runs.
 //
 // Finds every (builder, customer) whose billing_period cycle just rolled
-// over (i.e. `previous_period_end` lies in [now - 24h, now)) and calls
-// `generateInvoice` for each. Auto-split + capabilities gate + pricing-
-// not-configured are handled by the generator; this loop only counts
-// successes vs skips and writes an audit aggregate per builder.
+// over and calls `generateInvoice` for each. The same closed month is retried
+// daily for one week: authoritative usage projection can still be reconciling
+// at the first run, and the generator's deterministic draft keys make later
+// attempts safe. Auto-split + capabilities gate + pricing-not-configured are
+// handled by the generator; this loop only counts successes vs skips.
 //
 // Billing period math: D6 says monthly only for B2b; weekly/custom
 // supported on the column but not exercised. We compute the previous
@@ -19,6 +20,7 @@ import { generateInvoice, BillingError } from '@/lib/billing/invoice-generator';
 import { logger } from '@/lib/logger';
 
 const log = logger.child({ module: 'scripts.generate-monthly-drafts' });
+const MONTHLY_DRAFT_RETRY_WINDOW_HOURS = 7 * 24;
 
 export interface GenerateMonthlyDraftsResult {
   scanned_builders: number;
@@ -64,10 +66,12 @@ export async function generateMonthlyDrafts(opts: {
   const thisMonthStart = firstOfMonth(now);
   const priorMonthStart = firstOfPriorMonth(now);
 
-  // Only fire the generator within 24h of the month boundary. Outside that
-  // window the cron is a no-op (EventBridge fires daily regardless).
+  // Retry throughout the first week. A single 24h window gives the daily
+  // schedule only one attempt; if authoritative projection is pending at that
+  // run, the whole month is otherwise skipped permanently. Deterministic
+  // draft keys absorb successful re-runs without creating another invoice.
   const hoursSinceBoundary = (now.getTime() - thisMonthStart.getTime()) / 3_600_000;
-  if (hoursSinceBoundary < 0 || hoursSinceBoundary >= 24) {
+  if (hoursSinceBoundary < 0 || hoursSinceBoundary >= MONTHLY_DRAFT_RETRY_WINDOW_HOURS) {
     return {
       scanned_builders: 0,
       generated: 0,

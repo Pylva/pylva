@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Elastic-2.0
 // B2b T2-E — POST/GET /api/cron/generate-monthly-drafts
 //
-// Daily at 04:00 UTC (EventBridge). For each (builder, customer) whose
-// billing_period ended in the last 24h, call the invoice generator. The
-// generator handles auto-split, pricing-not-configured, capabilities gate,
-// etc.; this route is a thin iterator.
+// Daily at 04:00 UTC (EventBridge). During the first week of each month, retry
+// the prior month's (builder, customer) cycles so transient authoritative
+// projection lag cannot permanently suppress an invoice. Deterministic draft
+// keys make successful re-runs no-ops. The generator handles auto-split,
+// pricing-not-configured, capabilities gate, etc.; this route is a thin
+// iterator.
 //
 // Guarded by CRON_SECRET bearer token.
 
