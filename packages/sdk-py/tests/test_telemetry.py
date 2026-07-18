@@ -124,13 +124,13 @@ def test_buffer_overflow_drops_oldest() -> None:
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int, body: dict[str, Any] | str = "") -> None:
+    def __init__(self, status_code: int, body: Any = "") -> None:
         self.status_code = status_code
         self._body = body
         self.is_success = 200 <= status_code < 300
 
-    def json(self) -> dict[str, Any]:
-        return self._body if isinstance(self._body, dict) else {}
+    def json(self) -> Any:
+        return self._body
 
 
 class _FakeClient:
@@ -215,6 +215,29 @@ async def test_reinit_after_401_resumes_telemetry(
     telemetry.enqueue(_ev(1))
     await telemetry.flush()
 
+    assert patched_httpx["client"].posts == 2
+    assert telemetry.buffer_size() == 0
+
+
+async def test_malformed_success_response_retains_batch(
+    patched_httpx: dict[str, _FakeClient],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(telemetry, "_schedule_flush", lambda *_args: None)
+    patched_httpx["client"] = _FakeClient(
+        [
+            _FakeResponse(200, None),
+            _FakeResponse(200, {"accepted": 1, "rejected": 0}),
+        ]
+    )
+    telemetry.enqueue(_ev(2))
+
+    await telemetry.flush()
+    assert telemetry.buffer_size() == 1
+    assert "malformed success response" in capsys.readouterr().out
+
+    await telemetry.flush()
     assert patched_httpx["client"].posts == 2
     assert telemetry.buffer_size() == 0
 

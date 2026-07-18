@@ -301,10 +301,7 @@ async def _flush_once(state: _State | None = None) -> None:
         return
 
     if response is None or response.status_code >= 500:
-        current.buffer = new_batch + current.buffer
-        if len(current.buffer) > BUFFER_CAP:
-            drop = len(current.buffer) - BUFFER_CAP
-            current.buffer = current.buffer[drop:]
+        _requeue_batch(current, new_batch)
         print(f"[pylva] flush failed after retries: {last_error or 'unknown'}", flush=True)
         return
 
@@ -315,19 +312,31 @@ async def _flush_once(state: _State | None = None) -> None:
     try:
         parsed = response.json()
     except Exception:
+        _retain_malformed_success_batch(current, new_batch)
+        return
+    if not isinstance(parsed, dict):
+        _retain_malformed_success_batch(current, new_batch)
         return
 
     for ev in new_batch:
         _record_sent(ev["span_id"], current)
 
-    for e in parsed.get("errors") or []:
+    errors = parsed.get("errors")
+    for e in errors if isinstance(errors, list) else []:
+        if not isinstance(e, dict):
+            continue
         idx = e.get("index")
         span_id = (
-            new_batch[idx]["span_id"] if isinstance(idx, int) and idx < len(new_batch) else "?"
+            new_batch[idx]["span_id"]
+            if isinstance(idx, int) and not isinstance(idx, bool) and 0 <= idx < len(new_batch)
+            else "?"
         )
         print(f"[pylva] event rejected: {e.get('message')} (span_id={span_id})", flush=True)
 
-    for w in parsed.get("warnings") or []:
+    warnings = parsed.get("warnings")
+    for w in warnings if isinstance(warnings, list) else []:
+        if not isinstance(w, dict):
+            continue
         code = w.get("code")
         if code in ("needs_pricing_input", "pending_pricing"):
             if w.get("metric"):
@@ -342,7 +351,8 @@ async def _flush_once(state: _State | None = None) -> None:
                     flush=True,
                 )
 
-    for flag in parsed.get("budget_exceeded") or []:
+    budget_exceeded = parsed.get("budget_exceeded")
+    for flag in budget_exceeded if isinstance(budget_exceeded, list) else []:
         if not isinstance(flag, dict):
             continue
         rule_id = flag.get("rule_id")
@@ -361,6 +371,18 @@ async def _flush_once(state: _State | None = None) -> None:
             period_start=period_start,
             expected_config_generation=generation,
         )
+
+
+def _requeue_batch(state: _State, batch: list[dict[str, Any]]) -> None:
+    state.buffer = batch + state.buffer
+    if len(state.buffer) > BUFFER_CAP:
+        drop = len(state.buffer) - BUFFER_CAP
+        state.buffer = state.buffer[drop:]
+
+
+def _retain_malformed_success_batch(state: _State, batch: list[dict[str, Any]]) -> None:
+    _requeue_batch(state, batch)
+    print("[pylva] flush received malformed success response; batch retained", flush=True)
 
 
 def _enter_degraded(
