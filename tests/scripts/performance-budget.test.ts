@@ -47,9 +47,9 @@ describe('performance budget baselines', () => {
     expect(routeBudgetViolation(dashboard, sharedRuntimeFiles, 653)).toContain(
       '653 KiB raw; budget is 652 KiB',
     );
-    expect(routeBudgetViolation(apiKeys, sharedRuntimeFiles, 653)).toBeUndefined();
-    expect(routeBudgetViolation(apiKeys, sharedRuntimeFiles, 654)).toContain(
-      '654 KiB raw; budget is 653 KiB',
+    expect(routeBudgetViolation(apiKeys, sharedRuntimeFiles, 654)).toBeUndefined();
+    expect(routeBudgetViolation(apiKeys, sharedRuntimeFiles, 655)).toContain(
+      '655 KiB raw; budget is 654 KiB',
     );
   });
 

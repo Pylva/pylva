@@ -29,7 +29,10 @@ export const routeBudgets: readonly RouteBudget[] = [
   {
     route: '/o/[slug]/dashboard/settings/api-keys/page',
     maxFiles: 7 + SENTRY_SHARED_CHUNK_FILE_ALLOWANCE,
-    maxRawKiB: 653,
+    // @sentry/nextjs 10.66 grows the shared login/form chunk by less than
+    // 1 KiB; the measured route rounds from 653 KiB to 654 KiB without a
+    // route-owned chunk or request increase.
+    maxRawKiB: 654,
   },
   {
     route: '/o/[slug]/dashboard/rules/new/[type]/page',
