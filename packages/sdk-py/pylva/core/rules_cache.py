@@ -109,8 +109,32 @@ async def _refresh(
                     _warned_passthrough = True
                 _passthrough = True
             return
-        body = resp.json()
-        next_rules = body.get("rules", [])
+        try:
+            body = resp.json()
+        except (TypeError, ValueError):
+            current_cfg = get_config()
+            current_generation = get_config_generation()
+            with _cache_lock:
+                if not _context_is_current_locked(
+                    epoch,
+                    config_generation,
+                    api_key,
+                    endpoint,
+                    current_generation=current_generation,
+                    current_api_key=None if current_cfg is None else current_cfg.api_key,
+                    current_endpoint=None if current_cfg is None else current_cfg.endpoint,
+                ):
+                    return
+                if not _warned_passthrough:
+                    print(
+                        "[pylva] rules cache stale — backend returned malformed rules; "
+                        "passthrough mode",
+                        flush=True,
+                    )
+                    _warned_passthrough = True
+                _passthrough = True
+            return
+        next_rules = body.get("rules") if isinstance(body, dict) else None
         current_cfg = get_config()
         current_generation = get_config_generation()
         with _cache_lock:
@@ -123,6 +147,16 @@ async def _refresh(
                 current_api_key=None if current_cfg is None else current_cfg.api_key,
                 current_endpoint=None if current_cfg is None else current_cfg.endpoint,
             ):
+                return
+            if not isinstance(next_rules, list):
+                if not _warned_passthrough:
+                    print(
+                        "[pylva] rules cache stale — backend returned malformed rules; "
+                        "passthrough mode",
+                        flush=True,
+                    )
+                    _warned_passthrough = True
+                _passthrough = True
                 return
             _rules = next_rules
             _fetched_at = time.time()
