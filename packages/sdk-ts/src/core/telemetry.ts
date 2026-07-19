@@ -332,6 +332,10 @@ function retainMalformedSuccessBatch(batch: TelemetryEvent[]): void {
 function ingestResponseContainer(value: unknown): IngestResponse | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
+  for (const key of ['accepted', 'rejected'] as const) {
+    const count = record[key];
+    if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) return null;
+  }
   for (const key of ['errors', 'warnings', 'budget_exceeded'] as const) {
     if (record[key] !== undefined && record[key] !== null && !Array.isArray(record[key])) {
       return null;

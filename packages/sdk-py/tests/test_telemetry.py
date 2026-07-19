@@ -219,7 +219,25 @@ async def test_reinit_after_401_resumes_telemetry(
     assert telemetry.buffer_size() == 0
 
 
+@pytest.mark.parametrize(
+    "malformed_body",
+    [
+        None,
+        {},
+        {"accepted": -1, "rejected": 0},
+        {"accepted": True, "rejected": 0},
+        {"accepted": 1, "rejected": 0, "errors": {}},
+    ],
+    ids=[
+        "non-object-body",
+        "missing-required-counts",
+        "invalid-required-counts",
+        "non-integer-required-counts",
+        "malformed-optional-collections",
+    ],
+)
 async def test_malformed_success_response_retains_batch(
+    malformed_body: Any,
     patched_httpx: dict[str, _FakeClient],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -227,7 +245,7 @@ async def test_malformed_success_response_retains_batch(
     monkeypatch.setattr(telemetry, "_schedule_flush", lambda *_args: None)
     patched_httpx["client"] = _FakeClient(
         [
-            _FakeResponse(200, None),
+            _FakeResponse(200, malformed_body),
             _FakeResponse(200, {"accepted": 1, "rejected": 0}),
         ]
     )
@@ -259,7 +277,7 @@ async def test_flush_5xx_retries_and_reinserts(patched_httpx: dict[str, _FakeCli
 
 async def test_span_id_lru_dedup(patched_httpx: dict[str, _FakeClient]) -> None:
     patched_httpx["client"] = _FakeClient(
-        [_FakeResponse(200, {"errors": [], "warnings": []})],
+        [_FakeResponse(200, {"accepted": 1, "rejected": 0, "errors": [], "warnings": []})],
     )
 
     telemetry.enqueue(_ev(1))
@@ -279,7 +297,7 @@ async def test_span_id_lru_dedup(patched_httpx: dict[str, _FakeClient]) -> None:
 
 async def test_successful_flush_drains_buffer(patched_httpx: dict[str, _FakeClient]) -> None:
     patched_httpx["client"] = _FakeClient(
-        [_FakeResponse(200, {"errors": [], "warnings": []})],
+        [_FakeResponse(200, {"accepted": 3, "rejected": 0, "errors": [], "warnings": []})],
     )
     for i in range(3):
         telemetry.enqueue(_ev(i))
@@ -292,7 +310,7 @@ async def test_flush_serializes_flexible_provider_model_exactly(
     patched_httpx: dict[str, _FakeClient],
 ) -> None:
     patched_httpx["client"] = _FakeClient(
-        [_FakeResponse(200, {"errors": [], "warnings": []})],
+        [_FakeResponse(200, {"accepted": 1, "rejected": 0, "errors": [], "warnings": []})],
     )
     event = _ev(42)
     event["provider"] = "ollama"
@@ -317,7 +335,7 @@ async def test_explicit_flush_drains_multiple_batches(
         flush_interval=60.0,
     )
     patched_httpx["client"] = _FakeClient(
-        [_FakeResponse(200, {"errors": [], "warnings": []})],
+        [_FakeResponse(200, {"accepted": 1, "rejected": 0, "errors": [], "warnings": []})],
     )
     for i in range(5):
         telemetry.enqueue(_ev(i))
@@ -340,7 +358,7 @@ async def test_enqueue_auto_flushes_on_running_loop(
     """Regression: enqueue() previously never scheduled a flush — telemetry
     sat in the buffer forever unless the host manually awaited flush()."""
     patched_httpx["client"] = _FakeClient(
-        [_FakeResponse(200, {"errors": [], "warnings": []})],
+        [_FakeResponse(200, {"accepted": 1, "rejected": 0, "errors": [], "warnings": []})],
     )
     telemetry.enqueue(_ev(0))
     task = telemetry._state.flush_task  # type: ignore[attr-defined]
@@ -360,7 +378,12 @@ async def test_enqueue_full_batch_wakes_sleeping_flush_task() -> None:
     )
     holder = {
         "client": _FakeClient(
-            [_FakeResponse(200, {"errors": [], "warnings": []})],
+            [
+                _FakeResponse(
+                    200,
+                    {"accepted": 1, "rejected": 0, "errors": [], "warnings": []},
+                )
+            ],
         ),
     }
     sleep_started = asyncio.Event()
@@ -407,7 +430,12 @@ async def test_sleeping_flush_task_exits_if_buffer_drained_externally() -> None:
     )
     holder = {
         "client": _FakeClient(
-            [_FakeResponse(200, {"errors": [], "warnings": []})],
+            [
+                _FakeResponse(
+                    200,
+                    {"accepted": 1, "rejected": 0, "errors": [], "warnings": []},
+                )
+            ],
         ),
     }
     sleep_started = asyncio.Event()
@@ -475,7 +503,10 @@ async def test_enqueue_full_batch_during_post_does_not_cancel_in_flight_flush() 
             self.bodies.append(kwargs.get("content", ""))
             self.post_started.set()
             await self.release_post.wait()
-            return _FakeResponse(200, {"errors": [], "warnings": []})
+            return _FakeResponse(
+                200,
+                {"accepted": 1, "rejected": 0, "errors": [], "warnings": []},
+            )
 
     client = BlockingClient()
 
@@ -535,7 +566,10 @@ async def test_lru_saturation_does_not_hide_flush_loop_progress() -> None:
             if self.posts == 1:
                 telemetry.enqueue(_ev(3))
                 telemetry.enqueue(_ev(4))
-            return _FakeResponse(200, {"errors": [], "warnings": []})
+            return _FakeResponse(
+                200,
+                {"accepted": 1, "rejected": 0, "errors": [], "warnings": []},
+            )
 
     client = RefillingClient()
 
@@ -584,7 +618,10 @@ async def test_enqueue_full_batch_during_retry_backoff_does_not_cancel_flush() -
             self.bodies.append(kwargs.get("content", ""))
             if self.posts == 1:
                 return _FakeResponse(500)
-            return _FakeResponse(200, {"errors": [], "warnings": []})
+            return _FakeResponse(
+                200,
+                {"accepted": 1, "rejected": 0, "errors": [], "warnings": []},
+            )
 
     client = RetryClient()
     retry_sleep_started = asyncio.Event()
@@ -629,7 +666,7 @@ def test_enqueue_without_loop_buffers_and_atexit_drains(
     patched_httpx: dict[str, _FakeClient],
 ) -> None:
     patched_httpx["client"] = _FakeClient(
-        [_FakeResponse(200, {"errors": [], "warnings": []})],
+        [_FakeResponse(200, {"accepted": 1, "rejected": 0, "errors": [], "warnings": []})],
     )
     telemetry.enqueue(_ev(0))
     # Sync host: no running loop, so no background task — atexit is the backstop.

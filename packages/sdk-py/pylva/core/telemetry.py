@@ -310,11 +310,11 @@ async def _flush_once(state: _State | None = None) -> None:
         return
 
     try:
-        parsed = response.json()
+        parsed = _ingest_response_container(response.json())
     except Exception:
         _retain_malformed_success_batch(current, new_batch)
         return
-    if not isinstance(parsed, dict):
+    if parsed is None:
         _retain_malformed_success_batch(current, new_batch)
         return
 
@@ -383,6 +383,20 @@ def _requeue_batch(state: _State, batch: list[dict[str, Any]]) -> None:
 def _retain_malformed_success_batch(state: _State, batch: list[dict[str, Any]]) -> None:
     _requeue_batch(state, batch)
     print("[pylva] flush received malformed success response; batch retained", flush=True)
+
+
+def _ingest_response_container(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    for key in ("accepted", "rejected"):
+        count = value.get(key)
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            return None
+    for key in ("errors", "warnings", "budget_exceeded"):
+        collection = value.get(key)
+        if collection is not None and not isinstance(collection, list):
+            return None
+    return value
 
 
 def _enter_degraded(
