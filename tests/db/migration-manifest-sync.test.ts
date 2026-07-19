@@ -20,6 +20,7 @@ const AUTHORITATIVE_BUDGET_RUNTIME_ROLES_MIGRATION =
 const AUTHORITATIVE_BUDGET_LEGACY_RLS_COMPATIBILITY_MIGRATION =
   '053_legacy_catalog_owner_rls_compatibility.sql';
 const GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION = '054_general_app_runtime_owner_boundary.sql';
+const MONTHLY_INVOICE_PERIOD_RETRY_MIGRATION = '055_monthly_invoice_period_retry.sql';
 const FROZEN_LEDGER_SHA256 = '3bd8b69ef1b09814e6cc0645b2eb188504fc84b4e15abbe5e42ddf704619218e';
 const FROZEN_RUNTIME_SHA256 = '3fabbc1236e562eddd1b83e4c8826abfb61d0eca73b8e4773b10d94599055af8';
 const FROZEN_RUNTIME_ROLES_SHA256 =
@@ -117,7 +118,7 @@ describe('migration manifest sync', () => {
     expect(entry.sha256).toBe(LEGACY_RLS_COMPATIBILITY_SHA256);
   });
 
-  it('tracks the fixed general-app owner boundary as the schema head', async () => {
+  it('tracks the fixed general-app owner boundary', async () => {
     const entry = EXPECTED_MIGRATIONS.find(
       (migration) => migration.filename === GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION,
     );
@@ -130,7 +131,21 @@ describe('migration manifest sync', () => {
     expect(entry).toMatchObject({ phase: 'pre_roll' });
     expect(entry.sha256).toBe(computeChecksum(content));
     expect(entry.sha256).toBe(GENERAL_APP_RUNTIME_OWNER_BOUNDARY_SHA256);
-    expect(EXPECTED_SCHEMA_HEAD).toBe(GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION);
+  });
+
+  it('tracks the durable monthly invoice retry ledger as the schema head', async () => {
+    const entry = EXPECTED_MIGRATIONS.find(
+      (migration) => migration.filename === MONTHLY_INVOICE_PERIOD_RETRY_MIGRATION,
+    );
+    expect(entry).toBeDefined();
+    if (entry === undefined) {
+      throw new Error(`Missing manifest entry for ${MONTHLY_INVOICE_PERIOD_RETRY_MIGRATION}`);
+    }
+
+    const content = await fs.readFile(path.join(MIGRATIONS_DIR, entry.filename), 'utf8');
+    expect(entry).toMatchObject({ phase: 'pre_roll' });
+    expect(entry.sha256).toBe(computeChecksum(content));
+    expect(EXPECTED_SCHEMA_HEAD).toBe(MONTHLY_INVOICE_PERIOD_RETRY_MIGRATION);
   });
 
   it('marks the resumable 048-049 suffix as post_roll and defaults earlier migrations to pre_roll', () => {

@@ -318,6 +318,22 @@ describe('db-migrate core and CLI', () => {
     }
   });
 
+  it('bounds the lock wait for the general application ownership migration', async () => {
+    const filename = '054_general_app_runtime_owner_boundary.sql';
+    const content = "SELECT '054';";
+    await writeMigration(filename, content);
+    const { client, calls } = createRecordingSqlClient({ ledgerRows: [] });
+
+    const result = await runWithRecording({ mode: 'apply', yes: false, json: false }, client);
+
+    expect(result.exitCode).toBe(0);
+    const transactionQueries = calls
+      .filter((call) => call.kind === 'tx.unsafe')
+      .map((call) => call.query);
+    expect(transactionQueries[0]).toBe("SET LOCAL lock_timeout = '1s'");
+    expect(transactionQueries[1]).toBe(content);
+  });
+
   it('stops on the first migration failure without recording the failed file', async () => {
     await writeMigration('001_one.sql', "SELECT '001';");
     await writeMigration('002_bad.sql', "SELECT '002';");
