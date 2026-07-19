@@ -95,7 +95,7 @@
     "lucide-react": "^1.25.0",
     "msw": "^2.15.0",
     "pino-pretty": "^11.3.0",
-    "postcss": "^8.5.19",
+    "postcss": "^8.5.20",
     "prettier": "3.9.5",
     "size-limit": "^11.1.6",
     "tailwind-merge": "^2.6.1",

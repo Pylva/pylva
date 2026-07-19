@@ -6,7 +6,7 @@ import { minify } from 'terser';
 import ts from 'typescript';
 
 const executable = process.platform === 'win32' ? 'tsup.cmd' : 'tsup';
-const expectedTerserVersion = '5.46.1';
+const expectedTerserVersion = '5.49.0';
 const terserCompressOptions = {
   ecma: 2020,
   passes: 2,

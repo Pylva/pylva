@@ -671,8 +671,8 @@ describe('immutable TypeScript package gate configuration', () => {
 
   it('pins one conservative Terser pass after every unminified runtime phase', () => {
     const manifest = json('packages/sdk-ts/package.json');
-    expect((manifest['devDependencies'] as Record<string, unknown>)['terser']).toBe('5.46.1');
-    expect(scriptStaticValue('scripts/build.mjs', 'expectedTerserVersion')).toBe('5.46.1');
+    expect((manifest['devDependencies'] as Record<string, unknown>)['terser']).toBe('5.49.0');
+    expect(scriptStaticValue('scripts/build.mjs', 'expectedTerserVersion')).toBe('5.49.0');
     expect(scriptStaticValue('scripts/build.mjs', 'phases')).toEqual([
       'tsup.config.ts',
       'tsup.canonical.config.ts',
