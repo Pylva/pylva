@@ -372,7 +372,7 @@ describe('immutable TypeScript package gate configuration', () => {
       'actions/upload-artifact@v7',
     );
     expect(step(matrix, 'Download the one immutable npm artifact')['uses']).toBe(
-      'actions/download-artifact@v7',
+      'actions/download-artifact@v8',
     );
 
     const identity = runSource(step(matrix, 'Verify downloaded artifact identity'));
@@ -456,7 +456,7 @@ describe('immutable TypeScript package gate configuration', () => {
     expect(attestation).not.toContain("'schedule'");
 
     const download = step(publish, 'Download the exact attested TypeScript release artifact');
-    expect(download['uses']).toBe('actions/download-artifact@v7');
+    expect(download['uses']).toBe('actions/download-artifact@v8');
     expect(download['with']).toMatchObject({
       name: 'pylva-typescript-sdk-immutable',
       'github-token': '${{ github.token }}',

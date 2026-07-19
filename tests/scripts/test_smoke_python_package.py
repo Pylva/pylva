@@ -193,7 +193,7 @@ class ImmutableArtifactHarnessTests(unittest.TestCase):
         self.assertIn("run?.conclusion === 'success'", attestation)
         self.assertIn("new Set(['push', 'workflow_dispatch'])", attestation)
         self.assertNotIn("'schedule'", attestation.split("RELEASE_WORKFLOW_GATES", 1)[0])
-        self.assertIn("actions/download-artifact@v7", workflow)
+        self.assertIn("actions/download-artifact@v8", workflow)
         self.assertIn("name: pylva-python-sdk-immutable", workflow)
         self.assertIn(
             "run-id: ${{ steps.release_gates.outputs.authoritative_run_id }}", workflow

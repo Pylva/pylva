@@ -187,7 +187,7 @@ describe('immutable TypeScript artifact service gate', () => {
     );
     expect(
       namedStep(integration, 'Download the immutable TypeScript artifact for final service gates'),
-    ).toContain('uses: actions/download-artifact@v7');
+    ).toContain('uses: actions/download-artifact@v8');
 
     const verify = namedStep(
       integration,
@@ -251,7 +251,7 @@ describe('immutable TypeScript artifact service gate', () => {
     expect(artifact).toContain('name: pylva-python-sdk-immutable');
     expect(artifact).toContain('--verify-existing');
     expect(matrix).toContain('    needs: python-package-artifact');
-    expect(matrix).toContain('uses: actions/download-artifact@v7');
+    expect(matrix).toContain('uses: actions/download-artifact@v8');
     expect(matrix).toContain('name: pylva-python-sdk-immutable');
     expect(matrix).toContain('--wheel-sha256 "$PYLVA_PYTHON_WHEEL_SHA256"');
     expect(matrix).toContain('--sdist-sha256 "$PYLVA_PYTHON_SDIST_SHA256"');
