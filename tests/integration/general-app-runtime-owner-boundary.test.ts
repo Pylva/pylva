@@ -162,7 +162,7 @@ suite('general-app runtime owner boundary (real PostgreSQL login)', () => {
 
   it('reads SELECT-only schema status while direct authority access remains denied', async () => {
     await expect(getSchemaStatus(sql)).resolves.toMatchObject({
-      applied_head: '054_general_app_runtime_owner_boundary.sql',
+      applied_head: '055_monthly_invoice_period_retry.sql',
       pending_count: 0,
       state: 'in_sync',
     });

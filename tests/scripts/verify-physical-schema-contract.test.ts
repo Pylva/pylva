@@ -30,6 +30,7 @@ import {
   AUTHORITATIVE_BUDGET_UNBOUNDED_NUMERIC_COLUMNS,
   AUTHORITATIVE_BUDGET_WIDE_NUMERIC_COLUMNS,
   GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION,
+  MONTHLY_INVOICE_PERIOD_RETRY_MIGRATION,
   parseVerifyPhysicalSchemaArgs,
   physicalSchemaResultJson,
   scopeValuesFromConstraintDefinition,
@@ -198,6 +199,12 @@ const authoritativeLedgerMigrations = [
     checksum: AUTHORITATIVE_BUDGET_MIGRATION_SHA256[GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION],
     content: '',
     filename: GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION,
+    phase: 'pre_roll' as const,
+  },
+  {
+    checksum: 'monthly-invoice-period-retry-checksum',
+    content: '',
+    filename: MONTHLY_INVOICE_PERIOD_RETRY_MIGRATION,
     phase: 'pre_roll' as const,
   },
 ];
@@ -580,7 +587,7 @@ async function verifyLedger(overrides: Partial<LedgerCatalogRows> = {}) {
 }
 
 describe('physical authoritative budget-ledger schema contract', () => {
-  it('pins the checked-in 050–054 bytes and requires 054 to be the schema head', async () => {
+  it('pins the checked-in 050–054 bytes and requires the latest migration as schema head', async () => {
     const migrationsDirectory = new URL('../../db/migrations/', import.meta.url);
     const filenames = (await readdir(migrationsDirectory))
       .filter((filename) => filename.endsWith('.sql'))
@@ -596,7 +603,7 @@ describe('physical authoritative budget-ledger schema contract', () => {
   });
 
   it('passes an exact physical schema and serializes deterministically', async () => {
-    expect(AUTHORITATIVE_BUDGET_SCHEMA_HEAD).toBe(GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION);
+    expect(AUTHORITATIVE_BUDGET_SCHEMA_HEAD).toBe(MONTHLY_INVOICE_PERIOD_RETRY_MIGRATION);
     expect(AUTHORITATIVE_BUDGET_MIGRATIONS).toEqual([
       AUTHORITATIVE_BUDGET_LEDGER_MIGRATION,
       AUTHORITATIVE_BUDGET_RUNTIME_MIGRATION,
@@ -766,7 +773,7 @@ describe('physical authoritative budget-ledger schema contract', () => {
         {
           checksum: 'future-checksum',
           content: '',
-          filename: '055_unreviewed_schema_head.sql',
+          filename: '056_unreviewed_schema_head.sql',
           phase: 'pre_roll' as const,
         },
       ],
@@ -781,7 +788,7 @@ describe('physical authoritative budget-ledger schema contract', () => {
     });
     expect(headDrift.ok).toBe(false);
     expect(headDrift.schema_head).toEqual({
-      actual: '055_unreviewed_schema_head.sql',
+      actual: '056_unreviewed_schema_head.sql',
       expected: AUTHORITATIVE_BUDGET_SCHEMA_HEAD,
       matches: false,
     });
