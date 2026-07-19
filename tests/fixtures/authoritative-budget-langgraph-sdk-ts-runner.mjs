@@ -2,133 +2,109 @@ import crypto from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import {
+  assertEgressSentinelBlocked,
+  createServiceRunnerFetch,
+} from './service-runner-egress-guard.mjs';
 import { loadTypescriptSdkArtifact } from './typescript-sdk-artifact.mjs';
 
 const networkFetch = globalThis.fetch;
-const configuredBackend = (() => {
-  const endpoint = process.env.PYLVA_LANGGRAPH_ENDPOINT;
-  if (!endpoint) return null;
-  const parsed = new URL(endpoint);
-  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
-    throw new Error('invalid TypeScript LangGraph backend endpoint');
-  }
-  return {
-    basePath: parsed.pathname.replace(/\/$/u, ''),
-    origin: parsed.origin,
-  };
-})();
-const backendStaticPaths = new Set([
-  '/api/v1/budget/capabilities',
-  '/api/v1/budget/reservations',
-  '/api/v1/budget/sync',
-  '/api/v1/events',
-  '/api/v1/pricing',
-  '/api/v1/rules',
-  '/api/v1/sdk/non-llm-discoveries',
-  '/api/v1/sdk/non-llm-policy',
-]);
-const backendReservationMutation =
-  /^\/api\/v1\/budget\/reservations\/[^/]+\/(?:commit|extend|release)$/u;
-
-function isAllowedBackendRequest(url) {
-  if (
-    configuredBackend === null ||
-    url.origin !== configuredBackend.origin ||
-    url.search ||
-    url.hash
-  ) {
-    return false;
-  }
-  if (!url.pathname.startsWith(`${configuredBackend.basePath}/`)) return false;
-  const path = url.pathname.slice(configuredBackend.basePath.length);
-  return backendStaticPaths.has(path) || backendReservationMutation.test(path);
-}
-
 let activeJourney = null;
-globalThis.fetch = async (input, request) => {
-  const href = input instanceof Request ? input.url : String(input);
-  const url = new URL(href);
+async function providerFetch(input, request) {
   const bodyText =
     input instanceof Request
       ? await input.clone().text()
       : request?.body == null
         ? ''
         : String(request.body);
-  if (url.origin === 'https://api.openai.com' && url.pathname === '/v1/chat/completions') {
-    if (activeJourney === null) throw new Error('official provider dispatched without a journey');
-    const body = JSON.parse(bodyText);
-    if (
-      body.model !== 'gpt-langgraph-e2e' ||
-      body.max_completion_tokens !== 8 ||
-      !Array.isArray(body.messages)
-    ) {
-      throw new Error('official OpenAI request lost the controlled LangGraph request shape');
-    }
-    activeJourney.providerCalls += 1;
-    return new Response(
-      JSON.stringify({
-        id: 'chatcmpl_langgraph_e2e',
-        object: 'chat.completion',
-        created: 1_784_009_600,
-        model: body.model,
-        service_tier: 'default',
-        choices: [
-          {
-            index: 0,
-            message: { role: 'assistant', content: 'llm-ok', refusal: null },
-            finish_reason: 'stop',
-            logprobs: null,
-          },
-        ],
-        usage: {
-          prompt_tokens: 2,
-          completion_tokens: 3,
-          total_tokens: 5,
-          prompt_tokens_details: { cached_tokens: 0 },
-        },
-      }),
-      {
-        status: 200,
-        headers: {
-          'content-type': 'application/json',
-          'x-request-id': 'req_langgraph_e2e',
-        },
-      },
-    );
-  }
-  if (url.origin === 'https://api.openai.com') {
-    throw new Error(`unexpected official OpenAI request: ${url.pathname}`);
-  }
-  if (!isAllowedBackendRequest(url)) {
-    throw new Error(`unexpected external request: ${url.origin}${url.pathname}`);
-  }
-  const response = await networkFetch(input, request);
+  if (activeJourney === null) throw new Error('official provider dispatched without a journey');
+  const body = JSON.parse(bodyText);
   if (
-    activeJourney !== null &&
-    url.pathname === '/api/v1/budget/reservations' &&
-    bodyText.length > 0
+    body.model !== 'gpt-langgraph-e2e' ||
+    body.max_completion_tokens !== 8 ||
+    !Array.isArray(body.messages)
   ) {
-    const reservation = JSON.parse(bodyText);
-    const decision = await response.clone().json();
-    if (
-      reservation.kind === 'llm' &&
-      decision.decision === 'reserved' &&
-      activeJourney.allowedLlm === null
-    ) {
-      if (
-        typeof reservation.operation_id !== 'string' ||
-        typeof decision.reservation_id !== 'string'
-      ) {
-        throw new Error('authoritative LLM reservation omitted its controlled identity');
-      }
-      activeJourney.allowedLlm = {
-        operation_id: reservation.operation_id,
-        reservation_id: decision.reservation_id,
-      };
-    }
+    throw new Error('official OpenAI request lost the controlled LangGraph request shape');
   }
-  return response;
-};
+  activeJourney.providerCalls += 1;
+  return new Response(
+    JSON.stringify({
+      id: 'chatcmpl_langgraph_e2e',
+      object: 'chat.completion',
+      created: 1_784_009_600,
+      model: body.model,
+      service_tier: 'default',
+      choices: [
+        {
+          index: 0,
+          message: { role: 'assistant', content: 'llm-ok', refusal: null },
+          finish_reason: 'stop',
+          logprobs: null,
+        },
+      ],
+      usage: {
+        prompt_tokens: 2,
+        completion_tokens: 3,
+        total_tokens: 5,
+        prompt_tokens_details: { cached_tokens: 0 },
+      },
+    }),
+    {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+        'x-request-id': 'req_langgraph_e2e',
+      },
+    },
+  );
+}
+
+let guardedFetch = null;
+const configuredEndpoint = process.env.PYLVA_LANGGRAPH_ENDPOINT;
+if (configuredEndpoint) {
+  const serviceFetch = createServiceRunnerFetch({
+    endpoint: configuredEndpoint,
+    networkFetch,
+    providerHandler: providerFetch,
+  });
+  guardedFetch = async (input, request) => {
+    const href = input instanceof Request ? input.url : String(input);
+    const url = new URL(href);
+    const bodyText =
+      input instanceof Request
+        ? await input.clone().text()
+        : request?.body == null
+          ? ''
+          : String(request.body);
+    const response = await serviceFetch(input, request);
+    if (
+      activeJourney !== null &&
+      url.pathname === '/api/v1/budget/reservations' &&
+      bodyText.length > 0
+    ) {
+      const reservation = JSON.parse(bodyText);
+      const decision = await response.clone().json();
+      if (
+        reservation.kind === 'llm' &&
+        decision.decision === 'reserved' &&
+        activeJourney.allowedLlm === null
+      ) {
+        if (
+          typeof reservation.operation_id !== 'string' ||
+          typeof decision.reservation_id !== 'string'
+        ) {
+          throw new Error('authoritative LLM reservation omitted its controlled identity');
+        }
+        activeJourney.allowedLlm = {
+          operation_id: reservation.operation_id,
+          reservation_id: decision.reservation_id,
+        };
+      }
+    }
+    return response;
+  };
+  globalThis.fetch = guardedFetch;
+}
 
 const loadedArtifact = await loadTypescriptSdkArtifact({ requireLangGraph: true }).catch(
   (error) => {
@@ -336,6 +312,8 @@ function buildGraph(journey) {
 
 async function main() {
   const { apiKey, customerId, endpoint, refusalKind } = requiredEnvironment();
+  if (guardedFetch === null) throw new Error('TypeScript LangGraph egress guard is unavailable');
+  await assertEgressSentinelBlocked(guardedFetch, process.env.PYLVA_EGRESS_SENTINEL_URL);
 
   // Deliberately buffer one old-identity callback event in the independently
   // built LangGraph entrypoint. Root init below must synchronously clear it.

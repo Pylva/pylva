@@ -36,6 +36,8 @@ import {
   getReadyBudgetProjectionClickHouseClient,
   type BudgetProjectionClickHousePostureClient,
 } from '../../src/lib/budget-projection/clickhouse-posture.js';
+import { createBudgetProjectionTarget } from '../../src/lib/budget-projection/clickhouse.js';
+import { PAYLOAD_HASH, toolPayload } from './fixtures.js';
 
 const DATABASE = 'pylva';
 const PROJECTOR_ROLE = 'pylva_authoritative_budget_projector';
@@ -276,6 +278,47 @@ describe('authoritative projector ClickHouse grant attestation', () => {
 });
 
 describe('production authoritative projector posture', () => {
+  it('detects role drift within one TTL through the composed default projection path', async () => {
+    let now = 1_000_000;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const acceptedInsert = vi.fn(async () => undefined);
+    const acceptedClient = Object.assign(postureClient({ username: 'budget_projector' }), {
+      insert: acceptedInsert,
+    }) as unknown as ClickHouseClient;
+    mocks.projectorClient = acceptedClient;
+    mocks.getClient.mockReturnValue(acceptedClient);
+    const target = createBudgetProjectionTarget();
+
+    try {
+      await expect(target.insert(toolPayload(), PAYLOAD_HASH)).resolves.toBeUndefined();
+      expect(acceptedInsert).toHaveBeenCalledTimes(1);
+
+      const driftedInsert = vi.fn(async () => undefined);
+      const driftedClient = Object.assign(
+        postureClient({
+          username: 'budget_projector',
+          roleGrants: [PROJECTOR_ROLE_GRANTS, `GRANT ALTER ON ${DATABASE}.* TO ${PROJECTOR_ROLE}`],
+        }),
+        { insert: driftedInsert },
+      ) as unknown as ClickHouseClient;
+      mocks.projectorClient = driftedClient;
+      mocks.getClient.mockReturnValue(driftedClient);
+
+      now += BUDGET_PROJECTION_CLICKHOUSE_ATTESTATION_TTL_MS - 1;
+      await expect(target.insert(toolPayload(), PAYLOAD_HASH)).resolves.toBeUndefined();
+      expect(driftedInsert).toHaveBeenCalledTimes(1);
+
+      now += 2;
+      await expect(target.insert(toolPayload(), PAYLOAD_HASH)).rejects.toMatchObject({
+        name: 'BudgetProjectionClickHouseNotReadyError',
+        reason: 'projector_effective_grants_mismatch',
+      });
+      expect(driftedInsert).toHaveBeenCalledTimes(1);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('coalesces success only for a bounded window, then detects privilege drift', async () => {
     let now = 1_000_000;
     const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);

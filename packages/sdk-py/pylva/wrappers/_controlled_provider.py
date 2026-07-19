@@ -65,18 +65,36 @@ _MAX_LOCAL_SCALAR_BYTES = 2 * 1024 * 1024
 _MAX_EVIDENCE_RECORD_ENTRIES = 256
 
 
-def _task_has_pending_cancellation(task: asyncio.Task[Any] | None) -> bool:
-    """Return the caller cancellation count when the runtime exposes it.
+async def _shielded_task_outcome(
+    task: asyncio.Task[Any],
+) -> tuple[Literal["result", "cancelled", "error"], Any]:
+    """Distinguish inner cancellation from caller cancellation on Python 3.10.
 
-    ``Task.cancelling()`` was added after Python 3.10.  Callers on the
-    declared 3.10 floor are still distinguished from an inner-task
-    cancellation by checking the shielded task itself at each call site.
+    Python 3.10 has no public cancellation counter.  A bridge Future converts
+    the inner task's terminal state into a normal result; therefore a
+    ``CancelledError`` raised while awaiting the shield can only belong to the
+    caller.  The raw task owns the callback until it finishes, so cancellation
+    of the caller cannot orphan an exception-producing background task.
     """
 
-    if task is None:
-        return False
-    cancelling = getattr(task, "cancelling", None)
-    return bool(cancelling()) if callable(cancelling) else False
+    loop = asyncio.get_running_loop()
+    outcome: asyncio.Future[tuple[Literal["result", "cancelled", "error"], Any]] = (
+        loop.create_future()
+    )
+
+    def capture(completed: asyncio.Task[Any]) -> None:
+        if outcome.done():
+            return
+        if completed.cancelled():
+            outcome.set_result(("cancelled", None))
+            return
+        try:
+            outcome.set_result(("result", completed.result()))
+        except BaseException as error:
+            outcome.set_result(("error", error))
+
+    task.add_done_callback(capture)
+    return await asyncio.shield(outcome)
 
 
 @dataclass(frozen=True)
@@ -1657,18 +1675,20 @@ class _AsyncHeartbeat:
         task = self._task
         if task is None or task is asyncio.current_task():
             return
-        caller = asyncio.current_task()
         try:
-            await asyncio.shield(task)
+            kind, value = await _shielded_task_outcome(task)
         except asyncio.CancelledError:
-            if _task_has_pending_cancellation(caller):
-                raise
-            if not task.cancelled():
-                raise
-        except Exception:
+            # The bridge never raises for inner cancellation, including on the
+            # Python 3.10 floor, so this is always the caller's cancellation.
+            raise
+        if kind == "cancelled":
+            return
+        if kind == "error" and isinstance(value, Exception):
             # Heartbeat failures are already fail-safe and never release a
             # post-dispatch reservation.  Shutdown only needs quiescence.
-            pass
+            return
+        if kind == "error":
+            raise value
 
 
 def _start_registered_heartbeat(
@@ -1870,6 +1890,11 @@ class SyncControlledStream(Iterator[Any]):
         return result
 
     def __getattribute__(self, name: str) -> Any:
+        if name == "__bases__":
+            # Python 3.10's inspect.getmembers() probes this class-only
+            # attribute on every object. Missing introspection metadata must
+            # use Python's normal protocol rather than the provider guard.
+            raise AttributeError(name)
         if name in {
             "__class__",
             "__dir__",
@@ -1888,6 +1913,8 @@ class SyncControlledStream(Iterator[Any]):
         _sync_stream_reject(self)
 
     def __getattr__(self, _name: str) -> Any:
+        if _name == "__bases__":
+            raise AttributeError(_name)
         _sync_stream_reject(self)
 
     def __setattr__(self, _name: str, _value: object) -> None:
@@ -2252,6 +2279,8 @@ class AsyncControlledStream(AsyncIterator[Any]):
         return cast(str, result)
 
     def __getattribute__(self, name: str) -> Any:
+        if name == "__bases__":
+            raise AttributeError(name)
         if name in {
             "__aenter__",
             "__aexit__",
@@ -2271,6 +2300,8 @@ class AsyncControlledStream(AsyncIterator[Any]):
         _async_stream_reject(self)
 
     def __getattr__(self, _name: str) -> Any:
+        if _name == "__bases__":
+            raise AttributeError(_name)
         _async_stream_reject(self)
 
     def __setattr__(self, _name: str, _value: object) -> None:
@@ -2376,18 +2407,20 @@ async def _async_stream_shutdown_raw(
     if task is asyncio.current_task():
         return None
     try:
-        return await asyncio.shield(task)
+        kind, value = await _shielded_task_outcome(task)
     except asyncio.CancelledError:
-        current = asyncio.current_task()
-        if _task_has_pending_cancellation(current) or not task.cancelled():
-            raise
+        # Inner cancellation is represented by ``kind == "cancelled"``.  A
+        # cancellation raised here therefore always belongs to the caller.
+        raise
+    if kind == "cancelled":
         if not suppress:
-            raise
+            raise asyncio.CancelledError
         return None
-    except BaseException:
+    if kind == "error":
         if not suppress:
-            raise
+            raise value
         return None
+    return value
 
 
 def _async_stream_cleanup_nowait(state: _AsyncControlledStreamState) -> None:
@@ -2593,11 +2626,15 @@ class SyncControlledStreamManager:
         return cast(Any, manager).__exit__(exc_type, exc, tb)
 
     def __getattribute__(self, name: str) -> Any:
+        if name == "__bases__":
+            raise AttributeError(name)
         if name in {"__class__", "__dir__", "__enter__", "__exit__", "__weakref__"}:
             return object.__getattribute__(self, name)
         _sync_stream_manager_reject(self)
 
     def __getattr__(self, _name: str) -> Any:
+        if _name == "__bases__":
+            raise AttributeError(_name)
         _sync_stream_manager_reject(self)
 
     def __setattr__(self, _name: str, _value: object) -> None:
@@ -2755,11 +2792,15 @@ class AsyncControlledStreamManager:
         return await cast(Any, manager).__aexit__(exc_type, exc, tb)
 
     def __getattribute__(self, name: str) -> Any:
+        if name == "__bases__":
+            raise AttributeError(name)
         if name in {"__aenter__", "__aexit__", "__class__", "__dir__", "__weakref__"}:
             return object.__getattribute__(self, name)
         _async_stream_manager_reject(self)
 
     def __getattr__(self, _name: str) -> Any:
+        if _name == "__bases__":
+            raise AttributeError(_name)
         _async_stream_manager_reject(self)
 
     def __setattr__(self, _name: str, _value: object) -> None:

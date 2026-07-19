@@ -1079,3 +1079,20 @@ in the public repository. A documentation update first fits durable material int
 plan, decision, rollout, operations, readiness, LangGraph, and release-note surfaces. Adding a new
 top-level docs source file requires an explicit public-source policy decision and matching boundary
 review; documentation work does not silently widen the allowlist merely to make its own test pass.
+
+## 2026-07-18 — Production-readiness remediation
+
+### D115: Released authoritative-control names are compatibility contracts
+
+The existing public names describe deliberate boundaries and must not be renamed as cosmetic
+cleanup. Control decisions continue to identify their source as `authoritative_control`. SDK
+transport failures continue to use the generic `PylvaControlApiError` family, with
+`IDEMPOTENCY_CONFLICT` carrying the specific conflict code instead of introducing another public
+error class. Local bypass and availability outcomes remain `control_disabled` and
+`control_unavailable`. A capabilities response of HTTP 404 or 405 continues to map to
+`unsupported_backend`, because either status means that the contacted deployment does not support
+the versioned capability contract from the SDK's perspective.
+
+These names are shared wire and SDK compatibility surfaces. A future rename requires an explicit
+versioned migration and compatibility window; implementation-language symmetry or naming taste is
+not sufficient reason to change them.

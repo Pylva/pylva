@@ -10,6 +10,8 @@ import {
   markBudgetControlReady,
 } from '../../src/lib/budget-control/readiness.js';
 import { applyMigrationsThrough, createScratchDb, type ScratchDb } from '../helpers/scratch-db.js';
+import { startEgressSentinel, type EgressSentinel } from '../helpers/egress-sentinel.js';
+import { assertPythonSdkArtifactEvidence } from '../helpers/python-sdk-artifact-evidence.js';
 
 const SERVER_FIXTURE = path.resolve('tests/fixtures/authoritative-budget-http-server.ts');
 const TS_RUNNER = path.resolve('tests/fixtures/authoritative-budget-langgraph-sdk-ts-runner.mjs');
@@ -75,6 +77,11 @@ interface ReservationClosure {
   reservation_id: string | null;
   customer_id: string;
   trace_id: string;
+  span_id: string;
+  parent_span_id: string | null;
+  request_trace_id: string | null;
+  request_span_id: string | null;
+  request_parent_span_id: string | null;
   step_name: string | null;
   framework: string;
   kind: 'llm' | 'tool';
@@ -88,6 +95,9 @@ interface ReservationClosure {
   deciding_rule_key: string | null;
   usage_operation_id: string | null;
   usage_decision_id: string | null;
+  usage_trace_id: string | null;
+  usage_span_id: string | null;
+  usage_parent_span_id: string | null;
   usage_kind: 'llm' | 'tool' | null;
   usage_cost_usd: string | null;
   actual_input_tokens: string | null;
@@ -96,11 +106,15 @@ interface ReservationClosure {
   sdk_language: string | null;
   sdk_version: string | null;
   outbox_count: string;
+  outbox_trace_id: string | null;
+  outbox_span_id: string | null;
+  outbox_parent_span_id: string | null;
 }
 
 let scratch: ScratchDb | undefined;
 const servers = new Set<HarnessServer>();
 const runners = new Set<RunnerProcess>();
+const sentinels = new Set<EgressSentinel>();
 
 function requiredArtifactEnvironment(name: string): string {
   const value = process.env[name];
@@ -281,6 +295,7 @@ function runnerEnvironment(
   runtime: Runtime,
   fixture: BuilderFixture,
   endpoint: string,
+  egressSentinel?: string,
 ): NodeJS.ProcessEnv {
   return {
     ...process.env,
@@ -288,6 +303,7 @@ function runnerEnvironment(
     PYLVA_LANGGRAPH_CUSTOMER_ID: fixture.customerId,
     PYLVA_LANGGRAPH_ENDPOINT: endpoint,
     PYLVA_LANGGRAPH_REFUSAL_KIND: runtime === 'typescript' ? 'llm' : 'tool',
+    ...(egressSentinel ? { PYLVA_EGRESS_SENTINEL_URL: egressSentinel } : {}),
     ...(runtime === 'python'
       ? {
           PYTHONDONTWRITEBYTECODE: '1',
@@ -302,6 +318,7 @@ async function runJourney(
   runtime: Runtime,
   fixture: BuilderFixture,
   endpoint: string,
+  egressSentinel?: string,
 ): Promise<JourneyResult> {
   const command =
     runtime === 'typescript'
@@ -310,7 +327,7 @@ async function runJourney(
   const script = runtime === 'typescript' ? TS_RUNNER : PY_RUNNER;
   const child = spawn(command, [script], {
     cwd: process.cwd(),
-    env: runnerEnvironment(runtime, fixture, endpoint),
+    env: runnerEnvironment(runtime, fixture, endpoint, egressSentinel),
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   const processHandle: RunnerProcess = {
@@ -499,6 +516,7 @@ function assertRunnerResult(
     assertTypescriptArtifactEvidence(result);
     expect(result['identity_reinit_probe']).toBe(true);
   } else {
+    assertPythonSdkArtifactEvidence(result);
     expect(String(result['sdk_path'])).toContain('/site-packages/pylva/__init__.py');
     expect(result['sdk_version']).toBe('1.2.0');
     expect(String(result['openai_path'])).toContain('/site-packages/openai/__init__.py');
@@ -520,6 +538,11 @@ async function assertBackendClosure(
         reservation.reservation_id::TEXT AS reservation_id,
         reservation.customer_id,
         reservation.trace_id::TEXT AS trace_id,
+        reservation.span_id::TEXT AS span_id,
+        reservation.parent_span_id::TEXT AS parent_span_id,
+        reservation.request_snapshot->>'trace_id' AS request_trace_id,
+        reservation.request_snapshot->>'span_id' AS request_span_id,
+        reservation.request_snapshot->>'parent_span_id' AS request_parent_span_id,
         reservation.step_name,
         reservation.framework,
         reservation.kind,
@@ -535,6 +558,9 @@ async function assertBackendClosure(
         allocation.rule_key::TEXT AS deciding_rule_key,
         usage.operation_id::TEXT AS usage_operation_id,
         usage.reservation_decision_id::TEXT AS usage_decision_id,
+        usage.trace_id::TEXT AS usage_trace_id,
+        usage.span_id::TEXT AS usage_span_id,
+        usage.parent_span_id::TEXT AS usage_parent_span_id,
         usage.kind AS usage_kind,
         CASE WHEN usage.actual_cost_usd IS NULL THEN NULL
           ELSE public.pylva_budget_decimal_text(usage.actual_cost_usd) END AS usage_cost_usd,
@@ -549,7 +575,25 @@ async function assertBackendClosure(
           FROM public.budget_cost_event_outbox outbox
           WHERE outbox.builder_id = usage.builder_id
             AND outbox.usage_ledger_id = usage.id
-        ) AS outbox_count
+        ) AS outbox_count,
+        (
+          SELECT outbox.payload->>'trace_id'
+          FROM public.budget_cost_event_outbox outbox
+          WHERE outbox.builder_id = usage.builder_id
+            AND outbox.usage_ledger_id = usage.id
+        ) AS outbox_trace_id,
+        (
+          SELECT outbox.payload->>'span_id'
+          FROM public.budget_cost_event_outbox outbox
+          WHERE outbox.builder_id = usage.builder_id
+            AND outbox.usage_ledger_id = usage.id
+        ) AS outbox_span_id,
+        (
+          SELECT outbox.payload->>'parent_span_id'
+          FROM public.budget_cost_event_outbox outbox
+          WHERE outbox.builder_id = usage.builder_id
+            AND outbox.usage_ledger_id = usage.id
+        ) AS outbox_parent_span_id
       FROM public.budget_reservations reservation
       LEFT JOIN public.budget_reservation_allocations allocation
         ON allocation.builder_id = reservation.builder_id
@@ -587,6 +631,19 @@ async function assertBackendClosure(
     outbox_count: '1',
   });
   expect(llm?.decision_id).toBe(llm?.usage_decision_id);
+  expect(llm).toMatchObject({
+    request_trace_id: result.trace_id,
+    usage_trace_id: result.trace_id,
+    outbox_trace_id: result.trace_id,
+  });
+  expect(llm?.span_id).toMatch(/^[0-9a-f-]{36}$/);
+  expect(llm?.parent_span_id).toMatch(/^[0-9a-f-]{36}$/);
+  expect(llm?.request_span_id).toBe(llm?.span_id);
+  expect(llm?.request_parent_span_id).toBe(llm?.parent_span_id);
+  expect(llm?.usage_span_id).toBe(llm?.span_id);
+  expect(llm?.usage_parent_span_id).toBe(llm?.parent_span_id);
+  expect(llm?.outbox_span_id).toBe(llm?.span_id);
+  expect(llm?.outbox_parent_span_id).toBe(llm?.parent_span_id);
   expect(tool).toMatchObject({
     reservation_id: result.allowed_tool.reservation_id,
     customer_id: fixture.customerId,
@@ -607,6 +664,19 @@ async function assertBackendClosure(
     outbox_count: '1',
   });
   expect(tool?.decision_id).toBe(tool?.usage_decision_id);
+  expect(tool).toMatchObject({
+    request_trace_id: result.trace_id,
+    usage_trace_id: result.trace_id,
+    outbox_trace_id: result.trace_id,
+  });
+  expect(tool?.span_id).toMatch(/^[0-9a-f-]{36}$/);
+  expect(tool?.parent_span_id).toMatch(/^[0-9a-f-]{36}$/);
+  expect(tool?.request_span_id).toBe(tool?.span_id);
+  expect(tool?.request_parent_span_id).toBe(tool?.parent_span_id);
+  expect(tool?.usage_span_id).toBe(tool?.span_id);
+  expect(tool?.usage_parent_span_id).toBe(tool?.parent_span_id);
+  expect(tool?.outbox_span_id).toBe(tool?.span_id);
+  expect(tool?.outbox_parent_span_id).toBe(tool?.parent_span_id);
   expect(refused).toMatchObject({
     decision_id: result.refusal.decision_id,
     reservation_id: null,
@@ -662,14 +732,18 @@ afterEach(async () => {
   await Promise.all([
     ...[...servers].map((server) => server.stop()),
     ...[...runners].map((runner) => runner.stop()),
+    ...[...sentinels].map((sentinel) => sentinel.stop()),
   ]);
+  sentinels.clear();
 });
 
 afterAll(async () => {
   await Promise.all([
     ...[...servers].map((server) => server.stop()),
     ...[...runners].map((runner) => runner.stop()),
+    ...[...sentinels].map((sentinel) => sentinel.stop()),
   ]);
+  sentinels.clear();
   await scratch?.drop();
   scratch = undefined;
 });
@@ -677,18 +751,26 @@ afterAll(async () => {
 describe('real LangGraph SDK-to-authoritative-backend journeys', () => {
   it('allows one LLM and one priced tool, then refuses before dispatch in both SDKs', async () => {
     const server = await startServer();
+    const sentinel = await startEgressSentinel();
+    sentinels.add(sentinel);
     const typescriptFixture = await createControlledBuilder('typescript');
     const pythonFixture = await createControlledBuilder('python');
 
     // Keep artifact processes sequential: it makes any attribution failure
     // unambiguous while still exercising independent backend authorities.
-    const typescript = await runJourney('typescript', typescriptFixture, server.endpoint);
+    const typescript = await runJourney(
+      'typescript',
+      typescriptFixture,
+      server.endpoint,
+      sentinel.endpoint,
+    );
     assertRunnerResult('typescript', typescriptFixture, typescript);
     await assertBackendClosure('typescript', typescriptFixture, typescript);
 
-    const python = await runJourney('python', pythonFixture, server.endpoint);
+    const python = await runJourney('python', pythonFixture, server.endpoint, sentinel.endpoint);
     assertRunnerResult('python', pythonFixture, python);
     await assertBackendClosure('python', pythonFixture, python);
+    expect(sentinel.requestCount()).toBe(0);
 
     const counts = await requestCounts(server);
     expect(counts['GET /api/v1/budget/capabilities']).toBe(2);

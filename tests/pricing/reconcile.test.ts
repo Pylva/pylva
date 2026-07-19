@@ -75,4 +75,20 @@ describe('authoritative pricing reconciliation', () => {
       expect(mocks.clickhouseQuery).not.toHaveBeenCalled();
     },
   );
+
+  it('binds the next UTC year when reconciling December 31', async () => {
+    mocks.clickhouseQuery.mockResolvedValueOnce(result('0')).mockResolvedValueOnce(result('0'));
+
+    await expect(runReconcile('2025-12-31')).resolves.toMatchObject({
+      day: '2025-12-31',
+      alert_fired: false,
+    });
+    expect(mocks.clickhouseQuery).toHaveBeenCalledTimes(2);
+    for (const [request] of mocks.clickhouseQuery.mock.calls) {
+      expect(request.query_params).toEqual({
+        day_start: '2025-12-31T00:00:00.000Z',
+        next_day_start: '2026-01-01T00:00:00.000Z',
+      });
+    }
+  });
 });

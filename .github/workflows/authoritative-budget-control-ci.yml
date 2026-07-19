@@ -148,7 +148,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: '24.18.0'
           cache: pnpm
 
       - name: Install
@@ -178,7 +178,7 @@ jobs:
           name: pylva-typescript-sdk-immutable
           path: ${{ runner.temp }}/pylva-typescript-artifact/*
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
 
   typescript-package-matrix:
     name: TypeScript SDK source + immutable artifact / Node ${{ matrix.node }}
@@ -188,7 +188,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ['20.18.1', '22', '24']
+        node: ['20.18.1', '22.23.1', '24.18.0']
     steps:
       - uses: actions/checkout@v7
 
@@ -210,11 +210,6 @@ jobs:
 
       - name: Typecheck TypeScript SDK
         run: pnpm --filter @pylva/sdk typecheck
-
-      - name: Build and size-check TypeScript SDK
-        run: |
-          pnpm --filter @pylva/sdk build
-          pnpm --filter @pylva/sdk size
 
       - name: Download the one immutable npm artifact
         uses: actions/download-artifact@v7
@@ -286,20 +281,38 @@ jobs:
           --peer-set scripts/ci/typescript-package-peers-ai5.json
           --profile vercel-refuse
 
+      - name: Re-verify the immutable TypeScript artifact after use
+        if: always()
+        run: |
+          set -euo pipefail
+          test -f "${PYLVA_TYPESCRIPT_TARBALL:-}"
+          test "${PYLVA_TYPESCRIPT_TARBALL_SHA256:-}" != ''
+          ACTUAL_SHA256="$(node -e "const fs=require('node:fs'),c=require('node:crypto');process.stdout.write(c.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex'))" "$PYLVA_TYPESCRIPT_TARBALL")"
+          test "$ACTUAL_SHA256" = "$PYLVA_TYPESCRIPT_TARBALL_SHA256"
+
   python-package-artifact:
     name: Python SDK / immutable artifact
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    outputs:
+      wheel: ${{ steps.fingerprint.outputs.wheel }}
+      wheel_sha256: ${{ steps.fingerprint.outputs.wheel_sha256 }}
+      sdist: ${{ steps.fingerprint.outputs.sdist }}
+      sdist_sha256: ${{ steps.fingerprint.outputs.sdist_sha256 }}
+      name: ${{ steps.fingerprint.outputs.name }}
+      version: ${{ steps.fingerprint.outputs.version }}
+      source_sha: ${{ steps.fingerprint.outputs.source_sha }}
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.13'
+          python-version: '3.12'
           cache: pip
           cache-dependency-path: packages/sdk-py/pyproject.toml
 
       - name: Build and fingerprint one immutable Python artifact pair
+        id: fingerprint
         run: |
           set -euo pipefail
           python -m pip install --disable-pip-version-check build
@@ -311,17 +324,26 @@ jobs:
           import json
           import os
           import pathlib
+          import re
+          import tomllib
 
           artifact_dir = pathlib.Path(os.environ["PYLVA_PYTHON_ARTIFACT_DIR"])
           wheels = sorted(artifact_dir.glob("*.whl"))
           sdists = sorted(artifact_dir.glob("*.tar.gz"))
           if len(wheels) != 1 or len(sdists) != 1:
               raise SystemExit(f"expected one wheel and one sdist, found {wheels + sdists}")
+          project = tomllib.loads(pathlib.Path("packages/sdk-py/pyproject.toml").read_text())["project"]
+          source_sha = os.environ["GITHUB_SHA"]
+          if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+              raise SystemExit("GITHUB_SHA must be one full lowercase commit SHA")
 
           def digest(path: pathlib.Path) -> str:
               return hashlib.sha256(path.read_bytes()).hexdigest()
 
           metadata = {
+              "name": project["name"],
+              "version": project["version"],
+              "source_sha": source_sha,
               "wheel": wheels[0].name,
               "wheel_sha256": digest(wheels[0]),
               "sdist": sdists[0].name,
@@ -330,6 +352,11 @@ jobs:
           (artifact_dir / "metadata.json").write_text(
               json.dumps(metadata, indent=2, sort_keys=True) + "\n"
           )
+          with pathlib.Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              for key, value in metadata.items():
+                  if not isinstance(value, str) or "\n" in value or "\r" in value:
+                      raise SystemExit(f"unsafe artifact output: {key}")
+                  output.write(f"{key}={value}\n")
           PY
 
       - name: Inspect and clean-install the immutable Python artifact pair
@@ -352,7 +379,7 @@ jobs:
           name: pylva-python-sdk-immutable
           path: ${{ runner.temp }}/pylva-python-artifact/*
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
 
   python-package-matrix:
     name: Python SDK source + immutable artifact / Python ${{ matrix.python }}
@@ -372,12 +399,58 @@ jobs:
           cache: pip
           cache-dependency-path: packages/sdk-py/pyproject.toml
 
-      - name: Install
+      - name: Download the one immutable Python artifact pair
+        uses: actions/download-artifact@v7
+        with:
+          name: pylva-python-sdk-immutable
+          path: ${{ runner.temp }}/pylva-python-download
+
+      - name: Bind this matrix leg to the producer outputs
+        env:
+          EXPECTED_WHEEL: ${{ needs.python-package-artifact.outputs.wheel }}
+          EXPECTED_WHEEL_SHA256: ${{ needs.python-package-artifact.outputs.wheel_sha256 }}
+          EXPECTED_SDIST: ${{ needs.python-package-artifact.outputs.sdist }}
+          EXPECTED_SDIST_SHA256: ${{ needs.python-package-artifact.outputs.sdist_sha256 }}
+          EXPECTED_NAME: ${{ needs.python-package-artifact.outputs.name }}
+          EXPECTED_VERSION: ${{ needs.python-package-artifact.outputs.version }}
+          EXPECTED_SOURCE_SHA: ${{ needs.python-package-artifact.outputs.source_sha }}
         run: |
-          python -m pip install --disable-pip-version-check -e 'packages/sdk-py[dev,langchain]'
+          set -euo pipefail
+          ARTIFACT_DIR="$RUNNER_TEMP/pylva-python-download"
+          python -c 'import json,os,sys; m=json.load(open(sys.argv[1])); assert m == {"name": os.environ["EXPECTED_NAME"], "version": os.environ["EXPECTED_VERSION"], "source_sha": os.environ["EXPECTED_SOURCE_SHA"], "wheel": os.environ["EXPECTED_WHEEL"], "wheel_sha256": os.environ["EXPECTED_WHEEL_SHA256"], "sdist": os.environ["EXPECTED_SDIST"], "sdist_sha256": os.environ["EXPECTED_SDIST_SHA256"]}' "$ARTIFACT_DIR/metadata.json"
+          WHEEL="$ARTIFACT_DIR/$EXPECTED_WHEEL"
+          SDIST="$ARTIFACT_DIR/$EXPECTED_SDIST"
+          test "$(sha256sum "$WHEEL" | cut -d' ' -f1)" = "$EXPECTED_WHEEL_SHA256"
+          test "$(sha256sum "$SDIST" | cut -d' ' -f1)" = "$EXPECTED_SDIST_SHA256"
+          echo "PYLVA_PYTHON_WHEEL=$WHEEL" >> "$GITHUB_ENV"
+          echo "PYLVA_PYTHON_WHEEL_SHA256=$EXPECTED_WHEEL_SHA256" >> "$GITHUB_ENV"
+          echo "PYLVA_PYTHON_SDIST=$SDIST" >> "$GITHUB_ENV"
+          echo "PYLVA_PYTHON_SDIST_SHA256=$EXPECTED_SDIST_SHA256" >> "$GITHUB_ENV"
+          echo "PYLVA_PYTHON_ARTIFACT_VERSION=$EXPECTED_VERSION" >> "$GITHUB_ENV"
+
+      - name: Install the immutable wheel and development-only test tools
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check "${PYLVA_PYTHON_WHEEL}[dev,langchain]"
+          python -m pip check
+          PYLVA_REPO_ROOT="$GITHUB_WORKSPACE" PYLVA_EXPECTED_VERSION="$PYLVA_PYTHON_ARTIFACT_VERSION" \
+            PYTHONPATH='' python -I - <<'PY'
+          import importlib.metadata
+          import os
+          import pathlib
+          import pylva
+
+          installed = pathlib.Path(pylva.__file__ or "").resolve()
+          repository = pathlib.Path(os.environ["PYLVA_REPO_ROOT"]).resolve()
+          assert repository not in installed.parents, installed
+          assert importlib.metadata.version("pylva-sdk") == os.environ["PYLVA_EXPECTED_VERSION"]
+          print(f"immutable matrix install: {installed} pylva-sdk@{pylva.__version__}")
+          PY
 
       - name: Test Python SDK
-        run: python -m pytest packages/sdk-py/tests
+        env:
+          PYTHONPATH: ''
+        run: python -m pytest --import-mode=importlib packages/sdk-py/tests
 
       - name: Ruff
         if: matrix.python == '3.13'
@@ -387,30 +460,25 @@ jobs:
         if: matrix.python == '3.13'
         run: python -m mypy packages/sdk-py/pylva
 
-      - name: Download the one immutable Python artifact pair
-        uses: actions/download-artifact@v7
-        with:
-          name: pylva-python-sdk-immutable
-          path: ${{ runner.temp }}/pylva-python-download
-
       - name: Verify the exact immutable Python artifact pair
         run: |
           set -euo pipefail
-          ARTIFACT_DIR="$RUNNER_TEMP/pylva-python-download"
-          test "$(find "$ARTIFACT_DIR" -type f -name '*.whl' | wc -l)" -eq 1
-          test "$(find "$ARTIFACT_DIR" -type f -name '*.tar.gz' | wc -l)" -eq 1
-          WHEEL="$(python -c 'import json,pathlib,sys; p=pathlib.Path(sys.argv[1]); print(p.parent / json.loads(p.read_text())["wheel"])' "$ARTIFACT_DIR/metadata.json")"
-          SDIST="$(python -c 'import json,pathlib,sys; p=pathlib.Path(sys.argv[1]); print(p.parent / json.loads(p.read_text())["sdist"])' "$ARTIFACT_DIR/metadata.json")"
-          WHEEL_SHA256="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["wheel_sha256"])' "$ARTIFACT_DIR/metadata.json")"
-          SDIST_SHA256="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["sdist_sha256"])' "$ARTIFACT_DIR/metadata.json")"
           python scripts/ci/smoke-python-package.py --verify-existing \
-            --wheel "$WHEEL" \
-            --sdist "$SDIST" \
-            --wheel-sha256 "$WHEEL_SHA256" \
-            --sdist-sha256 "$SDIST_SHA256"
+            --wheel "$PYLVA_PYTHON_WHEEL" \
+            --sdist "$PYLVA_PYTHON_SDIST" \
+            --wheel-sha256 "$PYLVA_PYTHON_WHEEL_SHA256" \
+            --sdist-sha256 "$PYLVA_PYTHON_SDIST_SHA256"
+
+      - name: Re-verify the immutable Python matrix artifacts
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(sha256sum "$PYLVA_PYTHON_WHEEL" | cut -d' ' -f1)" = "$PYLVA_PYTHON_WHEEL_SHA256"
+          test "$(sha256sum "$PYLVA_PYTHON_SDIST" | cut -d' ' -f1)" = "$PYLVA_PYTHON_SDIST_SHA256"
 
   python-pydantic-floor:
     name: Python SDK / Pydantic 2.5.0 floor
+    needs: python-package-artifact
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -422,14 +490,44 @@ jobs:
           cache: pip
           cache-dependency-path: packages/sdk-py/pyproject.toml
 
-      - name: Install declared minimum Pydantic
+      - name: Download the immutable Python artifact pair
+        uses: actions/download-artifact@v7
+        with:
+          name: pylva-python-sdk-immutable
+          path: ${{ runner.temp }}/pylva-python-floor
+
+      - name: Install the immutable wheel at the declared Pydantic floor
+        env:
+          EXPECTED_WHEEL: ${{ needs.python-package-artifact.outputs.wheel }}
+          EXPECTED_WHEEL_SHA256: ${{ needs.python-package-artifact.outputs.wheel_sha256 }}
+          EXPECTED_VERSION: ${{ needs.python-package-artifact.outputs.version }}
         run: |
-          python -m pip install --disable-pip-version-check -e 'packages/sdk-py[dev]'
+          set -euo pipefail
+          WHEEL="$RUNNER_TEMP/pylva-python-floor/$EXPECTED_WHEEL"
+          test "$(sha256sum "$WHEEL" | cut -d' ' -f1)" = "$EXPECTED_WHEEL_SHA256"
+          python -m pip install --disable-pip-version-check "${WHEEL}[dev]"
           python -m pip install --disable-pip-version-check 'pydantic==2.5.0'
+          python -m pip check
+          PYLVA_REPO_ROOT="$GITHUB_WORKSPACE" PYLVA_EXPECTED_VERSION="$EXPECTED_VERSION" \
+            PYTHONPATH='' python -I - <<'PY'
+          import importlib.metadata
+          import os
+          import pathlib
+          import pylva
+
+          installed = pathlib.Path(pylva.__file__ or "").resolve()
+          repository = pathlib.Path(os.environ["PYLVA_REPO_ROOT"]).resolve()
+          assert repository not in installed.parents, installed
+          assert importlib.metadata.version("pylva-sdk") == os.environ["PYLVA_EXPECTED_VERSION"]
+          print(f"immutable Pydantic-floor install: {installed} pylva-sdk@{pylva.__version__}")
+          PY
 
       - name: Run contract, client, and ownership at the floor
+        env:
+          PYTHONPATH: ''
         run: >-
           python -m pytest
+          --import-mode=importlib
           packages/sdk-py/tests/test_budget_control_contract.py
           packages/sdk-py/tests/test_control_client.py
           packages/sdk-py/tests/test_control_ownership.py
@@ -437,6 +535,18 @@ jobs:
           packages/sdk-py/tests/test_controlled_usage.py
           packages/sdk-py/tests/test_non_llm_policy.py
           packages/sdk-py/tests/test_smoke.py
+
+      - name: Re-verify the immutable Pydantic-floor artifact
+        if: always()
+        env:
+          EXPECTED_WHEEL: ${{ needs.python-package-artifact.outputs.wheel }}
+          EXPECTED_WHEEL_SHA256: ${{ needs.python-package-artifact.outputs.wheel_sha256 }}
+          EXPECTED_SDIST: ${{ needs.python-package-artifact.outputs.sdist }}
+          EXPECTED_SDIST_SHA256: ${{ needs.python-package-artifact.outputs.sdist_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$(sha256sum "$RUNNER_TEMP/pylva-python-floor/$EXPECTED_WHEEL" | cut -d' ' -f1)" = "$EXPECTED_WHEEL_SHA256"
+          test "$(sha256sum "$RUNNER_TEMP/pylva-python-floor/$EXPECTED_SDIST" | cut -d' ' -f1)" = "$EXPECTED_SDIST_SHA256"
 
   authoritative-integration:
     name: Authoritative integration / ${{ matrix.suite }} / PostgreSQL ${{ matrix.postgres }} / ClickHouse ${{ matrix.clickhouse }}
@@ -541,6 +651,14 @@ jobs:
 
       - name: Verify the exact Python artifact identity for final service gates
         if: matrix.suite == 'concurrency-chaos' || matrix.suite == 'langgraph'
+        env:
+          EXPECTED_WHEEL: ${{ needs.python-package-artifact.outputs.wheel }}
+          EXPECTED_WHEEL_SHA256: ${{ needs.python-package-artifact.outputs.wheel_sha256 }}
+          EXPECTED_SDIST: ${{ needs.python-package-artifact.outputs.sdist }}
+          EXPECTED_SDIST_SHA256: ${{ needs.python-package-artifact.outputs.sdist_sha256 }}
+          EXPECTED_NAME: ${{ needs.python-package-artifact.outputs.name }}
+          EXPECTED_VERSION: ${{ needs.python-package-artifact.outputs.version }}
+          EXPECTED_SOURCE_SHA: ${{ needs.python-package-artifact.outputs.source_sha }}
         run: |
           set -euo pipefail
           ARTIFACT_DIR="$RUNNER_TEMP/pylva-python-service-download"
@@ -548,12 +666,17 @@ jobs:
           test "$(find "$ARTIFACT_DIR" -type f -name '*.tar.gz' | wc -l)" -eq 1
           WHEEL="$(python -c 'import json,pathlib,sys; p=pathlib.Path(sys.argv[1]); print(p.parent / json.loads(p.read_text())["wheel"])' "$ARTIFACT_DIR/metadata.json")"
           SDIST="$(python -c 'import json,pathlib,sys; p=pathlib.Path(sys.argv[1]); print(p.parent / json.loads(p.read_text())["sdist"])' "$ARTIFACT_DIR/metadata.json")"
-          WHEEL_SHA256="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["wheel_sha256"])' "$ARTIFACT_DIR/metadata.json")"
-          SDIST_SHA256="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["sdist_sha256"])' "$ARTIFACT_DIR/metadata.json")"
-          test "$(sha256sum "$WHEEL" | cut -d' ' -f1)" = "$WHEEL_SHA256"
-          test "$(sha256sum "$SDIST" | cut -d' ' -f1)" = "$SDIST_SHA256"
+          python -c 'import json,os,sys; m=json.load(open(sys.argv[1])); assert m == {"name": os.environ["EXPECTED_NAME"], "version": os.environ["EXPECTED_VERSION"], "source_sha": os.environ["EXPECTED_SOURCE_SHA"], "wheel": os.environ["EXPECTED_WHEEL"], "wheel_sha256": os.environ["EXPECTED_WHEEL_SHA256"], "sdist": os.environ["EXPECTED_SDIST"], "sdist_sha256": os.environ["EXPECTED_SDIST_SHA256"]}' "$ARTIFACT_DIR/metadata.json"
+          test "$(basename "$WHEEL")" = "$EXPECTED_WHEEL"
+          test "$(basename "$SDIST")" = "$EXPECTED_SDIST"
+          test "$(sha256sum "$WHEEL" | cut -d' ' -f1)" = "$EXPECTED_WHEEL_SHA256"
+          test "$(sha256sum "$SDIST" | cut -d' ' -f1)" = "$EXPECTED_SDIST_SHA256"
           echo "PYLVA_PYTHON_WHEEL=$WHEEL" >> "$GITHUB_ENV"
-          echo "PYLVA_PYTHON_WHEEL_SHA256=$WHEEL_SHA256" >> "$GITHUB_ENV"
+          echo "PYLVA_PYTHON_WHEEL_SHA256=$EXPECTED_WHEEL_SHA256" >> "$GITHUB_ENV"
+          echo "PYLVA_PYTHON_SDIST=$SDIST" >> "$GITHUB_ENV"
+          echo "PYLVA_PYTHON_SDIST_SHA256=$EXPECTED_SDIST_SHA256" >> "$GITHUB_ENV"
+          echo "PYLVA_PYTHON_ARTIFACT_VERSION=$EXPECTED_VERSION" >> "$GITHUB_ENV"
+          echo "PYLVA_PYTHON_ARTIFACT_SOURCE_SHA=$EXPECTED_SOURCE_SHA" >> "$GITHUB_ENV"
 
       - name: Verify and isolate the exact TypeScript artifact for final service gates
         if: matrix.suite == 'concurrency-chaos' || matrix.suite == 'langgraph'
@@ -701,6 +824,19 @@ jobs:
           "$RUNNER_TEMP/pylva-chaos-venv/bin/python" -m pip install \
             --disable-pip-version-check "$PYLVA_PYTHON_WHEEL"
           "$RUNNER_TEMP/pylva-chaos-venv/bin/python" -m pip check
+          PYLVA_REPO_ROOT="$GITHUB_WORKSPACE" PYLVA_EXPECTED_VERSION="$PYLVA_PYTHON_ARTIFACT_VERSION" \
+            PYTHONPATH='' "$RUNNER_TEMP/pylva-chaos-venv/bin/python" -I - <<'PY'
+          import importlib.metadata
+          import os
+          import pathlib
+          import pylva
+
+          installed = pathlib.Path(pylva.__file__ or "").resolve()
+          repository = pathlib.Path(os.environ["PYLVA_REPO_ROOT"]).resolve()
+          assert repository not in installed.parents, installed
+          assert importlib.metadata.version("pylva-sdk") == os.environ["PYLVA_EXPECTED_VERSION"]
+          print(f"immutable chaos install: {installed} pylva-sdk@{pylva.__version__}")
+          PY
           test "$(sha256sum "$PYLVA_PYTHON_WHEEL" | cut -d' ' -f1)" = "$PYLVA_PYTHON_WHEEL_SHA256"
 
       - name: Run cross-runtime process chaos from immutable artifacts
@@ -748,6 +884,19 @@ jobs:
             'openai==2.45.0' \
             'respx==0.23.1'
           "$RUNNER_TEMP/pylva-langgraph-venv/bin/python" -m pip check
+          PYLVA_REPO_ROOT="$GITHUB_WORKSPACE" PYLVA_EXPECTED_VERSION="$PYLVA_PYTHON_ARTIFACT_VERSION" \
+            PYTHONPATH='' "$RUNNER_TEMP/pylva-langgraph-venv/bin/python" -I - <<'PY'
+          import importlib.metadata
+          import os
+          import pathlib
+          import pylva
+
+          installed = pathlib.Path(pylva.__file__ or "").resolve()
+          repository = pathlib.Path(os.environ["PYLVA_REPO_ROOT"]).resolve()
+          assert repository not in installed.parents, installed
+          assert importlib.metadata.version("pylva-sdk") == os.environ["PYLVA_EXPECTED_VERSION"]
+          print(f"immutable LangGraph install: {installed} pylva-sdk@{pylva.__version__}")
+          PY
           test "$(sha256sum "$PYLVA_PYTHON_WHEEL" | cut -d' ' -f1)" = "$PYLVA_PYTHON_WHEEL_SHA256"
 
       - name: Run LangGraph service journeys
@@ -768,6 +917,14 @@ jobs:
           pnpm --filter @pylva/sdk exec vitest run
           tests/langgraph_callback.test.ts
           tests/langgraph_non_llm_policy.test.ts
+
+      - name: Re-verify immutable service artifacts after use
+        if: always() && (matrix.suite == 'concurrency-chaos' || matrix.suite == 'langgraph')
+        run: |
+          set -euo pipefail
+          test "$(sha256sum "$PYLVA_PYTHON_WHEEL" | cut -d' ' -f1)" = "$PYLVA_PYTHON_WHEEL_SHA256"
+          test "$(sha256sum "$PYLVA_PYTHON_SDIST" | cut -d' ' -f1)" = "$PYLVA_PYTHON_SDIST_SHA256"
+          test "$(sha256sum "$PYLVA_TYPESCRIPT_TARBALL" | cut -d' ' -f1)" = "$PYLVA_TYPESCRIPT_TARBALL_SHA256"
 
   authoritative-dashboard-e2e:
     name: Authoritative budget dashboard journey

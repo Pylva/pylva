@@ -737,6 +737,105 @@ describe('authoritative budget-control runtime migration 051', () => {
     });
   });
 
+  it(
+    'keeps UTC period helpers and account constraints exact across the year boundary',
+    async () => {
+      const samples = [
+        {
+          label: 'hour',
+          period: 'hour' as const,
+          start: '2025-12-31T23:00:00.000Z',
+          end: '2026-01-01T00:00:00.000Z',
+        },
+        {
+          label: 'day',
+          period: 'day' as const,
+          start: '2025-12-31T00:00:00.000Z',
+          end: '2026-01-01T00:00:00.000Z',
+        },
+        {
+          label: 'iso_week',
+          period: 'week' as const,
+          start: '2025-12-29T00:00:00.000Z',
+          end: '2026-01-05T00:00:00.000Z',
+        },
+        {
+          label: 'month',
+          period: 'month' as const,
+          start: '2025-12-01T00:00:00.000Z',
+          end: '2026-01-01T00:00:00.000Z',
+        },
+      ];
+      const rows = await db()<{ boundary: string; label: string }[]>`
+        SELECT sample.label,
+               public.pylva_budget_timestamp_text(
+                 public.pylva_budget_next_period_boundary(
+                   sample.period,
+                   sample.reference_time
+                 )
+               ) AS boundary
+        FROM (
+          VALUES
+            ('hour', 'hour', '2025-12-31T23:59:59.999Z'::TIMESTAMPTZ),
+            ('day', 'day', '2025-12-31T23:59:59.999Z'::TIMESTAMPTZ),
+            ('iso_week', 'week', '2025-12-29T00:00:00.000Z'::TIMESTAMPTZ),
+            ('month', 'month', '2025-12-31T23:59:59.999Z'::TIMESTAMPTZ)
+        ) AS sample(label, period, reference_time)
+        ORDER BY sample.label
+      `;
+      expect(Object.fromEntries(rows.map((row) => [row.label, row.boundary]))).toEqual({
+        day: '2026-01-01T00:00:00.000Z',
+        hour: '2026-01-01T00:00:00.000Z',
+        iso_week: '2026-01-05T00:00:00.000Z',
+        month: '2026-01-01T00:00:00.000Z',
+      });
+
+      const ledgerOnly = await createScratchDb({ prefix: 'budget_year_boundary' });
+      try {
+        await applyMigrationsThrough(ledgerOnly, LEDGER_MIGRATION);
+        for (const sample of samples) {
+          const builderId = await insertBuilder(
+            ledgerOnly.sql,
+            `year-boundary-${sample.label.replaceAll('_', '-')}`,
+          );
+          await ledgerOnly.sql.begin(async (tx) => {
+            await useBuilder(tx, builderId);
+            const exactRule = await insertRule(tx, builderId, sample.period);
+            await expect(
+              insertAccount(
+                tx,
+                builderId,
+                exactRule,
+                { start: sample.start, end: sample.end },
+                '0',
+              ),
+            ).resolves.toEqual(expect.any(String));
+          });
+
+          const offByOneEnd = new Date(Date.parse(sample.end) + 1).toISOString();
+          await expectPgError(
+            ledgerOnly.sql.begin(async (tx) => {
+              await useBuilder(tx, builderId);
+              const offByOneRule = await insertRule(tx, builderId, sample.period);
+              await insertAccount(
+                tx,
+                builderId,
+                offByOneRule,
+                { start: sample.start, end: offByOneEnd },
+                '0',
+              );
+            }),
+            '23514',
+            /budget_accounts_period_bounds_ck/,
+          );
+        }
+      } finally {
+        await ledgerOnly.drop();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
   it('preserves exact UTC boundaries across leap-day entry and exit', async () => {
     const rows = await db()<{ boundary: string; label: string }[]>`
       SELECT sample.label,

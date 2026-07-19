@@ -1,4 +1,8 @@
 import crypto from 'node:crypto';
+import {
+  assertEgressSentinelBlocked,
+  createServiceRunnerFetch,
+} from './service-runner-egress-guard.mjs';
 import { loadTypescriptSdkArtifact } from './typescript-sdk-artifact.mjs';
 
 const mode = process.env.PYLVA_RUNNER_MODE ?? 'contend';
@@ -10,6 +14,9 @@ const prefix = process.env.PYLVA_RUNNER_PREFIX ?? 'typescript';
 if (!endpoint || !apiKey || !Number.isSafeInteger(count) || count < 0 || count > 1_000) {
   throw new Error('invalid TypeScript SDK runner configuration');
 }
+
+const guardedFetch = createServiceRunnerFetch({ endpoint, networkFetch: globalThis.fetch });
+globalThis.fetch = guardedFetch;
 
 function reserveInput(index) {
   return {
@@ -42,6 +49,7 @@ async function waitForRelease() {
 }
 
 async function main() {
+  await assertEgressSentinelBlocked(guardedFetch, process.env.PYLVA_EGRESS_SENTINEL_URL);
   const { evidence, root } = await loadTypescriptSdkArtifact();
   const {
     PylvaBudgetExceeded,
@@ -108,7 +116,14 @@ async function main() {
         };
       } catch (error) {
         if (error instanceof PylvaBudgetExceeded) return { decision: 'denied' };
-        if (error instanceof PylvaControlUnavailableError) return { decision: 'unavailable' };
+        if (error instanceof PylvaControlUnavailableError) {
+          return {
+            decision: 'unavailable',
+            reason: error.reason,
+            retryable: error.retryable,
+            status: error.status,
+          };
+        }
         throw error;
       }
     }),
@@ -128,6 +143,11 @@ async function main() {
       typeof result.reservationId === 'string' ? [result.reservationId] : [],
     ),
     reservedUsd: [...new Set(results.flatMap((result) => result.reservedUsd ?? []))],
+    unavailableEvidence: results.flatMap((result) =>
+      result.decision === 'unavailable'
+        ? [{ reason: result.reason, retryable: result.retryable, status: result.status }]
+        : [],
+    ),
   });
 }
 

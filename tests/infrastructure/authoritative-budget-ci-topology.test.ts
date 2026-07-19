@@ -13,6 +13,8 @@ const DB_SETUP_COMMAND = 'pnpm db:setup';
 const GENERAL_APP_PROVISION_COMMAND = 'pnpm exec tsx scripts/ci/provision-general-app-runtime.ts';
 const RUNTIME_PROVISION_COMMAND =
   'pnpm exec tsx scripts/ci/provision-authoritative-budget-runtime.ts';
+const TEST_IDENTITIES_PROVISION_COMMAND =
+  'pnpm exec tsx scripts/ci/provision-database-test-identities.ts';
 const MIGRATION_RUNNER = 'tests/integration/migration-runner.test.ts';
 const RUNTIME_ROLES_SUITE =
   'tests/integration/authoritative-budget-control-runtime-roles-migration.test.ts';
@@ -25,13 +27,14 @@ const MIGRATION_DATABASE_URL =
   'postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test';
 const SCRATCH_DATABASE_ADMIN_URL =
   'postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/postgres';
-const FIXTURE_DATABASE_ADMIN_URL =
-  'postgresql://pylva:pylva_test@localhost:5432/postgres';
-const FIXTURE_DATABASE_URL = 'postgresql://pylva:pylva_test@localhost:5432/pylva_test';
 const GENERAL_APP_DATABASE_URL =
   'postgresql://pylva_app_ci:pylva_app_ci_test@localhost:5432/pylva_test';
 const RUNTIME_DATABASE_URL =
   'postgresql://pylva_budget_control_ci:pylva_budget_control_ci_test@localhost:5432/pylva_test';
+const RLS_TEST_DATABASE_URL =
+  'postgresql://pylva_rls_test:pylva_rls_test@localhost:5432/pylva_test';
+const FIXTURE_DATABASE_URL =
+  'postgresql://pylva_fixture_ci:pylva_fixture_ci_test@localhost:5432/pylva_test';
 
 interface ServiceJob {
   file: string;
@@ -281,22 +284,18 @@ describe('authoritative budget-control CI topology', () => {
       "--exclude 'tests/integration/authoritative-*.test.ts'",
     );
     expect(legacyIntegrationStep).toContain(
-      `PYLVA_TEST_DATABASE_ADMIN_URL: ${FIXTURE_DATABASE_ADMIN_URL}`,
+      `PYLVA_TEST_DATABASE_ADMIN_URL: ${SCRATCH_DATABASE_ADMIN_URL}`,
     );
-    expect(legacyIntegrationStep).toContain(
-      `PYLVA_TEST_DATABASE_URL: ${FIXTURE_DATABASE_URL}`,
-    );
+    expect(legacyIntegrationStep).toContain(`PYLVA_TEST_DATABASE_URL: ${FIXTURE_DATABASE_URL}`);
     const fullServicesBlock = jobBlock(integrationSource, 'ci-full-services');
     const fullIntegrationStep = stepContaining(
       fullServicesBlock,
       "--exclude 'tests/integration/authoritative-budget-control-runtime-roles-migration.test.ts'",
     );
     expect(fullIntegrationStep).toContain(
-      `PYLVA_TEST_DATABASE_ADMIN_URL: ${FIXTURE_DATABASE_ADMIN_URL}`,
+      `PYLVA_TEST_DATABASE_ADMIN_URL: ${SCRATCH_DATABASE_ADMIN_URL}`,
     );
-    expect(fullIntegrationStep).toContain(
-      `PYLVA_TEST_DATABASE_URL: ${FIXTURE_DATABASE_URL}`,
-    );
+    expect(fullIntegrationStep).toContain(`PYLVA_TEST_DATABASE_URL: ${FIXTURE_DATABASE_URL}`);
 
     for (const { file, job } of [
       { file: 'authoritative-budget-control-ci.yml', job: 'authoritative-dashboard-e2e' },
@@ -306,6 +305,28 @@ describe('authoritative budget-control CI topology', () => {
       expect(jobBlock(workflow(file), job), `${file}:${job}`).not.toContain(
         'PYLVA_TEST_DATABASE_ADMIN_URL:',
       );
+    }
+  });
+
+  it('provisions distinct fixture and non-owner RLS identities before legacy assertions', () => {
+    const source = workflow('ci-integration.yml');
+    expect(occurrences(source, TEST_IDENTITIES_PROVISION_COMMAND)).toBe(2);
+
+    for (const job of ['ci-db-security', 'ci-full-services']) {
+      const block = jobBlock(source, job);
+      const provisionIndex = block.indexOf(TEST_IDENTITIES_PROVISION_COMMAND);
+      const provisionStep = stepContaining(block, TEST_IDENTITIES_PROVISION_COMMAND);
+      const integrationStep = stepContaining(block, 'PYLVA_TEST_DATABASE_ADMIN_URL:');
+
+      expect(block).toContain(`PYLVA_RLS_TEST_DATABASE_URL: ${RLS_TEST_DATABASE_URL}`);
+      expect(provisionIndex).toBeGreaterThan(block.indexOf(RUNTIME_PROVISION_COMMAND));
+      expect(provisionIndex).toBeLessThan(block.indexOf('PYLVA_TEST_DATABASE_ADMIN_URL:'));
+      expect(provisionStep).toContain(`CI_POSTGRES_ADMIN_URL: ${CI_POSTGRES_ADMIN_URL}`);
+      expect(provisionStep).toContain(`PYLVA_TEST_DATABASE_URL: ${FIXTURE_DATABASE_URL}`);
+      expect(provisionStep).not.toContain('MIGRATION_DATABASE_URL:');
+      expect(integrationStep).toContain(`PYLVA_TEST_DATABASE_URL: ${FIXTURE_DATABASE_URL}`);
+      expect(integrationStep).not.toContain('CI_POSTGRES_ADMIN_URL:');
+      expect(integrationStep).not.toContain('MIGRATION_DATABASE_URL:');
     }
   });
 
@@ -377,6 +398,17 @@ describe('authoritative budget-control CI topology', () => {
     for (const exclusion of requiredExclusions) {
       expect(block, `ci-db-security retains ${exclusion}`).toContain(exclusion);
     }
+    expect(block).not.toContain(`PYLVA_TEST_DATABASE_URL: ${MIGRATION_DATABASE_URL}`);
+  });
+
+  it('lets either documented full-gate label activate full services', () => {
+    const block = jobBlock(workflow('ci-integration.yml'), 'ci-full-services');
+    expect(block).toContain(
+      "contains(github.event.pull_request.labels.*.name, 'full-integration')",
+    );
+    expect(block).toContain(
+      "contains(github.event.pull_request.labels.*.name, 'authoritative-control-full')",
+    );
   });
 
   it('delegates immutable cross-runtime service gates to the focused artifact workflow', () => {

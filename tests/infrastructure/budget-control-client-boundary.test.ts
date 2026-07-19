@@ -64,11 +64,21 @@ describe('authoritative database client source boundary', () => {
   });
 
   it('routes dashboard authority reads through the dedicated budget-control transaction', () => {
-    const source = readFileSync('src/lib/budget-activity/read-model.ts', 'utf8');
+    for (const file of [
+      'src/lib/budget-activity/read-model.ts',
+      'src/lib/cost-sources/authority-read-model.ts',
+    ]) {
+      const source = readFileSync(file, 'utf8');
+      expect(source).toContain('budget-control/read-transaction.js');
+      expect(source).toContain('withBudgetControlReadTransaction(builderId');
+      expect(source).not.toContain("from '../db/rls.js'");
+      expect(source).not.toContain('withRLS(');
+    }
 
-    expect(source).toContain("from '../budget-control/read-transaction.js'");
-    expect(source).toContain('withBudgetControlReadTransaction(builderId');
-    expect(source).not.toContain("from '../db/rls.js'");
-    expect(source).not.toContain('withRLS(');
+    const page = readFileSync('src/app/o/[slug]/dashboard/cost-sources/page.tsx', 'utf8');
+    expect(page).toContain("from '@/lib/cost-sources/authority-read-model'");
+    expect(page).not.toContain('budget-control/read-transaction');
+    expect(page).not.toContain('budget_control_cutovers');
+    expect(page).not.toContain('budget_rule_revisions');
   });
 });

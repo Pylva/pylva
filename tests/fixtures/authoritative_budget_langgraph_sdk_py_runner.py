@@ -10,21 +10,33 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any
 
-import httpx
-import openai
-import respx
-from langchain_core.language_models.fake_chat_models import FakeListChatModel
-from langchain_core.messages import HumanMessage
-from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import StructuredTool
-from langgraph.graph import END, START, StateGraph
-from typing_extensions import TypedDict
+from python_sdk_artifact import verify_python_sdk_artifact
+from service_runner_egress_guard import (
+    assert_egress_sentinel_blocked,
+    install_service_runner_egress_guard,
+)
 
-import pylva
-from pylva.core import telemetry
-from pylva.core.control_ownership import current_controlled_attempt
-from pylva.errors.budget_exceeded import PylvaBudgetExceeded
-from pylva.langchain import PylvaCallbackHandler, langgraph_control_scope
+_ENDPOINT = os.environ.get("PYLVA_LANGGRAPH_ENDPOINT")
+if _ENDPOINT is None:
+    raise RuntimeError("invalid Python LangGraph runner configuration")
+install_service_runner_egress_guard(_ENDPOINT)
+assert_egress_sentinel_blocked(os.environ.get("PYLVA_EGRESS_SENTINEL_URL"))
+ARTIFACT_EVIDENCE = verify_python_sdk_artifact()
+
+import httpx  # noqa: E402 - guards must run before tested artifact/provider imports
+import openai  # noqa: E402
+import pylva  # noqa: E402
+import respx  # noqa: E402
+from langchain_core.language_models.fake_chat_models import FakeListChatModel  # noqa: E402
+from langchain_core.messages import HumanMessage  # noqa: E402
+from langchain_core.runnables import RunnableConfig  # noqa: E402
+from langchain_core.tools import StructuredTool  # noqa: E402
+from langgraph.graph import END, START, StateGraph  # noqa: E402
+from pylva.core import telemetry  # noqa: E402
+from pylva.core.control_ownership import current_controlled_attempt  # noqa: E402
+from pylva.errors.budget_exceeded import PylvaBudgetExceeded  # noqa: E402
+from pylva.langchain import PylvaCallbackHandler, langgraph_control_scope  # noqa: E402
+from typing_extensions import TypedDict  # noqa: E402
 
 MODEL = "gpt-langgraph-e2e"
 TOOL_SLUG = "langgraph-e2e-tool"
@@ -32,6 +44,8 @@ TOOL_NAME = "langgraph_e2e_tool"
 TOOL_METRIC = "calls"
 SDK_PATH = Path(pylva.__file__ or "").resolve().as_posix()
 OPENAI_PATH = Path(openai.__file__ or "").resolve().as_posix()
+if pylva.__version__ != ARTIFACT_EVIDENCE["python_artifact_version"]:
+    raise RuntimeError("immutable Python SDK artifact import version mismatch")
 
 
 class _State(TypedDict):
@@ -202,21 +216,14 @@ def _graph(journey: _Journey) -> Any:
 
 
 def main() -> None:
-    endpoint = os.environ.get("PYLVA_LANGGRAPH_ENDPOINT")
     api_key = os.environ.get("PYLVA_LANGGRAPH_API_KEY")
     customer_id = os.environ.get("PYLVA_LANGGRAPH_CUSTOMER_ID")
     refusal_kind = os.environ.get("PYLVA_LANGGRAPH_REFUSAL_KIND", "tool")
-    if (
-        endpoint is None
-        or api_key is None
-        or customer_id is None
-        or refusal_kind != "tool"
-    ):
+    if api_key is None or customer_id is None or refusal_kind != "tool":
         raise RuntimeError("invalid Python LangGraph runner configuration")
-
     pylva.init(
         api_key,
-        endpoint=endpoint,
+        endpoint=_ENDPOINT,
         control={"mode": "enforce", "on_unavailable": "deny", "timeout_ms": 30_000},
     )
     if not pylva.ready_sync():
@@ -234,24 +241,34 @@ def main() -> None:
     graph = _graph(journey)
     provider_route: respx.Route | None = None
     try:
-        with respx.mock(assert_all_called=False) as router:
-            backend = endpoint.rstrip("/")
-            backend_paths = (
-                "/api/v1/budget/capabilities",
-                "/api/v1/budget/reservations",
-                "/api/v1/budget/sync",
-                "/api/v1/events",
-                "/api/v1/pricing",
-                "/api/v1/rules",
-                "/api/v1/sdk/non-llm-discoveries",
-                "/api/v1/sdk/non-llm-policy",
+        # Patch HTTPX above its default transport so mocked provider traffic is
+        # intercepted before the fail-closed transport guard. Backend pass-through
+        # still reaches that guard and its exact method/path allowlist.
+        with respx.mock(
+            using="httpx", assert_all_called=False, assert_all_mocked=True
+        ) as router:
+            backend = _ENDPOINT.rstrip("/")
+            backend_routes = (
+                ("GET", "/api/v1/budget/capabilities"),
+                ("GET", "/api/v1/pricing"),
+                ("GET", "/api/v1/rules"),
+                ("GET", "/api/v1/sdk/non-llm-policy"),
+                ("POST", "/api/v1/budget/reservations"),
+                ("POST", "/api/v1/budget/sync"),
+                ("POST", "/api/v1/events"),
+                ("POST", "/api/v1/sdk/non-llm-discoveries"),
             )
-            for backend_path in backend_paths:
-                router.route(url=f"{backend}{backend_path}").pass_through()
-            router.route(
+            for backend_method, backend_path in backend_routes:
+                router.route(
+                    method=backend_method, url=f"{backend}{backend_path}"
+                ).pass_through()
+            router.post(
                 url__regex=re.compile(
                     rf"^{re.escape(backend)}/api/v1/budget/reservations/"
-                    r"[^/?#]+/(?:commit|extend|release)$"
+                    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-"
+                    r"[89ab][0-9a-f]{3}-[0-9a-f]{12}/"
+                    r"(?:commit|extend|release)$",
+                    re.IGNORECASE,
                 )
             ).pass_through()
             provider_route = router.post(
@@ -296,6 +313,7 @@ def main() -> None:
         {
             "event": "result",
             "runtime": "python",
+            **ARTIFACT_EVIDENCE,
             "sdk_path": SDK_PATH,
             "sdk_version": pylva.__version__,
             "openai_path": OPENAI_PATH,

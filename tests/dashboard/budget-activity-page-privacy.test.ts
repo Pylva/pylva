@@ -57,6 +57,7 @@ describe('budget activity dashboard privacy', () => {
     const [fields, message] = mocks.logWarn.mock.calls[0] as [Record<string, unknown>, string];
     expect(fields).toMatchObject({
       builder_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      actor_id: 'user-1',
       error_code: 'budget_activity_unavailable',
     });
     expect(fields['error_ref']).toEqual(expect.stringMatching(/^[0-9a-f-]{36}$/u));

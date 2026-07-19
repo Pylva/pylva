@@ -354,7 +354,7 @@ describe('immutable TypeScript package gate configuration', () => {
       ((matrix['strategy'] as Record<string, unknown>)['matrix'] as Record<string, unknown>)[
         'node'
       ],
-    ).toEqual(['20.18.1', '22', '24']);
+    ).toEqual(['20.18.1', '22.23.1', '24.18.0']);
     expect(aggregate['needs']).toContain('typescript-package-matrix');
 
     const pack = runSource(step(artifact, 'Pack, inspect, and fingerprint one immutable artifact'));
@@ -363,6 +363,11 @@ describe('immutable TypeScript package gate configuration', () => {
     expect(pack).toContain('--metadata-output "$ARTIFACT_DIR/metadata.json"');
     expect(allRunSources(artifact).match(/--pack-output/gu)).toHaveLength(1);
     expect(allRunSources(matrix)).not.toContain('--pack-output');
+    expect(
+      (matrix.steps ?? []).some(
+        (candidate) => candidate['name'] === 'Build and size-check TypeScript SDK',
+      ),
+    ).toBe(false);
     expect(step(artifact, 'Upload immutable TypeScript artifact')['uses']).toBe(
       'actions/upload-artifact@v7',
     );
@@ -390,6 +395,12 @@ describe('immutable TypeScript package gate configuration', () => {
       expect(source, name).toContain('--tarball "$PYLVA_TYPESCRIPT_TARBALL"');
       expect(source, name).toContain('--expected-sha256 "$PYLVA_TYPESCRIPT_TARBALL_SHA256"');
     }
+
+    const postUseIdentity = step(matrix, 'Re-verify the immutable TypeScript artifact after use');
+    expect(postUseIdentity['if']).toBe('always()');
+    expect(runSource(postUseIdentity)).toContain(
+      'test "$ACTUAL_SHA256" = "$PYLVA_TYPESCRIPT_TARBALL_SHA256"',
+    );
   });
 
   it('canonicalizes the metadata parent before proving the tarball is its sibling', () => {
@@ -414,16 +425,27 @@ describe('immutable TypeScript package gate configuration', () => {
     const releaseCommit = step(publish, 'Verify release tag is on main');
     expect(releaseCommit['id']).toBe('release_commit');
     expect(runSource(releaseCommit)).toContain('echo "sha=$TAG_COMMIT" >> "$GITHUB_OUTPUT"');
-    const attestation = runSource(
-      step(publish, 'Require every release gate for the exact release commit'),
+    const attestationStep = step(
+      publish,
+      'Require every release gate for the exact release commit',
+    );
+    expect(runSource(attestationStep)).toBe('node scripts/ci/attest-release-sha.mjs');
+    expect(attestationStep['env']).toMatchObject({
+      GH_TOKEN: '${{ github.token }}',
+      RELEASE_SHA: '${{ steps.release_commit.outputs.sha }}',
+    });
+    const attestation = readFileSync(
+      path.join(repoRoot, 'scripts/ci/attest-release-sha.mjs'),
+      'utf8',
     );
     for (const invariant of [
-      'head_sha=${RELEASE_SHA}',
-      'run.head_sha === expectedSha',
-      "run.head_branch === 'main'",
-      "run.status === 'completed'",
-      "run.conclusion === 'success'",
-      "new Set(['push', 'workflow_dispatch', 'schedule'])",
+      'head_sha: sha',
+      'run?.head_sha === expectedSha',
+      "run?.head_branch === 'main'",
+      "run?.status === 'completed'",
+      "run?.conclusion === 'success'",
+      "new Set(['push', 'workflow_dispatch'])",
+      "job.status !== 'completed' || job.conclusion !== 'success'",
       'authoritative-budget-control-ci.yml',
       'ci-fast.yml',
       'ci-integration.yml',
@@ -431,6 +453,7 @@ describe('immutable TypeScript package gate configuration', () => {
     ]) {
       expect(attestation).toContain(invariant);
     }
+    expect(attestation).not.toContain("'schedule'");
 
     const download = step(publish, 'Download the exact attested TypeScript release artifact');
     expect(download['uses']).toBe('actions/download-artifact@v7');
@@ -455,12 +478,19 @@ describe('immutable TypeScript package gate configuration', () => {
       expect(source, name).toContain('--expected-sha256 "$PYLVA_TYPESCRIPT_TARBALL_SHA256"');
     }
     const published = runSource(step(publish, 'Publish exact verified artifact'));
+    const releaseMetadata = runSource(step(publish, 'Verify release metadata'));
     expect(published).toContain('test "$ACTUAL_SHA256" = "$PYLVA_TYPESCRIPT_TARBALL_SHA256"');
     expect(published).toContain(
       'npm publish "$PYLVA_TYPESCRIPT_TARBALL" --access public --ignore-scripts',
     );
-    expect(published).toContain("p.version.includes('-')?'next':'latest'");
+    expect(releaseMetadata).toContain('const prerelease = semver[1]');
+    expect(releaseMetadata).toContain("prerelease === undefined ? 'latest' : 'next'");
+    expect(releaseMetadata).toContain('package version is not valid SemVer');
     expect(published).toContain('--tag "$NPM_DIST_TAG"');
+    expect(published).toContain(
+      'LATEST_BEFORE="$(npm view \'@pylva/sdk\' dist-tags.latest --json)"',
+    );
+    expect(published).toContain('test "$LATEST_AFTER" = "$LATEST_BEFORE"');
   });
 
   it('runs installed official stream, cancellation, close, and cache-poison subprocess proofs', () => {
@@ -491,12 +521,51 @@ describe('immutable TypeScript package gate configuration', () => {
     expect(harness).toContain("path.dirname(relativeTarball) === '.'");
     expect(harness).toContain("['package/README.md', 'package/LICENSE']");
     expect(harness).not.toMatch(/writeFileSync\(\s*installedAiManifestPath/u);
+    expect(harness).toContain("const exactConsumerTypescriptVersion = '6.0.2'");
+    expect(harness).toContain('`typescript@${exactConsumerTypescriptVersion}`');
+    expect(harness).toContain("path.join(installDir, 'node_modules', '.bin', 'tsc')");
+    expect(harness).not.toContain("path.join(repoRoot, 'node_modules', '.bin', 'tsc')");
+    expect(harness).toContain('function assertExactBytes(actual, expected, label)');
+    expect(harness).toContain("readFileSync(path.join(packageDir, 'README.md'))");
+    expect(harness).toContain("runBytes('tar', ['-xzOf', tarball, 'package/README.md'])");
+    expect(harness).toContain("assertExactBytes(packedReadme, sourceReadme, 'packed README.md')");
+    expect(harness).toContain('oneByteMismatch[oneByteMismatch.length - 1] ^= 1');
+    expect(harness).toContain(
+      "assert(mismatchRejected, 'README byte-identity gate accepted a one-byte mismatch')",
+    );
 
     expect(harness).toContain('Object.is(left?.value, right?.value)');
     expect(harness).not.toContain('left?.value === right?.value');
     expect(harness).toContain('void globalThis.fetch;');
     expect(harness).toContain("new Request('https://pylva.invalid');");
-    expect(harness).not.toContain('fetchPrimeSnapshot');
+    expect(harness).toContain('const fetchPrimeProfiles = new Map([');
+    for (const version of ['20.18.1', '22.23.1', '24.18.0']) {
+      expect(harness).toContain(`['${version}', {`);
+    }
+    for (const dispatcher of [
+      'Symbol(undici.globalDispatcher.1)',
+      'Symbol(undici.globalDispatcher.2)',
+    ]) {
+      expect(harness).toContain(`'${dispatcher}'`);
+    }
+    for (const materialization of [
+      'AbortController',
+      'AbortSignal',
+      'TextEncoder',
+      'TextDecoder',
+      'ReadableStream',
+      'File',
+      'Request',
+    ]) {
+      expect(harness).toContain(`'${materialization}'`);
+    }
+    expect(harness).toContain('const fetchPrimeSnapshot = new Map(');
+    expect(harness).toContain('const fetchPrimeRemovals =');
+    expect(harness).toContain('fetchPrimeRemovals.length !== 0');
+    expect(harness).toContain('!exactStringArray(observedAdditions, expectedAdditions)');
+    expect(harness).toContain('!exactStringArray(observedMutations, expectedMutations)');
+    expect(harness).toContain("typeof descriptor.value !== 'object'");
+    expect(harness).toContain("typeof after.value !== 'function'");
     expect(harness).not.toContain("Symbol.for('undici.globalDispatcher.1')");
     expect(harness.indexOf('const globalSnapshot = new Map')).toBeGreaterThan(
       harness.indexOf("new Request('https://pylva.invalid');"),

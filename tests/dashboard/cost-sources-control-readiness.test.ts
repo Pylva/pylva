@@ -5,7 +5,7 @@ const mocks = vi.hoisted(() => ({
   env: { ENABLE_AUTHORITATIVE_BUDGET_CONTROL: true },
   getProductionPosture: vi.fn(),
   withRLS: vi.fn(),
-  withBudgetControlReadTransaction: vi.fn(),
+  readCostSourceAuthority: vi.fn(),
   deriveProtectionState: vi.fn(),
   CostSourcesControlTable: function CostSourcesControlTableMock() {
     return null;
@@ -20,8 +20,8 @@ vi.mock('@/lib/budget-control/runtime-posture', () => ({
   getBudgetControlProductionPosture: mocks.getProductionPosture,
 }));
 vi.mock('@/lib/db/rls', () => ({ withRLS: mocks.withRLS }));
-vi.mock('@/lib/budget-control/read-transaction', () => ({
-  withBudgetControlReadTransaction: mocks.withBudgetControlReadTransaction,
+vi.mock('@/lib/cost-sources/authority-read-model', () => ({
+  readCostSourceAuthority: mocks.readCostSourceAuthority,
 }));
 vi.mock('@/lib/cost-sources/protection', () => ({
   deriveCostSourceProtectionState: mocks.deriveProtectionState,
@@ -75,15 +75,10 @@ describe('/o/[slug]/dashboard/cost-sources control readiness', () => {
     vi.clearAllMocks();
     mocks.env.ENABLE_AUTHORITATIVE_BUDGET_CONTROL = true;
     mocks.withRLS.mockResolvedValue([sourceRow]);
-    mocks.withBudgetControlReadTransaction.mockImplementation(
-      async (
-        _builderId: string,
-        callback: (transaction: { execute: () => Promise<unknown> }) => Promise<unknown>,
-      ) =>
-        callback({
-          execute: async () => [{ control_ready: true, has_active_hard_stop_budget: true }],
-        }),
-    );
+    mocks.readCostSourceAuthority.mockResolvedValue({
+      workspaceControlReady: true,
+      hasActiveHardStopBudget: true,
+    });
     mocks.deriveProtectionState.mockImplementation(
       (input: {
         authoritativeEnabled: boolean;
@@ -107,7 +102,7 @@ describe('/o/[slug]/dashboard/cost-sources control readiness', () => {
     const element = await renderPage();
 
     expect(mocks.getProductionPosture).toHaveBeenCalledTimes(1);
-    expect(mocks.withBudgetControlReadTransaction).toHaveBeenCalledTimes(1);
+    expect(mocks.readCostSourceAuthority).toHaveBeenCalledTimes(1);
     expect(mocks.deriveProtectionState).toHaveBeenCalledWith(
       expect.objectContaining({ authoritativeEnabled: true, controlReady: true }),
     );
@@ -131,7 +126,7 @@ describe('/o/[slug]/dashboard/cost-sources control readiness', () => {
     expect(renderedSource(element).protection_state).toBe('tracking_only');
     expect(textContent(element)).toContain('has not passed readiness checks');
     expect(textContent(element)).toContain('no source is marked Protected');
-    expect(mocks.withBudgetControlReadTransaction).not.toHaveBeenCalled();
+    expect(mocks.readCostSourceAuthority).not.toHaveBeenCalled();
   });
 
   it('fails closed without leaking an unexpected posture error into the dashboard', async () => {
@@ -145,7 +140,7 @@ describe('/o/[slug]/dashboard/cost-sources control readiness', () => {
     expect(renderedSource(element).protection_state).toBe('tracking_only');
     expect(textContent(element)).toContain('has not passed readiness checks');
     expect(textContent(element)).not.toContain('secret connection detail');
-    expect(mocks.withBudgetControlReadTransaction).not.toHaveBeenCalled();
+    expect(mocks.readCostSourceAuthority).not.toHaveBeenCalled();
   });
 
   it('does not inspect runtime posture while the feature flag is off', async () => {
@@ -159,7 +154,7 @@ describe('/o/[slug]/dashboard/cost-sources control readiness', () => {
     );
     expect(renderedSource(element).protection_state).toBe('tracking_only');
     expect(textContent(element)).toContain('Authoritative enforcement is not enabled');
-    expect(mocks.withBudgetControlReadTransaction).not.toHaveBeenCalled();
+    expect(mocks.readCostSourceAuthority).not.toHaveBeenCalled();
   });
 
   it('keeps sources tracking-only until this workspace completes its cutover', async () => {
@@ -169,15 +164,10 @@ describe('/o/[slug]/dashboard/cost-sources control readiness', () => {
       attested: true,
       credential_source: 'dedicated',
     });
-    mocks.withBudgetControlReadTransaction.mockImplementation(
-      async (
-        _builderId: string,
-        callback: (transaction: { execute: () => Promise<unknown> }) => Promise<unknown>,
-      ) =>
-        callback({
-          execute: async () => [{ control_ready: false, has_active_hard_stop_budget: true }],
-        }),
-    );
+    mocks.readCostSourceAuthority.mockResolvedValue({
+      workspaceControlReady: false,
+      hasActiveHardStopBudget: true,
+    });
 
     const element = await renderPage();
 
@@ -186,5 +176,26 @@ describe('/o/[slug]/dashboard/cost-sources control readiness', () => {
     );
     expect(renderedSource(element).protection_state).toBe('tracking_only');
     expect(textContent(element)).toContain('has not completed its enforcement cutover');
+  });
+
+  it('keeps sources tracking-only when the dedicated authority read fails', async () => {
+    mocks.getProductionPosture.mockResolvedValue({
+      ready: true,
+      reason: null,
+      attested: true,
+      credential_source: 'dedicated',
+    });
+    mocks.readCostSourceAuthority.mockRejectedValue(
+      new Error('postgres://authority:secret@internal/budget_rule_revisions'),
+    );
+
+    const element = await renderPage();
+
+    expect(mocks.deriveProtectionState).toHaveBeenCalledWith(
+      expect.objectContaining({ authoritativeEnabled: false, controlReady: false }),
+    );
+    expect(renderedSource(element).protection_state).toBe('tracking_only');
+    expect(textContent(element)).toContain('has not passed readiness checks');
+    expect(textContent(element)).not.toContain('authority:secret');
   });
 });

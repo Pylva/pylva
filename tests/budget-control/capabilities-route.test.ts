@@ -190,8 +190,15 @@ describe('GET /api/v1/budget/capabilities readiness authority', () => {
     );
     expect(response.status).toBe(500);
     expect(response.headers.get('cache-control')).toBe('no-store');
-    const raw = JSON.stringify(await body(response));
-    expect(raw).toContain('Request context is unavailable');
+    const responseBody = await body(response);
+    expect(responseBody).toEqual({
+      error: {
+        type: 'api_error',
+        code: 'INTERNAL_ERROR',
+        message: 'An internal error occurred',
+      },
+    });
+    const raw = JSON.stringify(responseBody);
     expect(raw).not.toContain('x-builder-id');
     expect(raw).not.toContain('x-key-id');
     expect(raw).not.toContain('middleware');

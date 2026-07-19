@@ -1879,6 +1879,110 @@ async def test_async_heartbeat_wait_preserves_caller_cancellation_on_completion_
         await waiter
 
 
+@pytest.mark.asyncio
+async def test_async_heartbeat_wait_preserves_caller_cancellation_when_inner_is_cancelled() -> None:
+    _init()
+    heartbeat = controlled_provider._AsyncHeartbeat(_reserved(), 60)
+    inner = asyncio.create_task(asyncio.Event().wait())
+    heartbeat._task = inner  # type: ignore[attr-defined]
+    waiter = asyncio.create_task(heartbeat.wait_stopped())
+    await asyncio.sleep(0)
+
+    inner.cancel()
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+
+@pytest.mark.asyncio
+async def test_async_suppressed_raw_shutdown_preserves_caller_cancellation() -> None:
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+    close_finished = asyncio.Event()
+
+    async def raw_close() -> None:
+        close_started.set()
+        await allow_close.wait()
+        close_finished.set()
+
+    state = SimpleNamespace(
+        stream=object(),
+        raw_shutdown_lock=threading.Lock(),
+        raw_shutdown_task=None,
+    )
+    caller = asyncio.create_task(
+        controlled_provider._async_stream_shutdown_raw(  # type: ignore[arg-type]
+            state,
+            suppress=True,
+            shutdown=raw_close,
+        )
+    )
+    await close_started.wait()
+
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    allow_close.set()
+    raw_task = state.raw_shutdown_task
+    assert isinstance(raw_task, asyncio.Task)
+    await raw_task
+    assert close_finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_async_internally_cancelled_raw_shutdown_remains_suppressible() -> None:
+    async def raw_close() -> None:
+        raise asyncio.CancelledError
+
+    state = SimpleNamespace(
+        stream=object(),
+        raw_shutdown_lock=threading.Lock(),
+        raw_shutdown_task=None,
+    )
+
+    result = await controlled_provider._async_stream_shutdown_raw(  # type: ignore[arg-type]
+        state,
+        suppress=True,
+        shutdown=raw_close,
+    )
+
+    assert result is None
+    raw_task = state.raw_shutdown_task
+    assert isinstance(raw_task, asyncio.Task)
+    assert raw_task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_async_raw_shutdown_preserves_caller_cancellation_during_inner_cancellation() -> None:
+    close_started = asyncio.Event()
+
+    async def raw_close() -> None:
+        close_started.set()
+        await asyncio.Event().wait()
+
+    state = SimpleNamespace(
+        stream=object(),
+        raw_shutdown_lock=threading.Lock(),
+        raw_shutdown_task=None,
+    )
+    caller = asyncio.create_task(
+        controlled_provider._async_stream_shutdown_raw(  # type: ignore[arg-type]
+            state,
+            suppress=True,
+            shutdown=raw_close,
+        )
+    )
+    await close_started.wait()
+    raw_task = state.raw_shutdown_task
+    assert isinstance(raw_task, asyncio.Task)
+
+    raw_task.cancel()
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+
 def test_lifecycle_finish_and_facade_close_have_no_settlement_eligibility_gap() -> None:
     finish_entered = threading.Event()
     allow_finish = threading.Event()

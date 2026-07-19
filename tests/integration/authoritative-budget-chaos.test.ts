@@ -10,7 +10,10 @@ import {
   markBudgetControlReady,
 } from '../../src/lib/budget-control/readiness.js';
 import { createBudgetLifecycleService } from '../../src/lib/budget-control/lifecycle-service.js';
+import { ensureRedisCommandClient, redisClient } from '../../src/lib/redis/client.js';
 import { applyMigrationsThrough, createScratchDb, type ScratchDb } from '../helpers/scratch-db.js';
+import { startEgressSentinel, type EgressSentinel } from '../helpers/egress-sentinel.js';
+import { assertPythonSdkArtifactEvidence } from '../helpers/python-sdk-artifact-evidence.js';
 
 const SERVER_FIXTURE = path.resolve('tests/fixtures/authoritative-budget-http-server.ts');
 const TSX = path.resolve('node_modules/.bin/tsx');
@@ -62,6 +65,7 @@ interface SdkRunner {
 let scratch: ScratchDb | undefined;
 const runningServers = new Set<ChaosServer>();
 const runningRunners = new Set<SdkRunner>();
+const runningSentinels = new Set<EgressSentinel>();
 
 function requiredArtifactEnvironment(name: string): string {
   const value = process.env[name];
@@ -234,6 +238,7 @@ async function startServer(
 function runnerEnvironment(input: {
   apiKey: string;
   count: number;
+  egressSentinel?: string;
   endpoint: string;
   mode: 'contend' | 'legacy' | 'old_backend';
   prefix: string;
@@ -244,6 +249,7 @@ function runnerEnvironment(input: {
     ...process.env,
     PYLVA_RUNNER_API_KEY: input.apiKey,
     PYLVA_RUNNER_COUNT: String(input.count),
+    ...(input.egressSentinel ? { PYLVA_EGRESS_SENTINEL_URL: input.egressSentinel } : {}),
     PYLVA_RUNNER_ENDPOINT: input.endpoint,
     PYLVA_RUNNER_MODE: input.mode,
     PYLVA_RUNNER_PREFIX: input.prefix,
@@ -261,6 +267,7 @@ function runnerEnvironment(input: {
 function startSdkRunner(input: {
   apiKey: string;
   count: number;
+  egressSentinel?: string;
   endpoint: string;
   mode: 'contend' | 'legacy' | 'old_backend';
   prefix: string;
@@ -642,14 +649,18 @@ afterEach(async () => {
   await Promise.all([
     ...[...runningServers].map((server) => server.stop()),
     ...[...runningRunners].map((runner) => runner.stop()),
+    ...[...runningSentinels].map((sentinel) => sentinel.stop()),
   ]);
+  runningSentinels.clear();
 });
 
 afterAll(async () => {
   await Promise.all([
     ...[...runningServers].map((server) => server.stop()),
     ...[...runningRunners].map((runner) => runner.stop()),
+    ...[...runningSentinels].map((sentinel) => sentinel.stop()),
   ]);
+  runningSentinels.clear();
   await scratch?.drop();
   scratch = undefined;
 });
@@ -658,9 +669,12 @@ describe('authoritative control real-service chaos and recovery', () => {
   it('linearizes real Python and TypeScript SDK processes against the same one-dollar account', async () => {
     const fixture = await createControlledBuilder([{ limitUsd: '1', scope: 'pooled' }]);
     const server = await startServer();
+    const sentinel = await startEgressSentinel();
+    runningSentinels.add(sentinel);
     const typescript = startSdkRunner({
       apiKey: fixture.apiKey,
       count: 50,
+      egressSentinel: sentinel.endpoint,
       endpoint: server.endpoint,
       mode: 'contend',
       prefix: 'typescript',
@@ -669,6 +683,7 @@ describe('authoritative control real-service chaos and recovery', () => {
     const python = startSdkRunner({
       apiKey: fixture.apiKey,
       count: 50,
+      egressSentinel: sentinel.endpoint,
       endpoint: server.endpoint,
       mode: 'contend',
       prefix: 'python',
@@ -687,6 +702,7 @@ describe('authoritative control real-service chaos and recovery', () => {
       withTimeout(python.result, 180_000, 'Python SDK contention'),
     ]);
     const durationMs = performance.now() - startedAt;
+    expect(sentinel.requestCount()).toBe(0);
 
     expect(typescriptResult).toMatchObject({
       event: 'result',
@@ -717,6 +733,7 @@ describe('authoritative control real-service chaos and recovery', () => {
     expect(reservedValues.length).toBeGreaterThan(0);
     expect(new Set(reservedValues)).toEqual(new Set(['0.1']));
     assertTypescriptArtifactEvidence(typescriptResult);
+    assertPythonSdkArtifactEvidence(pythonResult);
     expect(String(pythonResult['sdk_path'])).toContain('/site-packages/pylva/__init__.py');
 
     const reservationIds = [
@@ -781,6 +798,67 @@ describe('authoritative control real-service chaos and recovery', () => {
     );
   }, 420_000);
 
+  it('maps real Redis budget-control exhaustion to rate_limited in both immutable SDKs', async () => {
+    const fixture = await createControlledBuilder([{ limitUsd: '1', scope: 'pooled' }]);
+    const server = await startServer();
+    const typescript = startSdkRunner({
+      apiKey: fixture.apiKey,
+      count: 1,
+      endpoint: server.endpoint,
+      mode: 'contend',
+      prefix: 'typescript_rate_limited',
+      runtime: 'typescript',
+    });
+    const python = startSdkRunner({
+      apiKey: fixture.apiKey,
+      count: 1,
+      endpoint: server.endpoint,
+      mode: 'contend',
+      prefix: 'python_rate_limited',
+      runtime: 'python',
+    });
+
+    await Promise.all([
+      withTimeout(typescript.ready, 180_000, 'TypeScript rate-limit readiness'),
+      withTimeout(python.ready, 180_000, 'Python rate-limit readiness'),
+    ]);
+    const keyId = fixture.apiKey.split('_')[2];
+    if (keyId === undefined) throw new Error('chaos API key lost its key ID');
+    await ensureRedisCommandClient();
+    const currentWindow = Math.floor(Date.now() / 60_000);
+    const bucketKeys = [-1, 0, 1].map(
+      (offset) => `rate_limit:budget_control:${keyId}:${currentWindow + offset}`,
+    );
+    try {
+      await Promise.all(bucketKeys.map((key) => redisClient.set(key, '600', { PX: 120_000 })));
+      typescript.release();
+      python.release();
+      const [typescriptResult, pythonResult] = await Promise.all([
+        withTimeout(typescript.result, 180_000, 'TypeScript rate-limit result'),
+        withTimeout(python.result, 180_000, 'Python rate-limit result'),
+      ]);
+
+      expect(typescriptResult).toMatchObject({
+        decisions: { unavailable: 1 },
+        unavailableEvidence: [{ reason: 'rate_limited', retryable: true, status: 429 }],
+      });
+      expect(pythonResult).toMatchObject({
+        decisions: { unavailable: 1 },
+        unavailable_evidence: [{ reason: 'rate_limited', retryable: true, status: 429 }],
+      });
+      assertTypescriptArtifactEvidence(typescriptResult);
+      assertPythonSdkArtifactEvidence(pythonResult);
+      expect(await requestCounts(server)).toMatchObject({
+        'GET /api/v1/budget/capabilities': 2,
+        'POST /api/v1/budget/reservations': 2,
+      });
+      const counts = await Promise.all(bucketKeys.map((key) => redisClient.get(key)));
+      expect(counts).toContain('602');
+    } finally {
+      await redisClient.del(bucketKeys);
+    }
+  }, 420_000);
+
   it('keeps legacy SDKs local against a new backend with zero control I/O', async () => {
     const fixture = await createControlledBuilder([{ limitUsd: '1', scope: 'pooled' }]);
     const server = await startServer();
@@ -818,6 +896,7 @@ describe('authoritative control real-service chaos and recovery', () => {
       runtime: 'python',
     });
     assertTypescriptArtifactEvidence(typescriptResult);
+    assertPythonSdkArtifactEvidence(pythonResult);
     const counts = await requestCounts(server);
     expect(counts['GET /api/v1/budget/capabilities']).toBeUndefined();
     expect(counts['POST /api/v1/budget/reservations']).toBeUndefined();
@@ -870,6 +949,7 @@ describe('authoritative control real-service chaos and recovery', () => {
       runtime: 'python',
     });
     assertTypescriptArtifactEvidence(typescriptResult);
+    assertPythonSdkArtifactEvidence(pythonResult);
     expect(await requestCounts(server)).toMatchObject({
       'GET /api/v1/budget/capabilities': 2,
     });
