@@ -212,7 +212,7 @@ jobs:
         run: pnpm --filter @pylva/sdk typecheck
 
       - name: Download the one immutable npm artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: pylva-typescript-sdk-immutable
           path: ${{ runner.temp }}/pylva-typescript-download
@@ -400,7 +400,7 @@ jobs:
           cache-dependency-path: packages/sdk-py/pyproject.toml
 
       - name: Download the one immutable Python artifact pair
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: pylva-python-sdk-immutable
           path: ${{ runner.temp }}/pylva-python-download
@@ -491,7 +491,7 @@ jobs:
           cache-dependency-path: packages/sdk-py/pyproject.toml
 
       - name: Download the immutable Python artifact pair
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: pylva-python-sdk-immutable
           path: ${{ runner.temp }}/pylva-python-floor
@@ -637,14 +637,14 @@ jobs:
 
       - name: Download the immutable TypeScript artifact for final service gates
         if: matrix.suite == 'concurrency-chaos' || matrix.suite == 'langgraph'
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: pylva-typescript-sdk-immutable
           path: ${{ runner.temp }}/pylva-typescript-service-download
 
       - name: Download the immutable Python artifacts for final service gates
         if: matrix.suite == 'concurrency-chaos' || matrix.suite == 'langgraph'
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: pylva-python-sdk-immutable
           path: ${{ runner.temp }}/pylva-python-service-download

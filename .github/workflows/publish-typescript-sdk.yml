@@ -91,7 +91,7 @@ jobs:
           NODE
 
       - name: Download the exact attested TypeScript release artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: pylva-typescript-sdk-immutable
           path: ${{ runner.temp }}/pylva-typescript-release
