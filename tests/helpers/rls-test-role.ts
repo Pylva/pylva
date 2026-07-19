@@ -28,9 +28,13 @@ export function rlsTestPassword(): string {
 export async function ensureRlsTestRole(sql: ReturnType<typeof postgres>): Promise<void> {
   const configured = configuredCiRlsUrl();
   if (configured) {
-    const rows = await sql.unsafe(`
-      SELECT current_database() AS database,
-             COALESCE((
+    const databases = (await sql.unsafe(`
+      SELECT current_database() AS database
+    `)) as { database: string }[];
+    const configuredDatabase = decodeURIComponent(configured.pathname.replace(/^\//u, ''));
+    if (databases[0]?.database === configuredDatabase) {
+      const rows = await sql.unsafe(`
+        SELECT COALESCE((
                SELECT role.rolcanlogin
                  AND role.rolinherit
                  AND NOT role.rolsuper
@@ -58,11 +62,10 @@ export async function ensureRlsTestRole(sql: ReturnType<typeof postgres>): Promi
                AND NOT pg_catalog.has_table_privilege(
                  '${RLS_TEST_USER}', 'public.budget_rule_revisions', 'SELECT'
                ) AS authority_denied
-    `);
-    const row = rows[0];
-    const configuredDatabase = decodeURIComponent(configured.pathname.replace(/^\//u, ''));
-    if (row?.['database'] === configuredDatabase) {
+      `);
+      const row = rows[0];
       if (
+        !row ||
         row['role_safe'] !== true ||
         row['memberships_safe'] !== true ||
         row['ordinary_access_ready'] !== true ||

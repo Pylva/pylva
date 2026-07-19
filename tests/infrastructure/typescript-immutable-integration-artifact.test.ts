@@ -327,6 +327,7 @@ describe('immutable TypeScript artifact service gate', () => {
       'utf8',
     );
     expect(runner).toContain('install_service_runner_egress_guard(_ENDPOINT)');
+    expect(runner).toContain('using="httpx"');
     expect(runner).toContain('for backend_method, backend_path in backend_routes:');
     expect(runner).toContain('method=backend_method, url=f"{backend}{backend_path}"');
     expect(runner).toContain('/api/v1/budget/reservations/');

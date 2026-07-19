@@ -241,7 +241,12 @@ def main() -> None:
     graph = _graph(journey)
     provider_route: respx.Route | None = None
     try:
-        with respx.mock(assert_all_called=False, assert_all_mocked=True) as router:
+        # Patch HTTPX above its default transport so mocked provider traffic is
+        # intercepted before the fail-closed transport guard. Backend pass-through
+        # still reaches that guard and its exact method/path allowlist.
+        with respx.mock(
+            using="httpx", assert_all_called=False, assert_all_mocked=True
+        ) as router:
             backend = _ENDPOINT.rstrip("/")
             backend_routes = (
                 ("GET", "/api/v1/budget/capabilities"),

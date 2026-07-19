@@ -50,7 +50,12 @@ describe('budget activity runtime credential boundary', () => {
     ).rejects.toMatchObject({ code: '42501' });
     for (const table of ['budget_control_cutovers', 'budget_rule_revisions']) {
       await expect(
-        general.unsafe(`SELECT builder_id FROM public.${table} LIMIT 1`),
+        general.begin(async (transaction) => {
+          await transaction`
+            SELECT pg_catalog.set_config('app.builder_id', ${builderId}::UUID::TEXT, TRUE)
+          `;
+          return transaction.unsafe(`SELECT builder_id FROM public.${table} LIMIT 1`);
+        }),
       ).rejects.toMatchObject({ code: '42501' });
     }
 
