@@ -96,6 +96,7 @@ jobs:
     env:
       DATABASE_URL: postgresql://pylva_app_ci:pylva_app_ci_test@localhost:5432/pylva_test
       BUDGET_CONTROL_DATABASE_URL: postgresql://pylva_budget_control_ci:pylva_budget_control_ci_test@localhost:5432/pylva_test
+      PYLVA_RLS_TEST_DATABASE_URL: postgresql://pylva_rls_test:pylva_rls_test@localhost:5432/pylva_test
       ALLOW_BUDGET_CONTROL_DATABASE_URL_FALLBACK: 'false'
       CLICKHOUSE_URL: http://default:test@localhost:8123
       REDIS_URL: redis://localhost:6379
@@ -134,6 +135,12 @@ jobs:
           MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
         run: pnpm exec tsx scripts/ci/provision-authoritative-budget-runtime.ts
 
+      - name: Provision isolated database test identities
+        env:
+          CI_POSTGRES_ADMIN_URL: postgresql://pylva:pylva_test@localhost:5432/pylva_test
+          PYLVA_TEST_DATABASE_URL: postgresql://pylva_fixture_ci:pylva_fixture_ci_test@localhost:5432/pylva_test
+        run: pnpm exec tsx scripts/ci/provision-database-test-identities.ts
+
       - name: Verify ClickHouse readiness
         run: pnpm clickhouse:doctor
 
@@ -150,11 +157,11 @@ jobs:
 
       - name: Legacy DB security and integration tests
         env:
-          # These suites create fixtures, roles, and grants. Keep the application
-          # connection least-privileged at job scope, and expose the container
-          # superuser only to this fixture-owning test step.
-          PYLVA_TEST_DATABASE_ADMIN_URL: postgresql://pylva:pylva_test@localhost:5432/postgres
-          PYLVA_TEST_DATABASE_URL: postgresql://pylva:pylva_test@localhost:5432/pylva_test
+          # Keep application code on the job-level ordinary runtime identity;
+          # fixture ownership uses the isolated non-superuser migration identity,
+          # and RLS assertions use the dedicated test-only identity.
+          PYLVA_TEST_DATABASE_ADMIN_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/postgres
+          PYLVA_TEST_DATABASE_URL: postgresql://pylva_fixture_ci:pylva_fixture_ci_test@localhost:5432/pylva_test
         run: >-
           pnpm exec vitest run --config vitest.integration.config.ts
           --exclude 'tests/integration/authoritative-*.test.ts'
@@ -170,7 +177,12 @@ jobs:
 
   ci-full-services:
     name: ci-full-services
-    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'full-integration')
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'full-integration') ||
+      contains(github.event.pull_request.labels.*.name, 'authoritative-control-full')
     runs-on: ubuntu-latest
 
     services:
@@ -215,6 +227,7 @@ jobs:
     env:
       DATABASE_URL: postgresql://pylva_app_ci:pylva_app_ci_test@localhost:5432/pylva_test
       BUDGET_CONTROL_DATABASE_URL: postgresql://pylva_budget_control_ci:pylva_budget_control_ci_test@localhost:5432/pylva_test
+      PYLVA_RLS_TEST_DATABASE_URL: postgresql://pylva_rls_test:pylva_rls_test@localhost:5432/pylva_test
       ALLOW_BUDGET_CONTROL_DATABASE_URL_FALLBACK: 'false'
       CLICKHOUSE_URL: http://default:test@localhost:8123
       REDIS_URL: redis://localhost:6379
@@ -253,6 +266,12 @@ jobs:
           MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
         run: pnpm exec tsx scripts/ci/provision-authoritative-budget-runtime.ts
 
+      - name: Provision isolated database test identities
+        env:
+          CI_POSTGRES_ADMIN_URL: postgresql://pylva:pylva_test@localhost:5432/pylva_test
+          PYLVA_TEST_DATABASE_URL: postgresql://pylva_fixture_ci:pylva_fixture_ci_test@localhost:5432/pylva_test
+        run: pnpm exec tsx scripts/ci/provision-database-test-identities.ts
+
       - name: Verify ClickHouse readiness
         run: pnpm clickhouse:doctor
 
@@ -286,11 +305,11 @@ jobs:
 
       - name: Full-service integration tests (immutable SDK gates delegated)
         env:
-          # Fixture setup and RLS-role verification need container-admin powers;
-          # production code imported by the suite still reads the restricted
-          # job-level DATABASE_URL.
-          PYLVA_TEST_DATABASE_ADMIN_URL: postgresql://pylva:pylva_test@localhost:5432/postgres
-          PYLVA_TEST_DATABASE_URL: postgresql://pylva:pylva_test@localhost:5432/pylva_test
+          # Keep application code on the job-level ordinary runtime identity;
+          # fixture ownership uses the isolated non-superuser migration identity,
+          # and RLS assertions use the dedicated test-only identity.
+          PYLVA_TEST_DATABASE_ADMIN_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/postgres
+          PYLVA_TEST_DATABASE_URL: postgresql://pylva_fixture_ci:pylva_fixture_ci_test@localhost:5432/pylva_test
         run: >-
           pnpm exec vitest run --config vitest.integration.config.ts
           --exclude 'tests/integration/authoritative-budget-chaos.test.ts'

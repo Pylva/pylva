@@ -7,6 +7,7 @@ import * as releaseRoute from '../../src/app/api/v1/budget/reservations/[id]/rel
 import * as extendRoute from '../../src/app/api/v1/budget/reservations/[id]/extend/route';
 import { MAX_BUDGET_CONTROL_REQUEST_BYTES } from '../../src/lib/budget-control/http-handler';
 import {
+  createCommitBudgetControlPOST,
   createExtendBudgetControlPOST,
   createReleaseBudgetControlPOST,
   createReserveBudgetControlPOST,
@@ -212,23 +213,58 @@ describe('authoritative budget-control Next routes', () => {
     );
   });
 
-  it('sanitizes missing middleware context before invoking any service', async () => {
-    const service = vi.fn(async () => reserveResponse);
-    const response = await createReserveBudgetControlPOST(service)(
-      request('/api/v1/budget/reservations', JSON.stringify(reserveRequest), {
-        headers: requestHeaders({ 'X-Builder-Id': '', 'X-Key-Id': '' }),
-      }),
-    );
+  it('sanitizes missing middleware context identically across all four mutation routes', async () => {
+    const reserveService = vi.fn(async () => reserveResponse);
+    const commitService = vi.fn(async () => commitResponse);
+    const releaseService = vi.fn(async () => releaseResponse);
+    const extendService = vi.fn(async () => extendResponse);
+    const missingContext = () => requestHeaders({ 'X-Builder-Id': '', 'X-Key-Id': '' });
 
-    expectJsonNoStore(response, 500);
-    const body = await errorBody(response);
-    expect(body.error).toEqual({
-      type: 'api_error',
-      code: ErrorCode.INTERNAL_ERROR,
-      message: 'An internal error occurred',
-    });
-    expect(JSON.stringify(body)).not.toContain('x-builder-id');
-    expect(service).not.toHaveBeenCalled();
+    const responses = [
+      await createReserveBudgetControlPOST(reserveService)(
+        request('/api/v1/budget/reservations', JSON.stringify(reserveRequest), {
+          headers: missingContext(),
+        }),
+      ),
+      await createCommitBudgetControlPOST(commitService)(
+        request(
+          `/api/v1/budget/reservations/${RESERVATION_ID}/commit`,
+          JSON.stringify(commitRequest),
+          { headers: missingContext() },
+        ),
+        { params: Promise.resolve({ id: RESERVATION_ID }) },
+      ),
+      await createReleaseBudgetControlPOST(releaseService)(
+        request(
+          `/api/v1/budget/reservations/${RESERVATION_ID}/release`,
+          JSON.stringify(releaseRequest),
+          { headers: missingContext() },
+        ),
+        { params: Promise.resolve({ id: RESERVATION_ID }) },
+      ),
+      await createExtendBudgetControlPOST(extendService)(
+        request(
+          `/api/v1/budget/reservations/${RESERVATION_ID}/extend`,
+          JSON.stringify(extendRequest),
+          { headers: missingContext() },
+        ),
+        { params: Promise.resolve({ id: RESERVATION_ID }) },
+      ),
+    ];
+
+    for (const response of responses) {
+      expectJsonNoStore(response, 500);
+      const body = await errorBody(response);
+      expect(body.error).toEqual({
+        type: 'api_error',
+        code: ErrorCode.INTERNAL_ERROR,
+        message: 'An internal error occurred',
+      });
+      expect(JSON.stringify(body)).not.toMatch(/x-builder-id|x-key-id|middleware/u);
+    }
+    for (const service of [reserveService, commitService, releaseService, extendService]) {
+      expect(service).not.toHaveBeenCalled();
+    }
   });
 
   it('enforces the streaming cap despite a dishonest smaller Content-Length', async () => {

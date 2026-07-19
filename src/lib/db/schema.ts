@@ -343,6 +343,32 @@ export const invoices = pgTable('invoices', {
   index('idx_invoices_cycle').on(table.builder_id, table.billing_cycle_id),
 ]);
 
+// --- monthly_invoice_periods (migration 055) ---
+// Durable work ledger for the monthly invoice cron. Rows remain until every
+// invoice slice for the period has been generated successfully.
+export const monthlyInvoicePeriods = pgTable('monthly_invoice_periods', {
+  builder_id: uuid('builder_id').notNull().references(() => builders.id, { onDelete: 'cascade' }),
+  customer_id: uuid('customer_id').notNull().references(() => customers.id, { onDelete: 'cascade' }),
+  period_start: timestamp('period_start', { withTimezone: true }).notNull(),
+  period_end: timestamp('period_end', { withTimezone: true }).notNull(),
+  status: varchar('status', { length: 20 }).notNull().default('pending'),
+  attempts: integer('attempts').notNull().default(0),
+  last_attempt_at: timestamp('last_attempt_at', { withTimezone: true }),
+  last_error: text('last_error'),
+  completed_at: timestamp('completed_at', { withTimezone: true }),
+  created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  primaryKey({ columns: [table.builder_id, table.customer_id, table.period_start] }),
+  index('idx_monthly_invoice_periods_pending').on(table.period_start).where(
+    drizzleSql`${table.status} = 'pending'`,
+  ),
+  check('monthly_invoice_periods_status_ck', drizzleSql`${table.status} IN ('pending', 'completed')`),
+  check('monthly_invoice_periods_attempts_ck', drizzleSql`${table.attempts} >= 0`),
+  check('monthly_invoice_periods_bounds_ck', drizzleSql`${table.period_start} < ${table.period_end}`),
+  check('monthly_invoice_periods_month_bounds_ck', drizzleSql`${table.period_start} AT TIME ZONE 'UTC' = date_trunc('month', ${table.period_start} AT TIME ZONE 'UTC') AND ${table.period_end} = (${table.period_start} AT TIME ZONE 'UTC' + INTERVAL '1 month') AT TIME ZONE 'UTC'`),
+  check('monthly_invoice_periods_completion_ck', drizzleSql`(${table.status} = 'pending' AND ${table.completed_at} IS NULL) OR (${table.status} = 'completed' AND ${table.completed_at} IS NOT NULL)`),
+]);
+
 // --- stripe_connect (B2b migration 025: widened status + capabilities_ok) ---
 export const stripeConnect = pgTable('stripe_connect', {
   id: uuid('id').primaryKey().defaultRandom(),

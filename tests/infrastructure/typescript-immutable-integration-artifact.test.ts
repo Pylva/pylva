@@ -233,6 +233,14 @@ describe('immutable TypeScript artifact service gate', () => {
     expect(pythonLangGraph).toContain('"$PYLVA_PYTHON_WHEEL"');
     expect(pythonLangGraph).toContain("'openai==2.45.0'");
     expect(pythonLangGraph).toContain("'respx==0.23.1'");
+    for (const fixture of [
+      'tests/fixtures/authoritative_budget_sdk_py_runner.py',
+      'tests/fixtures/authoritative_budget_langgraph_sdk_py_runner.py',
+    ]) {
+      const runner = readFileSync(path.join(repoRoot, fixture), 'utf8');
+      expect(runner, fixture).toContain('ARTIFACT_EVIDENCE = verify_python_sdk_artifact()');
+      expect(runner, fixture).toContain('**ARTIFACT_EVIDENCE');
+    }
   });
 
   it('builds one Python artifact pair and makes every matrix leg verify those bytes', () => {
@@ -245,8 +253,8 @@ describe('immutable TypeScript artifact service gate', () => {
     expect(matrix).toContain('    needs: python-package-artifact');
     expect(matrix).toContain('uses: actions/download-artifact@v7');
     expect(matrix).toContain('name: pylva-python-sdk-immutable');
-    expect(matrix).toContain('--wheel-sha256 "$WHEEL_SHA256"');
-    expect(matrix).toContain('--sdist-sha256 "$SDIST_SHA256"');
+    expect(matrix).toContain('--wheel-sha256 "$PYLVA_PYTHON_WHEEL_SHA256"');
+    expect(matrix).toContain('--sdist-sha256 "$PYLVA_PYTHON_SDIST_SHA256"');
     expect(matrix).not.toContain('python -m build');
   });
 
@@ -263,7 +271,7 @@ describe('immutable TypeScript artifact service gate', () => {
     Object.assign(environment, {
       PYLVA_RUNNER_API_KEY: 'key',
       PYLVA_RUNNER_COUNT: '0',
-      PYLVA_RUNNER_ENDPOINT: 'https://pylva.invalid',
+      PYLVA_RUNNER_ENDPOINT: 'http://127.0.0.1:1',
       PYLVA_RUNNER_MODE: 'legacy',
     });
     for (const fixture of [
@@ -290,18 +298,27 @@ describe('immutable TypeScript artifact service gate', () => {
     expect(runner).toContain("artifactResolver('openai')");
     expect(runner).toContain("new OpenAI({ apiKey: 'provider-private-langgraph-key'");
     expect(runner).toContain('const openai = await this.openai');
-    expect(runner).toContain("url.origin === 'https://api.openai.com'");
-    expect(runner).toContain('function isAllowedBackendRequest(url)');
-    expect(runner).toContain('backendStaticPaths.has(path)');
-    expect(runner).toContain('backendReservationMutation.test(path)');
-    expect(runner).toContain('throw new Error(`unexpected external request:');
-    expect(runner.indexOf('if (!isAllowedBackendRequest(url))')).toBeLessThan(
-      runner.indexOf('await networkFetch(input, request)'),
-    );
-    expect(runner).toContain("url.pathname === '/api/v1/budget/reservations'");
+    expect(runner).toContain('createServiceRunnerFetch');
+    expect(runner).toContain('const networkFetch = globalThis.fetch');
+    expect(runner).toContain('providerHandler: providerFetch');
+    expect(runner).toContain('globalThis.fetch = guardedFetch');
     expect(runner).toContain("decision.decision === 'reserved'");
     expect(runner).not.toContain('const rawClient');
     expect(runner).not.toContain('attemptIds(');
+
+    const guard = readFileSync(
+      path.join(repoRoot, 'tests/fixtures/service-runner-egress-guard.mjs'),
+      'utf8',
+    );
+    expect(guard).toContain("url.origin === 'https://api.openai.com'");
+    expect(guard).toContain("url.pathname === '/v1/chat/completions'");
+    expect(guard).toContain('function isAllowedBackendRequest(url, method, backend)');
+    expect(guard).toContain('BACKEND_ROUTES.has(`${method} ${path}`)');
+    expect(guard).toContain("method === 'POST' && RESERVATION_MUTATION.test(path)");
+    expect(guard).toContain('throw new Error(`unexpected external request:');
+    expect(guard.indexOf('if (!isAllowedBackendRequest(url, method, backend))')).toBeLessThan(
+      guard.indexOf('await networkFetch(input, manualRedirectInit(init))'),
+    );
   });
 
   it('keeps the Python LangGraph network pass-through on an explicit API allowlist', () => {
@@ -309,9 +326,12 @@ describe('immutable TypeScript artifact service gate', () => {
       path.join(repoRoot, 'tests/fixtures/authoritative_budget_langgraph_sdk_py_runner.py'),
       'utf8',
     );
-    expect(runner).toContain('for backend_path in backend_paths:');
-    expect(runner).toContain('url=f"{backend}{backend_path}"');
+    expect(runner).toContain('install_service_runner_egress_guard(_ENDPOINT)');
+    expect(runner).toContain('using="httpx"');
+    expect(runner).toContain('for backend_method, backend_path in backend_routes:');
+    expect(runner).toContain('method=backend_method, url=f"{backend}{backend_path}"');
     expect(runner).toContain('/api/v1/budget/reservations/');
+    expect(runner).toContain('[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-');
     expect(runner).toContain('(?:commit|extend|release)$');
     expect(runner).not.toContain("endpoint.rstrip('/'))}(?:/|$)");
   });
@@ -351,7 +371,7 @@ describe('immutable TypeScript artifact service gate', () => {
           ...fixture.environment,
           PYLVA_RUNNER_API_KEY: 'fixture-key',
           PYLVA_RUNNER_COUNT: '0',
-          PYLVA_RUNNER_ENDPOINT: 'https://pylva.invalid',
+          PYLVA_RUNNER_ENDPOINT: 'http://127.0.0.1:1',
           PYLVA_RUNNER_MODE: 'legacy',
         },
       },

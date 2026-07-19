@@ -22,6 +22,7 @@ import {
   withControlledCallbackScope,
 } from '../src/core/control_correlation.js';
 import { _resetTelemetryForTests, bufferSize } from '../src/core/telemetry.js';
+import { matchesExactRequest } from './helpers/url.js';
 import {
   _resetVercelAiPatchForTests,
   PylvaStrictProviderError,
@@ -35,6 +36,19 @@ const KEY = `pv_live_aabbccdd_${'a'.repeat(32)}`;
 const RESERVATION_ID = '44444444-4444-4444-8444-444444444444';
 const nodeRequire = createRequire(import.meta.url);
 let defaultManagedModel: ControlledOpenAIChatModel;
+
+function matchesControlRequest(
+  input: string | URL | Request,
+  request: RequestInit | undefined,
+  pathname: string,
+  method: string,
+): boolean {
+  return matchesExactRequest(input, request, {
+    origin: 'https://control.test',
+    pathname,
+    method,
+  });
+}
 
 function _setControlledAiFunctionsForTests(
   functions: Partial<Record<'generateText' | 'streamText', (input: unknown) => unknown>>,
@@ -56,7 +70,7 @@ function installFetch(
   let operationId = '';
   return vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, request) => {
     const href = String(url);
-    if (href.endsWith('/capabilities')) {
+    if (matchesControlRequest(url, request, '/api/v1/budget/capabilities', 'GET')) {
       return json({
         schema_version: '1.0',
         control_enabled: true,
@@ -66,7 +80,7 @@ function installFetch(
         server_time: '2026-07-14T09:00:00.000Z',
       });
     }
-    if (href.endsWith('/reservations')) {
+    if (matchesControlRequest(url, request, '/api/v1/budget/reservations', 'POST')) {
       const body = JSON.parse(String(request?.body)) as Record<string, unknown>;
       operationId = String(body['operation_id']);
       if (options.reserveDecision === 'denied') {
@@ -109,7 +123,14 @@ function installFetch(
         warnings: [],
       });
     }
-    if (href.endsWith('/commit')) {
+    if (
+      matchesControlRequest(
+        url,
+        request,
+        `/api/v1/budget/reservations/${RESERVATION_ID}/commit`,
+        'POST',
+      )
+    ) {
       return json({
         schema_version: '1.0',
         state: 'committed',
@@ -125,7 +146,14 @@ function installFetch(
         late: false,
       });
     }
-    if (href.endsWith('/release')) {
+    if (
+      matchesControlRequest(
+        url,
+        request,
+        `/api/v1/budget/reservations/${RESERVATION_ID}/release`,
+        'POST',
+      )
+    ) {
       return json({
         schema_version: '1.0',
         state: 'released',
@@ -136,7 +164,14 @@ function installFetch(
         idempotent_replay: false,
       });
     }
-    if (href.endsWith('/extend')) {
+    if (
+      matchesControlRequest(
+        url,
+        request,
+        `/api/v1/budget/reservations/${RESERVATION_ID}/extend`,
+        'POST',
+      )
+    ) {
       const body = JSON.parse(String(request?.body)) as Record<string, unknown>;
       return json({
         schema_version: '1.0',
@@ -617,11 +652,20 @@ describe('controlled Vercel AI one-step subset', () => {
       '\n',
     );
     expect(renderedError).not.toContain(secret);
+    let exactReserveRequests = 0;
     for (const [url, requestInit] of fetchSpy.mock.calls) {
-      if (new URL(String(url)).origin === 'https://control.test') {
-        expect(String(requestInit?.body ?? '')).not.toContain(secret);
+      if (matchesControlRequest(url, requestInit, '/api/v1/budget/reservations', 'POST')) {
+        exactReserveRequests += 1;
+        const body =
+          url instanceof Request
+            ? await url.clone().text()
+            : requestInit?.body == null
+              ? ''
+              : String(requestInit.body);
+        expect(body).not.toContain(secret);
       }
     }
+    expect(exactReserveRequests).toBe(1);
 
     let factoryError: unknown;
     try {

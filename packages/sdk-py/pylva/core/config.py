@@ -118,13 +118,12 @@ def is_valid_api_key_format(api_key: str) -> bool:
 
 
 def _validate_control_values(mode: object, on_unavailable: object, timeout_ms: object) -> None:
-    if not isinstance(mode, str) or mode not in {"legacy", "shadow", "enforce"}:
+    if type(mode) is not str or mode not in {"legacy", "shadow", "enforce"}:
         raise InvalidControlConfigError("mode must be legacy, shadow, or enforce")
-    if not isinstance(on_unavailable, str) or on_unavailable not in {"allow", "deny"}:
+    if type(on_unavailable) is not str or on_unavailable not in {"allow", "deny"}:
         raise InvalidControlConfigError("on_unavailable must be allow or deny")
     if (
-        isinstance(timeout_ms, bool)
-        or not isinstance(timeout_ms, int)
+        type(timeout_ms) is not int
         or timeout_ms < MIN_CONTROL_TIMEOUT_MS
         or timeout_ms > MAX_CONTROL_TIMEOUT_MS
     ):
@@ -137,34 +136,52 @@ def _validate_control_values(mode: object, on_unavailable: object, timeout_ms: o
 def _resolve_control_config(
     value: ControlConfig | Mapping[str, Any] | None,
 ) -> ResolvedControlConfig:
-    if value is None:
-        return ResolvedControlConfig(
-            mode="legacy",
-            on_unavailable="allow",
-            timeout_ms=DEFAULT_CONTROL_TIMEOUT_MS,
-        )
-    if isinstance(value, ControlConfig):
-        return ResolvedControlConfig(
-            mode=value.mode,
-            on_unavailable=value.on_unavailable,
-            timeout_ms=value.timeout_ms,
-        )
-    if not isinstance(value, Mapping):
-        raise InvalidControlConfigError("control must be a mapping or ControlConfig")
+    try:
+        if value is None:
+            return ResolvedControlConfig(
+                mode="legacy",
+                on_unavailable="allow",
+                timeout_ms=DEFAULT_CONTROL_TIMEOUT_MS,
+            )
+        if isinstance(value, ControlConfig):
+            mode = value.mode
+            on_unavailable = value.on_unavailable
+            timeout_ms = value.timeout_ms
+            _validate_control_values(mode, on_unavailable, timeout_ms)
+            return ResolvedControlConfig(
+                mode=cast(ControlMode, mode),
+                on_unavailable=cast(ControlUnavailablePolicy, on_unavailable),
+                timeout_ms=cast(int, timeout_ms),
+            )
+        if not isinstance(value, Mapping):
+            raise InvalidControlConfigError("control must be a mapping or ControlConfig")
 
-    allowed = {"mode", "on_unavailable", "timeout_ms"}
-    unknown = next((key for key in value if key not in allowed), None)
-    if unknown is not None:
-        raise InvalidControlConfigError(f"unknown field {unknown!r}")
-    mode = value.get("mode", "legacy")
-    on_unavailable = value.get("on_unavailable", "allow")
-    timeout_ms = value.get("timeout_ms", DEFAULT_CONTROL_TIMEOUT_MS)
-    _validate_control_values(mode, on_unavailable, timeout_ms)
-    return ResolvedControlConfig(
-        mode=cast(ControlMode, mode),
-        on_unavailable=cast(ControlUnavailablePolicy, on_unavailable),
-        timeout_ms=cast(int, timeout_ms),
-    )
+        # Snapshot an arbitrary Mapping before reading fields so later mapping
+        # mutation cannot change the validated configuration. Every ordinary
+        # mapping failure is normalized below without rendering attacker-owned
+        # keys or values into the public error message.
+        snapshot = dict(value)
+        allowed = {"mode", "on_unavailable", "timeout_ms"}
+        for key in snapshot:
+            if type(key) is not str:
+                raise InvalidControlConfigError("control field names must be exact strings")
+            if key not in allowed:
+                raise InvalidControlConfigError("control contains an unknown field")
+        mode = snapshot.get("mode", "legacy")
+        on_unavailable = snapshot.get("on_unavailable", "allow")
+        timeout_ms = snapshot.get("timeout_ms", DEFAULT_CONTROL_TIMEOUT_MS)
+        _validate_control_values(mode, on_unavailable, timeout_ms)
+        return ResolvedControlConfig(
+            mode=cast(ControlMode, mode),
+            on_unavailable=cast(ControlUnavailablePolicy, on_unavailable),
+            timeout_ms=cast(int, timeout_ms),
+        )
+    except InvalidControlConfigError:
+        raise
+    except Exception:
+        # Do not retain an attacker-controlled exception as __cause__: logging
+        # the normalized public error must not render a hostile/secret message.
+        raise InvalidControlConfigError("control could not be read safely") from None
 
 
 def init(

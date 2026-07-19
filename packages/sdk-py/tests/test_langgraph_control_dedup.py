@@ -15,7 +15,12 @@ from pylva.adapters.tavily import controlled_tavily_search, controlled_tavily_se
 from pylva.core import control_client, telemetry
 from pylva.core import controlled_usage as controlled_usage_subject
 from pylva.core.config import get_config, get_config_generation
-from pylva.core.control_ownership import ControlledAttemptContext, _controlled_attempt_scope
+from pylva.core.control_ownership import (
+    ControlledAttemptContext,
+    _controlled_attempt_scope,
+    _register_controlled_reservation,
+)
+from pylva.core.control_schema import ReservedBudgetDecision
 from pylva.errors.budget_exceeded import BudgetExceededSource, PylvaBudgetExceeded
 from pylva.errors.control import PylvaControlValidationError
 from pylva.errors.strict_provider import PylvaStrictProviderError
@@ -116,6 +121,51 @@ def _authoritative_denial() -> PylvaBudgetExceeded:
     )
 
 
+def _reserved_decision(request: dict[str, Any]) -> ReservedBudgetDecision:
+    decision = ReservedBudgetDecision.model_validate(
+        {
+            "schema_version": "1.0",
+            "decision": "reserved",
+            "allowed": True,
+            "decision_id": str(uuid.uuid4()),
+            "operation_id": request["operation_id"],
+            "reservation_id": str(uuid.uuid4()),
+            "state": "reserved",
+            "reserved_usd": "1",
+            "remaining_usd": "2",
+            "expires_at": "2026-07-14T10:00:00.000Z",
+            "warnings": [],
+        },
+        strict=True,
+    )
+    config = get_config()
+    assert config is not None
+    assert _register_controlled_reservation(
+        decision,
+        config,
+        get_config_generation(),
+        request["trace_id"],
+        request["span_id"],
+    )
+    return decision
+
+
+def _exact_openai_stream_event() -> dict[str, object]:
+    return {
+        "model": "gpt-4o-mini",
+        "service_tier": "default",
+        "usage": {
+            "prompt_tokens": 4,
+            "completion_tokens": 2,
+            "total_tokens": 6,
+            "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "cache_write_tokens": 0,
+            },
+        },
+    }
+
+
 class _DeniedSyncCompletions:
     def __init__(self) -> None:
         self.calls = 0
@@ -156,6 +206,65 @@ class _DeniedAsyncTavilyClient(_DeniedSyncTavilyClient):
     async def search(self, _query: str, **_options: Any) -> object:
         self.calls += 1
         return {"usage": {"credits": 1}}
+
+
+class _ExactSyncStream:
+    def __init__(self) -> None:
+        self._events = iter([_exact_openai_stream_event()])
+        self.close_calls = 0
+
+    def __iter__(self) -> _ExactSyncStream:
+        return self
+
+    def __next__(self) -> object:
+        return next(self._events)
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class _ExactAsyncStream:
+    def __init__(self) -> None:
+        self._events = iter([_exact_openai_stream_event()])
+        self.close_calls = 0
+
+    def __aiter__(self) -> _ExactAsyncStream:
+        return self
+
+    async def __anext__(self) -> object:
+        try:
+            return next(self._events)
+        except StopIteration as error:
+            raise StopAsyncIteration from error
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+
+class _SyncStreamingCompletions:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.streams: list[_ExactSyncStream] = []
+
+    def create(self, **kwargs: Any) -> _ExactSyncStream:
+        assert kwargs["stream"] is True
+        self.calls += 1
+        stream = _ExactSyncStream()
+        self.streams.append(stream)
+        return stream
+
+
+class _AsyncStreamingCompletions:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.streams: list[_ExactAsyncStream] = []
+
+    async def create(self, **kwargs: Any) -> _ExactAsyncStream:
+        assert kwargs["stream"] is True
+        self.calls += 1
+        stream = _ExactAsyncStream()
+        self.streams.append(stream)
+        return stream
 
 
 def test_auto_suppresses_reserved_wrapper_callback_after_dispatch_scope_exits() -> None:
@@ -312,6 +421,134 @@ def test_public_scope_links_callback_first_provider_second() -> None:
             pass
     _end_llm(handler, run_id)
 
+    assert telemetry.buffer_size() == 0
+
+
+def test_sync_streaming_wrapper_settles_once_and_suppresses_duplicate_callback_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handler = PylvaCallbackHandler(
+        api_key=KEY_A,
+        endpoint="https://unit.invalid",
+        local_mode=True,
+        control={"mode": "enforce", "on_unavailable": "deny"},
+    )
+    run_id = uuid.uuid4()
+    resource = _SyncStreamingCompletions()
+    reserves: list[dict[str, Any]] = []
+    commits: list[tuple[str, dict[str, Any]]] = []
+    releases: list[object] = []
+
+    def reserve(request: dict[str, Any]) -> ReservedBudgetDecision:
+        reserves.append(request)
+        return _reserved_decision(request)
+
+    monkeypatch.setattr(control_client, "reserve_usage_sync", reserve)
+    monkeypatch.setattr(
+        control_client,
+        "commit_usage_sync",
+        lambda reservation_id, request: commits.append((reservation_id, request)),
+    )
+    monkeypatch.setattr(
+        control_client,
+        "release_usage_sync",
+        lambda *_args: releases.append(_args),
+    )
+    client = wrap_openai(_DeniedOpenAIClient(resource))
+
+    with warnings.catch_warnings(record=True) as emitted:
+        warnings.simplefilter("always")
+        with langgraph_control_scope():
+            _start_llm(handler, run_id)
+            with client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": "private"}],
+                max_completion_tokens=8,
+                stream=True,
+            ) as stream:
+                events = list(stream)
+        _end_llm(handler, run_id)
+        handler.on_llm_error(RuntimeError("late duplicate"), run_id=run_id)
+        client.close()
+
+    assert events == [_exact_openai_stream_event()]
+    assert resource.calls == 1
+    assert len(reserves) == 1
+    assert len(commits) == 1
+    assert commits[0][1]["actual_input_tokens"] == 4
+    assert commits[0][1]["actual_output_tokens"] == 2
+    assert releases == []
+    assert resource.streams[0].close_calls == 1
+    assert [warning for warning in emitted if "control scope" in str(warning.message)] == []
+    assert telemetry.buffer_size() == 0
+
+
+@pytest.mark.asyncio
+async def test_async_streaming_wrapper_settles_once_and_suppresses_duplicate_callback_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handler = AsyncPylvaCallbackHandler(
+        api_key=KEY_A,
+        endpoint="https://unit.invalid",
+        local_mode=True,
+        control={"mode": "enforce", "on_unavailable": "deny"},
+    )
+    run_id = uuid.uuid4()
+    resource = _AsyncStreamingCompletions()
+    reserves: list[dict[str, Any]] = []
+    commits: list[tuple[str, dict[str, Any]]] = []
+    releases: list[object] = []
+
+    async def reserve(request: dict[str, Any]) -> ReservedBudgetDecision:
+        reserves.append(request)
+        return _reserved_decision(request)
+
+    async def commit(reservation_id: str, request: dict[str, Any]) -> None:
+        commits.append((reservation_id, request))
+
+    async def release(*args: object) -> None:
+        releases.append(args)
+
+    monkeypatch.setattr(control_client, "reserve_usage", reserve)
+    monkeypatch.setattr(control_client, "commit_usage", commit)
+    monkeypatch.setattr(control_client, "release_usage", release)
+    client = wrap_openai(_DeniedOpenAIClient(resource))
+
+    with warnings.catch_warnings(record=True) as emitted:
+        warnings.simplefilter("always")
+        with langgraph_control_scope():
+            await handler.on_chat_model_start(
+                {"name": "ChatOpenAI"},
+                [[object()]],
+                run_id=run_id,
+                metadata={
+                    "pylva_customer_id": "customer_acme",
+                    "langgraph_node": "call_model",
+                    "ls_provider": "openai",
+                    "ls_model_name": "gpt-4o-mini",
+                },
+            )
+            stream = await client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": "private"}],
+                max_completion_tokens=8,
+                stream=True,
+            )
+            async with stream:
+                events = [event async for event in stream]
+        await handler.on_llm_end(_Response(), run_id=run_id)
+        await handler.on_llm_error(RuntimeError("late duplicate"), run_id=run_id)
+        await client.close()
+
+    assert events == [_exact_openai_stream_event()]
+    assert resource.calls == 1
+    assert len(reserves) == 1
+    assert len(commits) == 1
+    assert commits[0][1]["actual_input_tokens"] == 4
+    assert commits[0][1]["actual_output_tokens"] == 2
+    assert releases == []
+    assert resource.streams[0].close_calls == 1
+    assert [warning for warning in emitted if "control scope" in str(warning.message)] == []
     assert telemetry.buffer_size() == 0
 
 

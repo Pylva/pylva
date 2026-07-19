@@ -249,12 +249,12 @@ def _assert_narrow_stream_surface(
     safe_names: list[str],
 ) -> None:
     assert dir(facade) == safe_names
-    # Python 3.10's inspect.getmembers() probes class internals even after an
-    # instance supplies an empty __dir__, which correctly trips this facade's
-    # anti-bypass __getattribute__ guard.  Resolve only the names the facade
-    # itself exposes so the assertion tests the public surface consistently
-    # across the declared interpreter matrix.
-    assert {name for name in dir(facade) if getattr(facade, name) is not None} == set(safe_names)
+    assert {name for name, _value in inspect.getmembers(facade)} == set(safe_names)
+    with pytest.raises(AttributeError):
+        type(facade).__getattribute__(facade, "__bases__")
+    with pytest.raises(AttributeError):
+        type(facade).__getattr__(facade, "__bases__")
+    assert not hasattr(facade, "__bases__")
     with pytest.raises((TypeError, PylvaStrictProviderError)):
         vars(facade)
     with pytest.raises(AttributeError):

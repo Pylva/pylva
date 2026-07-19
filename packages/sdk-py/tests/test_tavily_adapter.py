@@ -12,10 +12,12 @@ from pylva.adapters.tavily import (
     controlled_tavily_search_sync,
 )
 from pylva.core import controlled_usage as controlled
+from pylva.core import telemetry
 from pylva.core.config import get_config_generation, require_config
 from pylva.core.config import init as init_config
 from pylva.core.control_ownership import _register_controlled_reservation
 from pylva.core.control_schema import BudgetCommitResponse, ReservedBudgetDecision
+from pylva.errors.budget_exceeded import BudgetExceededSource, PylvaBudgetExceeded
 from pylva.errors.control import PylvaControlValidationError
 
 KEY = "pv_live_12345678_" + "a" * 32
@@ -119,6 +121,19 @@ class AsyncClient(SyncClient):
         return super().search(query, **kwargs)
 
 
+def _authoritative_denial() -> PylvaBudgetExceeded:
+    return PylvaBudgetExceeded(
+        source=BudgetExceededSource.AUTHORITATIVE_CONTROL,
+        rule_id="rule-denied",
+        customer_id="customer_acme",
+        period="day",
+        period_start="2026-07-14T00:00:00.000Z",
+        limit_usd=1.0,
+        accumulated_usd=1.0,
+        estimated_usd=0.1,
+    )
+
+
 def test_basic_search_uses_exact_identity_and_keeps_query_out_of_control(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -155,6 +170,90 @@ def test_basic_search_uses_exact_identity_and_keeps_query_out_of_control(
     assert result.control.settlement == "committed"
     assert query not in str(result.control)
     assert query not in capsys.readouterr().out
+
+
+def test_sync_authoritative_denial_performs_no_provider_or_settlement_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _init()
+    telemetry._reset_telemetry_for_tests()  # type: ignore[attr-defined]
+    reserves: list[dict[str, object]] = []
+    lifecycle_calls: list[str] = []
+    denial = _authoritative_denial()
+    client = SyncClient(1)
+
+    def deny(request: dict[str, object]) -> object:
+        reserves.append(request)
+        raise denial
+
+    monkeypatch.setattr(controlled, "reserve_usage_sync", deny)
+    monkeypatch.setattr(
+        controlled,
+        "commit_usage_sync",
+        lambda *_args: lifecycle_calls.append("commit"),
+    )
+    monkeypatch.setattr(
+        controlled,
+        "release_usage_sync",
+        lambda *_args: lifecycle_calls.append("release"),
+    )
+
+    with pytest.raises(PylvaBudgetExceeded) as caught:
+        controlled_tavily_search_sync(
+            client,
+            "private query",
+            customer_id="customer_acme",
+        )
+
+    assert caught.value is denial
+    assert len(reserves) == 1
+    assert client.calls == []
+    assert lifecycle_calls == []
+    assert telemetry.buffer_size() == 0
+
+
+@pytest.mark.asyncio
+async def test_async_authoritative_denial_performs_no_provider_or_settlement_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _init()
+    telemetry._reset_telemetry_for_tests()  # type: ignore[attr-defined]
+    reserves: list[dict[str, object]] = []
+    lifecycle_calls: list[str] = []
+    denial = _authoritative_denial()
+    client = AsyncClient(1)
+
+    async def deny(request: dict[str, object]) -> object:
+        reserves.append(request)
+        raise denial
+
+    async def unexpected(kind: str, *_args: object) -> None:
+        lifecycle_calls.append(kind)
+
+    monkeypatch.setattr(controlled, "reserve_usage", deny)
+    monkeypatch.setattr(
+        controlled,
+        "commit_usage",
+        lambda *_args: unexpected("commit"),
+    )
+    monkeypatch.setattr(
+        controlled,
+        "release_usage",
+        lambda *_args: unexpected("release"),
+    )
+
+    with pytest.raises(PylvaBudgetExceeded) as caught:
+        await controlled_tavily_search(
+            client,
+            "private query",
+            customer_id="customer_acme",
+        )
+
+    assert caught.value is denial
+    assert len(reserves) == 1
+    assert client.calls == []
+    assert lifecycle_calls == []
+    assert telemetry.buffer_size() == 0
 
 
 def test_sync_search_detaches_nested_options_and_binds_transport_before_reserve(

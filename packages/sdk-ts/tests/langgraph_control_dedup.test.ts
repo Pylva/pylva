@@ -1,6 +1,7 @@
 import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
 import { CallbackManager } from '@langchain/core/callbacks/manager';
-import { HumanMessage } from '@langchain/core/messages';
+import { AIMessageChunk, HumanMessage } from '@langchain/core/messages';
+import { ChatGenerationChunk } from '@langchain/core/outputs';
 import { FakeListChatModel } from '@langchain/core/utils/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { _resetConfigForTests, getConfigGeneration } from '../src/core/config.js';
@@ -19,6 +20,7 @@ import { PylvaCallbackHandler, withLangGraphControlScope } from '../src/langgrap
 import { _wrapAnthropicForTests as wrapAnthropic } from '../src/wrappers/anthropic_controlled.js';
 import { _wrapOpenAIForTests as wrapOpenAI } from '../src/wrappers/openai_controlled.js';
 import { _resetVercelAiPatchForTests, controlledGenerateText } from '../src/wrappers/vercel-ai.js';
+import { matchesExactRequest } from './helpers/url.js';
 
 const mocks = vi.hoisted(() => ({
   enqueue: vi.fn(),
@@ -137,6 +139,37 @@ async function captureError(invoke: () => unknown): Promise<unknown> {
   throw new Error('expected invocation to refuse');
 }
 
+function apiPromise<T>(value: T): Promise<T> & {
+  asResponse(): Promise<Response>;
+  withResponse(): Promise<{ data: T; response: Response; request_id: string }>;
+} {
+  const response = (): Response =>
+    new Response(JSON.stringify(value), {
+      headers: { 'content-type': 'application/json', 'x-request-id': 'req_langgraph_stream' },
+    });
+  const promise = Promise.resolve(value) as ReturnType<typeof apiPromise<T>>;
+  promise.asResponse = async () => response();
+  promise.withResponse = async () => ({
+    data: value,
+    response: response(),
+    request_id: 'req_langgraph_stream',
+  });
+  return promise;
+}
+
+function matchesControlRequest(
+  input: string | URL | Request,
+  request: RequestInit | undefined,
+  pathname: string,
+  method: string,
+): boolean {
+  return matchesExactRequest(input, request, {
+    origin: 'https://control.test',
+    pathname,
+    method,
+  });
+}
+
 class ControlledFakeListChatModel extends FakeListChatModel {
   constructor(private readonly correlation: ControlledLlmOperationCorrelation) {
     super({ responses: ['ok'] });
@@ -148,6 +181,26 @@ class ControlledFakeListChatModel extends FakeListChatModel {
     // BaseChatModel emits callback start before entering _generate, matching
     // real provider-wrapper ordering.
     return runWithControlledOperation(this.correlation, () => super._generate(...args));
+  }
+}
+
+class ControlledStreamingChatModel extends FakeListChatModel {
+  constructor(private readonly invokeProvider: () => Promise<AsyncIterable<unknown>>) {
+    super({ responses: ['unused'] });
+  }
+
+  override async *_streamResponseChunks(): AsyncGenerator<ChatGenerationChunk> {
+    const providerStream = await this.invokeProvider();
+    let index = 0;
+    for await (const chunk of providerStream) {
+      void chunk;
+      const text = index === 0 ? 'streamed ' : 'answer';
+      index += 1;
+      yield new ChatGenerationChunk({
+        message: new AIMessageChunk({ content: text }),
+        text,
+      });
+    }
   }
 }
 
@@ -357,6 +410,180 @@ describe('LangGraph exact controlled-operation de-duplication', () => {
     );
 
     expect(result.value).toBe('ok');
+    expect(mocks.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('lets one controlled stream own EOF settlement and suppresses duplicate callbacks', async () => {
+    const reservationId = runId(41_001);
+    let operationId = '';
+    const reserveBodies: Array<Record<string, unknown>> = [];
+    const commitBodies: Array<Record<string, unknown>> = [];
+    const releaseBodies: Array<Record<string, unknown>> = [];
+    const controlJson = (body: unknown): Response =>
+      new Response(JSON.stringify(body), {
+        headers: { 'content-type': 'application/json', 'x-request-id': 'req_stream_dedup' },
+      });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL | Request, request?: RequestInit) => {
+        const href = String(url);
+        if (matchesControlRequest(url, request, '/api/v1/budget/capabilities', 'GET')) {
+          return controlJson({
+            schema_version: '1.0',
+            control_enabled: true,
+            min_reservation_ttl_seconds: 30,
+            default_reservation_ttl_seconds: 300,
+            max_reservation_ttl_seconds: 3_600,
+            server_time: '2026-07-14T09:00:00.000Z',
+          });
+        }
+        if (matchesControlRequest(url, request, '/api/v1/budget/reservations', 'POST')) {
+          const body = JSON.parse(String(request?.body)) as Record<string, unknown>;
+          reserveBodies.push(body);
+          operationId = String(body['operation_id']);
+          return controlJson({
+            schema_version: '1.0',
+            decision: 'reserved',
+            allowed: true,
+            decision_id: runId(41_002),
+            operation_id: operationId,
+            reservation_id: reservationId,
+            state: 'reserved',
+            reserved_usd: '1',
+            remaining_usd: '9',
+            expires_at: '2026-07-14T09:05:00.000Z',
+            warnings: [],
+          });
+        }
+        if (
+          matchesControlRequest(
+            url,
+            request,
+            `/api/v1/budget/reservations/${reservationId}/commit`,
+            'POST',
+          )
+        ) {
+          commitBodies.push(JSON.parse(String(request?.body)) as Record<string, unknown>);
+          return controlJson({
+            schema_version: '1.0',
+            state: 'committed',
+            reservation_id: reservationId,
+            operation_id: operationId,
+            reserved_usd: '1',
+            actual_usd: '0.01',
+            released_usd: '0.99',
+            overage_usd: '0',
+            budget_exceeded_after_commit: false,
+            committed_at: '2026-07-14T09:01:00.000Z',
+            idempotent_replay: false,
+            late: false,
+          });
+        }
+        if (
+          matchesControlRequest(
+            url,
+            request,
+            `/api/v1/budget/reservations/${reservationId}/release`,
+            'POST',
+          )
+        ) {
+          releaseBodies.push(JSON.parse(String(request?.body)) as Record<string, unknown>);
+          return controlJson({
+            schema_version: '1.0',
+            state: 'released',
+            reservation_id: reservationId,
+            operation_id: operationId,
+            released_usd: '1',
+            released_at: '2026-07-14T09:01:00.000Z',
+            idempotent_replay: false,
+          });
+        }
+        throw new Error(`unexpected control URL ${href}`);
+      }),
+    );
+    const handler = new PylvaCallbackHandler({
+      apiKey: KEY_A,
+      endpoint: 'https://control.test',
+      localMode: true,
+      control: { mode: 'enforce', onUnavailable: 'deny' },
+    });
+    const terminal = {
+      id: 'chat_stream_dedup',
+      model: 'gpt-4o-mini',
+      service_tier: 'default',
+      choices: [],
+      usage: {
+        prompt_tokens: 8,
+        completion_tokens: 4,
+        total_tokens: 12,
+        prompt_tokens_details: { cached_tokens: 0 },
+      },
+    };
+    const providerCall = vi.fn(() =>
+      apiPromise({
+        async *[Symbol.asyncIterator]() {
+          yield { id: 'chat_stream_dedup_chunk', model: 'gpt-4o-mini', choices: [] };
+          yield terminal;
+        },
+      }),
+    );
+    const client = wrapOpenAI({
+      baseURL: 'https://api.openai.com/v1',
+      maxRetries: 0,
+      chat: { completions: { create: providerCall } },
+    });
+    const model = new ControlledStreamingChatModel(
+      async () =>
+        (await client.chat.completions.create({
+          model: 'gpt-4o-mini',
+          messages: [{ role: 'user', content: 'PRIVATE STREAM PROMPT' }],
+          max_completion_tokens: 20,
+          stream: true,
+        })) as AsyncIterable<unknown>,
+    );
+    const callbackStart = vi.spyOn(handler, 'handleChatModelStart');
+    const State = Annotation.Root({ value: Annotation<string>() });
+    const graph = new StateGraph(State)
+      .addNode('stream_model', async (state) => {
+        const stream = await withLangGraphControlScope(() =>
+          model.stream([new HumanMessage(state.value)], {
+            callbacks: [handler],
+            metadata: {
+              pylva_customer_id: 'customer_acme',
+              langgraph_node: 'stream_model',
+            },
+          }),
+        );
+        let value = '';
+        for await (const chunk of stream) value += String(chunk.content);
+        return { value };
+      })
+      .addEdge(START, 'stream_model')
+      .addEdge('stream_model', END)
+      .compile();
+
+    const result = await graph.invoke({ value: 'PRIVATE GRAPH INPUT' });
+    expect(callbackStart).toHaveBeenCalledTimes(1);
+    const callbackId = String(callbackStart.mock.calls[0]?.[2]);
+    handler.handleLLMError(new Error('late duplicate callback'), callbackId);
+
+    expect(result.value).toBe('streamed answer');
+    expect(providerCall).toHaveBeenCalledTimes(1);
+    expect(providerCall).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stream: true,
+        stream_options: { include_usage: true },
+      }),
+      expect.objectContaining({ maxRetries: 0 }),
+    );
+    expect(reserveBodies).toHaveLength(1);
+    expect(commitBodies).toHaveLength(1);
+    expect(releaseBodies).toHaveLength(0);
+    expect(commitBodies[0]).toMatchObject({
+      actual_input_tokens: 8,
+      actual_output_tokens: 4,
+      stream_aborted: false,
+    });
     expect(mocks.enqueue).not.toHaveBeenCalled();
   });
 

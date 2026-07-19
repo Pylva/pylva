@@ -3,7 +3,7 @@
 // timestamp, source-type chip, and a link to the pricing config page.
 
 import type { Metadata } from 'next';
-import { eq, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import {
   CostSourceStatus,
   CostSourceTrackingStatus,
@@ -17,8 +17,6 @@ import { readDashboardHeaders } from '@/lib/dashboard/headers';
 import { COPY } from '@/lib/copy';
 import { costSources } from '@/lib/db/schema';
 import { withRLS } from '@/lib/db/rls';
-import { withBudgetControlReadTransaction } from '@/lib/budget-control/read-transaction';
-import { unwrapRows } from '@/lib/db/query-utils';
 import { EmptyStateCard } from '@/components/dashboard/EmptyStateCard';
 import { PageHeader } from '@/components/dashboard/PageHeader';
 import {
@@ -28,6 +26,7 @@ import {
 import { deriveCostSourceProtectionState } from '@/lib/cost-sources/protection';
 import { env } from '@/lib/config';
 import { getBudgetControlProductionPosture } from '@/lib/budget-control/runtime-posture';
+import { readCostSourceAuthority } from '@/lib/cost-sources/authority-read-model';
 
 export const metadata: Metadata = { title: 'Cost sources' };
 
@@ -45,40 +44,6 @@ interface CostSourceListRow {
   last_discovered_at: Date | null;
   discovery_count: number;
   has_pricing: boolean;
-}
-
-interface CostSourceAuthorityRow {
-  control_ready: boolean;
-  has_active_hard_stop_budget: boolean;
-}
-
-async function readCostSourceAuthority(builderId: string): Promise<{
-  controlReady: boolean;
-  hasActiveHardStopBudget: boolean;
-}> {
-  return withBudgetControlReadTransaction(builderId, async (transaction) => {
-    const result = await transaction.execute(sql`
-      SELECT
-        EXISTS (
-          SELECT 1
-          FROM public.budget_control_cutovers cutover
-          WHERE cutover.builder_id = ${builderId}::UUID
-            AND cutover.status = 'ready'
-        ) AS control_ready,
-        EXISTS (
-          SELECT 1
-          FROM public.budget_rule_revisions revision
-          WHERE revision.builder_id = ${builderId}::UUID
-            AND revision.enforcement = 'hard_stop'
-            AND revision.retired_at IS NULL
-        ) AS has_active_hard_stop_budget
-    `);
-    const row = unwrapRows<CostSourceAuthorityRow>(result)[0];
-    return {
-      controlReady: row?.control_ready === true,
-      hasActiveHardStopBudget: row?.has_active_hard_stop_budget === true,
-    };
-  });
 }
 
 export default async function CostSourcesPage({ params }: { params: Promise<{ slug: string }> }) {
@@ -116,10 +81,14 @@ export default async function CostSourcesPage({ params }: { params: Promise<{ sl
     runtimePosturePromise,
   ]);
 
-  const authoritativeEnabled = authoritativeRequested && postureReady;
-  const { controlReady: workspaceControlReady, hasActiveHardStopBudget } = authoritativeEnabled
-    ? await readCostSourceAuthority(builderId)
-    : { controlReady: false, hasActiveHardStopBudget: false };
+  const authority =
+    authoritativeRequested && postureReady
+      ? await readCostSourceAuthority(builderId).catch(() => null)
+      : null;
+  const authorityAvailable = authority !== null;
+  const authoritativeEnabled = authoritativeRequested && postureReady && authorityAvailable;
+  const workspaceControlReady = authority?.workspaceControlReady ?? false;
+  const hasActiveHardStopBudget = authority?.hasActiveHardStopBudget ?? false;
   const controlReady = authoritativeEnabled && workspaceControlReady;
 
   const sources: CostSourceListRow[] = rows.map((r) => ({
@@ -168,7 +137,7 @@ export default async function CostSourcesPage({ params }: { params: Promise<{ sl
         <span className="font-medium text-[color:var(--foreground)]">Budget control:</span>{' '}
         {!authoritativeRequested
           ? 'Tracking only. Authoritative enforcement is not enabled.'
-          : !postureReady
+          : !postureReady || !authorityAvailable
             ? 'Tracking only. The enforcement runtime has not passed readiness checks, so no source is marked Protected.'
             : !workspaceControlReady
               ? 'Tracking only. This workspace has not completed its enforcement cutover.'

@@ -90,6 +90,7 @@ class ControlledCallbackLink:
 class _ControlledCallbackScope:
     pending: list[ControlledCallbackLink]
     warned: set[Literal["llm", "tool"]]
+    linked_attempts: set[tuple[Literal["llm", "tool"], str, str | None, int]]
     inherited_attempt: ControlledAttemptContext | None
     active: bool = True
 
@@ -305,6 +306,7 @@ def _controlled_callback_scope() -> Iterator[None]:
     scope = _ControlledCallbackScope(
         pending=[],
         warned=set(),
+        linked_attempts=set(),
         inherited_attempt=current_controlled_attempt(),
     )
     token = _callback_scope.set(scope)
@@ -316,6 +318,7 @@ def _controlled_callback_scope() -> Iterator[None]:
             link.ambiguous = True
             link._scope = None
         scope.pending.clear()
+        scope.linked_attempts.clear()
         _callback_scope.reset(token)
 
 
@@ -385,6 +388,17 @@ def _link_pending_callback(attempt: ControlledAttemptContext) -> None:
     scope = _callback_scope.get()
     if scope is None or not scope.active:
         return
+    attempt_key = (
+        attempt.kind,
+        attempt.operation_id,
+        attempt.reservation_id,
+        attempt.config_generation,
+    )
+    if attempt_key in scope.linked_attempts:
+        # Streaming wrappers re-enter the same attempt scope for every event.
+        # The callback was linked at dispatch; repeated observation is neither
+        # a new callback candidate nor an ambiguity.
+        return
     candidates = [
         link
         for link in scope.pending
@@ -403,6 +417,7 @@ def _link_pending_callback(attempt: ControlledAttemptContext) -> None:
         return
     candidate = candidates[0]
     candidate.controlled_attempt = attempt
+    scope.linked_attempts.add(attempt_key)
     scope.pending.remove(candidate)
     candidate._scope = None
 

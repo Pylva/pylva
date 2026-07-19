@@ -259,6 +259,11 @@ export const EXPECTED_MIGRATIONS: readonly MigrationManifestEntry[] = [
     sha256: 'f6e3be6b0a190f00a2f620fdacbacbb34cdbfcc522a9d138a59e1142b7cd8dbb',
     phase: 'pre_roll',
   },
+  {
+    filename: '055_monthly_invoice_period_retry.sql',
+    sha256: '2a4ee85821fc5f8eafe35a6bd4933e8c4c2a9de6373eb1d9e2f69fb06428ae3b',
+    phase: 'pre_roll',
+  },
 ] as const;
 
-export const EXPECTED_SCHEMA_HEAD: string = '054_general_app_runtime_owner_boundary.sql';
+export const EXPECTED_SCHEMA_HEAD: string = '055_monthly_invoice_period_retry.sql';

@@ -1,5 +1,4 @@
-import { NextResponse, type NextRequest } from 'next/server.js';
-import { readBuilderContext } from '../../../../../lib/auth/builder-context.js';
+import type { NextRequest } from 'next/server.js';
 import { env } from '../../../../../lib/config.js';
 import {
   createBudgetControlHttpHandler,
@@ -7,9 +6,11 @@ import {
   type BudgetControlServiceContext,
 } from '../../../../../lib/budget-control/http-handler.js';
 import { isBudgetExactBackfillAdapterConfigured } from '../../../../../lib/budget-control/exact-backfill-adapter.js';
-import { readBudgetControlSdkIdentity } from '../../../../../lib/budget-control/sdk-identity.js';
 import { toNextResponse } from '../../../../../lib/public-http/response.js';
-import { internalError } from '../../../../../lib/errors.js';
+import {
+  readAuthenticatedBudgetControlRouteContext,
+  sanitizedBudgetControlInternalResponse,
+} from '../../../../../lib/budget-control/authenticated-next-route.js';
 
 export interface CapabilitiesDependencies {
   featureEnabled?: () => boolean;
@@ -34,11 +35,6 @@ async function defaultBuilderReadiness(
   return readiness.mode === 'next_period' || (await exactBackfillConfigured());
 }
 
-function noStore<T extends Response>(response: T): T {
-  response.headers.set('Cache-Control', 'no-store');
-  return response;
-}
-
 export function createGET(dependencies: CapabilitiesDependencies = {}) {
   const featureEnabled =
     dependencies.featureEnabled ?? (() => env.ENABLE_AUTHORITATIVE_BUDGET_CONTROL);
@@ -53,17 +49,14 @@ export function createGET(dependencies: CapabilitiesDependencies = {}) {
   });
 
   return async function GET(request: NextRequest): Promise<Response> {
-    const context = readBuilderContext(request);
-    if (context instanceof NextResponse) {
-      return noStore(internalError('Request context is unavailable'));
-    }
+    try {
+      const authenticated = readAuthenticatedBudgetControlRouteContext(request);
+      if (!authenticated.success) return authenticated.response;
 
-    return toNextResponse(
-      await handler.capabilities({
-        ...context,
-        sdkIdentity: readBudgetControlSdkIdentity(request.headers),
-      }),
-    );
+      return toNextResponse(await handler.capabilities(authenticated.context));
+    } catch {
+      return sanitizedBudgetControlInternalResponse();
+    }
   };
 }
 

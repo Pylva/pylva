@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { _resetConfigForTests, init } from '../src/core/config.js';
 import { _resetControlClientForTests } from '../src/core/control_client.js';
 import { _resetTelemetryForTests } from '../src/core/telemetry.js';
+import { matchesExactRequest } from './helpers/url.js';
 import {
   _resetVercelAiPatchForTests,
   type ControlledOpenAIChatModel,
@@ -15,6 +16,29 @@ import {
 const KEY = `pv_live_aabbccdd_${'a'.repeat(32)}`;
 const MODEL = 'gpt-4o-mini';
 const RESERVATION_ID = '44444444-4444-4444-8444-444444444444';
+
+function matchesControlRequest(
+  input: string | URL | Request,
+  request: RequestInit | undefined,
+  pathname: string,
+  method: string,
+): boolean {
+  return matchesExactRequest(input, request, {
+    origin: 'https://control.test',
+    pathname,
+    method,
+  });
+}
+
+function isControlRequest(input: string | URL | Request, request?: RequestInit): boolean {
+  return [
+    { pathname: '/api/v1/budget/capabilities', method: 'GET' },
+    { pathname: '/api/v1/budget/reservations', method: 'POST' },
+    { pathname: `/api/v1/budget/reservations/${RESERVATION_ID}/commit`, method: 'POST' },
+    { pathname: `/api/v1/budget/reservations/${RESERVATION_ID}/release`, method: 'POST' },
+    { pathname: `/api/v1/budget/reservations/${RESERVATION_ID}/extend`, method: 'POST' },
+  ].some(({ pathname, method }) => matchesControlRequest(input, request, pathname, method));
+}
 
 function json(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -46,8 +70,8 @@ function installOfficialFetch() {
   const controlBodies: string[] = [];
   const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, request) => {
     const { href, body } = await hrefAndBody(input, request);
-    if (new URL(href).origin === 'https://control.test') controlBodies.push(body);
-    if (href.endsWith('/api/v1/budget/capabilities')) {
+    if (isControlRequest(input, request)) controlBodies.push(body);
+    if (matchesControlRequest(input, request, '/api/v1/budget/capabilities', 'GET')) {
       return json({
         schema_version: '1.0',
         control_enabled: true,
@@ -57,7 +81,7 @@ function installOfficialFetch() {
         server_time: '2026-07-14T09:00:00.000Z',
       });
     }
-    if (href.endsWith('/api/v1/budget/reservations')) {
+    if (matchesControlRequest(input, request, '/api/v1/budget/reservations', 'POST')) {
       const reserve = JSON.parse(body) as Record<string, unknown>;
       operationId = String(reserve['operation_id']);
       expect(reserve).toMatchObject({
@@ -80,7 +104,14 @@ function installOfficialFetch() {
         warnings: [],
       });
     }
-    if (href.endsWith('/commit')) {
+    if (
+      matchesControlRequest(
+        input,
+        request,
+        `/api/v1/budget/reservations/${RESERVATION_ID}/commit`,
+        'POST',
+      )
+    ) {
       return json({
         schema_version: '1.0',
         state: 'committed',
@@ -96,7 +127,13 @@ function installOfficialFetch() {
         late: false,
       });
     }
-    if (href === 'https://api.openai.com/v1/chat/completions') {
+    if (
+      matchesExactRequest(input, request, {
+        origin: 'https://api.openai.com',
+        pathname: '/v1/chat/completions',
+        method: 'POST',
+      })
+    ) {
       const providerBody = JSON.parse(body) as Record<string, unknown>;
       providerBodies.push(providerBody);
       providerHeaders.push(headersOf(input, request));
@@ -183,8 +220,8 @@ function installOfficialStreamFetch(mode: OfficialStreamMode) {
   const firstEvent = openAiChunk('official stream');
   const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, request) => {
     const { href, body } = await hrefAndBody(input, request);
-    if (new URL(href).origin === 'https://control.test') controlBodies.push(body);
-    if (href.endsWith('/api/v1/budget/capabilities')) {
+    if (isControlRequest(input, request)) controlBodies.push(body);
+    if (matchesControlRequest(input, request, '/api/v1/budget/capabilities', 'GET')) {
       return json({
         schema_version: '1.0',
         control_enabled: true,
@@ -194,7 +231,7 @@ function installOfficialStreamFetch(mode: OfficialStreamMode) {
         server_time: '2026-07-14T09:00:00.000Z',
       });
     }
-    if (href.endsWith('/api/v1/budget/reservations')) {
+    if (matchesControlRequest(input, request, '/api/v1/budget/reservations', 'POST')) {
       const reserve = JSON.parse(body) as Record<string, unknown>;
       operationId = String(reserve['operation_id']);
       return json({
@@ -211,7 +248,14 @@ function installOfficialStreamFetch(mode: OfficialStreamMode) {
         warnings: [],
       });
     }
-    if (href.endsWith('/commit')) {
+    if (
+      matchesControlRequest(
+        input,
+        request,
+        `/api/v1/budget/reservations/${RESERVATION_ID}/commit`,
+        'POST',
+      )
+    ) {
       commits.push(JSON.parse(body) as Record<string, unknown>);
       return json({
         schema_version: '1.0',
@@ -228,7 +272,14 @@ function installOfficialStreamFetch(mode: OfficialStreamMode) {
         late: false,
       });
     }
-    if (href.endsWith('/release')) {
+    if (
+      matchesControlRequest(
+        input,
+        request,
+        `/api/v1/budget/reservations/${RESERVATION_ID}/release`,
+        'POST',
+      )
+    ) {
       releases.push(JSON.parse(body) as Record<string, unknown>);
       return json({
         schema_version: '1.0',
@@ -240,7 +291,14 @@ function installOfficialStreamFetch(mode: OfficialStreamMode) {
         idempotent_replay: false,
       });
     }
-    if (href.endsWith('/extend')) {
+    if (
+      matchesControlRequest(
+        input,
+        request,
+        `/api/v1/budget/reservations/${RESERVATION_ID}/extend`,
+        'POST',
+      )
+    ) {
       const extension = JSON.parse(body) as Record<string, unknown>;
       extensions.push(extension);
       return json({
@@ -253,7 +311,13 @@ function installOfficialStreamFetch(mode: OfficialStreamMode) {
         idempotent_replay: false,
       });
     }
-    if (href === 'https://api.openai.com/v1/chat/completions') {
+    if (
+      matchesExactRequest(input, request, {
+        origin: 'https://api.openai.com',
+        pathname: '/v1/chat/completions',
+        method: 'POST',
+      })
+    ) {
       providerBodies.push(JSON.parse(body) as Record<string, unknown>);
       providerHeaders.push(headersOf(input, request));
       if (mode === 'complete') {
@@ -361,10 +425,12 @@ describe('controlled Vercel AI official provider integration', () => {
     const reserveOrder = spy.mock.calls.findIndex(([input]) =>
       (input instanceof Request ? input.url : String(input)).endsWith('/reservations'),
     );
-    const providerOrder = spy.mock.calls.findIndex(
-      ([input]) =>
-        new URL(input instanceof Request ? input.url : String(input)).origin ===
-        'https://api.openai.com',
+    const providerOrder = spy.mock.calls.findIndex(([input, request]) =>
+      matchesExactRequest(input, request, {
+        origin: 'https://api.openai.com',
+        pathname: '/v1/chat/completions',
+        method: 'POST',
+      }),
     );
     expect(reserveOrder).toBeGreaterThanOrEqual(0);
     expect(providerOrder).toBeGreaterThan(reserveOrder);
@@ -408,6 +474,7 @@ describe('controlled Vercel AI official provider integration', () => {
       service_tier: 'default',
     });
     expect(harness.providerHeaders[0]?.['authorization']).toBe(`Bearer ${secret}`);
+    expect(harness.controlBodies).toHaveLength(3);
     expect(harness.controlBodies.join('\n')).not.toContain(secret);
   });
 
@@ -471,6 +538,7 @@ describe('controlled Vercel AI official provider integration', () => {
       service_tier: 'default',
     });
     expect(harness.providerHeaders[0]?.['authorization']).toBe(`Bearer ${secret}`);
+    expect(harness.controlBodies).toHaveLength(3);
     expect(harness.controlBodies.join('\n')).not.toContain(secret);
   });
 

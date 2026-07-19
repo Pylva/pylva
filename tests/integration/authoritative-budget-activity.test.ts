@@ -426,4 +426,68 @@ describe('authoritative PostgreSQL Budget Activity dashboard read model', () => 
     expect(crossTenant.activities).toEqual([]);
     expect(crossTenant.pagination.total).toBe(0);
   });
+
+  it('records one unresolved activity when a held reservation expires without provider usage', async () => {
+    const fixture = await createReadyBuilderWithRule('activity-expired', '1');
+    const request = toolRequest('expired_user');
+    const held = await reserve(fixture, request, '0.1');
+    expect(held).toMatchObject({ decision: 'reserved', state: 'reserved' });
+    if (held.decision !== 'reserved') {
+      throw new Error('expiry fixture did not return a reserved decision');
+    }
+
+    await db().begin(async (transaction) => {
+      await useBuilder(transaction, fixture.builderId);
+      // Owner-only fixture setup in this disposable scratch database.
+      await transaction`ALTER TABLE public.budget_reservations DISABLE TRIGGER USER`;
+      await transaction`
+        UPDATE public.budget_reservations
+        SET created_at = '2020-01-01T00:00:00.000Z'::TIMESTAMPTZ,
+            updated_at = '2020-01-01T00:00:00.000Z'::TIMESTAMPTZ,
+            reserved_at = '2020-01-01T00:00:00.000Z'::TIMESTAMPTZ,
+            expires_at = '2020-01-01T00:05:00.000Z'::TIMESTAMPTZ,
+            reserve_response_snapshot = jsonb_set(
+              reserve_response_snapshot,
+              '{expires_at}',
+              to_jsonb('2020-01-01T00:05:00.000Z'::TEXT)
+            )
+        WHERE builder_id = ${fixture.builderId}::UUID
+          AND reservation_id = ${held.reservation_id}::UUID
+      `;
+      await transaction`ALTER TABLE public.budget_reservations ENABLE TRIGGER USER`;
+    });
+
+    const lifecycle = createBudgetLifecycleService({
+      transactionOptions: { client: db(), maxAttempts: 1 },
+    });
+    await expect(lifecycle.expireDueBudgetReservations(fixture.builderId, 10)).resolves.toEqual({
+      expired: 1,
+    });
+    await expect(lifecycle.expireDueBudgetReservations(fixture.builderId, 10)).resolves.toEqual({
+      expired: 0,
+    });
+
+    const page = await readActivity(
+      fixture.builderId,
+      new URLSearchParams({ status: 'unresolved', customer: 'expired_user' }),
+    );
+    expect(page.pagination.total).toBe(1);
+    expect(page.activities).toHaveLength(1);
+    expect(page.activities[0]).toMatchObject({
+      status: 'unresolved',
+      provider_request: 'not_confirmed',
+      reason: 'lease_expired',
+      requested_usd: '0.1',
+      reserved_usd: '0.1',
+      actual_usd: '0',
+      trace_id: request.trace_id,
+      span_id: request.span_id,
+      cost_event_id: null,
+    });
+    expect(await authorityCounts(fixture.builderId)).toEqual({
+      usage: 0,
+      outbox: 0,
+      invoices: 0,
+    });
+  });
 });

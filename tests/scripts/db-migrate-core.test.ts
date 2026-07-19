@@ -2,12 +2,23 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   defaultMigrationPhaseMetadata,
   finalizeOnlineMigration,
+  onlineMigrationLockTimeout,
   parseMigrationPhaseMetadata,
   prepareOnlineMigration,
   resolveMigrationPhases,
   type MigrateSqlClient,
   type MigrateTx,
 } from '../../scripts/db-migrate-core.js';
+
+describe('onlineMigrationLockTimeout', () => {
+  it('fails fast for migrations that acquire blocking catalog locks', () => {
+    expect(onlineMigrationLockTimeout('048_universal_api_key_scope.sql')).toBe('1s');
+    expect(onlineMigrationLockTimeout('054_general_app_runtime_owner_boundary.sql')).toBe('1s');
+    expect(onlineMigrationLockTimeout('053_legacy_catalog_owner_rls_compatibility.sql')).toBe(
+      undefined,
+    );
+  });
+});
 
 describe('migration phase metadata', () => {
   it('defaults migrations to pre_roll and applies explicit post_roll overrides', () => {

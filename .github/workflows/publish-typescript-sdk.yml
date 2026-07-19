@@ -39,70 +39,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_SHA: ${{ steps.release_commit.outputs.sha }}
-        run: |
-          set -euo pipefail
-          for WORKFLOW in \
-            authoritative-budget-control-ci.yml \
-            ci-fast.yml \
-            ci-integration.yml \
-            ci-e2e-smoke.yml
-          do
-            RESPONSE_FILE="$(mktemp)"
-            curl \
-              --fail-with-body \
-              --silent \
-              --show-error \
-              --retry 3 \
-              --retry-all-errors \
-              --header "Accept: application/vnd.github+json" \
-              --header "Authorization: Bearer ${GH_TOKEN}" \
-              --header "X-GitHub-Api-Version: 2022-11-28" \
-              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW}/runs?head_sha=${RELEASE_SHA}&status=completed&per_page=100" \
-              > "$RESPONSE_FILE"
-            REQUIRED_WORKFLOW="$WORKFLOW" node - "$RESPONSE_FILE" <<'NODE'
-          const fs = require('node:fs');
-
-          const response = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
-          const expectedSha = process.env.RELEASE_SHA;
-          const workflow = process.env.REQUIRED_WORKFLOW;
-          const acceptedEvents = new Set(['push', 'workflow_dispatch', 'schedule']);
-          const runs = Array.isArray(response.workflow_runs) ? response.workflow_runs : [];
-          const successful = runs
-            .filter(
-              (run) =>
-                run.head_sha === expectedSha &&
-                run.head_branch === 'main' &&
-                run.status === 'completed' &&
-                run.conclusion === 'success' &&
-                acceptedEvents.has(run.event),
-            )
-            .sort((left, right) => String(right.updated_at).localeCompare(String(left.updated_at)));
-          if (successful.length === 0) {
-            throw new Error(
-              `No successful ${workflow} run on main exists for exact release SHA ${expectedSha}`,
-            );
-          }
-          const attested = successful[0];
-          if (workflow === 'authoritative-budget-control-ci.yml') {
-            fs.appendFileSync(
-              process.env.GITHUB_OUTPUT,
-              `authoritative_run_id=${attested.id}\n`,
-            );
-          }
-          console.log(
-            `Attested ${workflow} run ${attested.id} for ${expectedSha}: ${attested.html_url}`,
-          );
-          NODE
-            rm -f "$RESPONSE_FILE"
-          done
-
-      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        run: node scripts/ci/attest-release-sha.mjs
 
       - uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: '24.18.0'
           registry-url: 'https://registry.npmjs.org'
-          cache: 'pnpm'
 
       - name: Verify trusted publishing runtime
         run: |
@@ -121,37 +63,32 @@ jobs:
             console.log(`trusted publishing runtime ok: node ${process.version}, npm ${version}`);
           '
 
-      - name: Install
-        run: pnpm install --frozen-lockfile
-
       - name: Verify release metadata
+        id: release_metadata
         run: |
           node - <<'NODE'
           const fs = require('node:fs');
           const pkg = JSON.parse(fs.readFileSync('packages/sdk-ts/package.json', 'utf8'));
           const expectedTag = `pylva-ts-v${pkg.version}`;
+          const semver = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.exec(pkg.version);
           if (pkg.name !== '@pylva/sdk') {
             throw new Error(`unexpected package name: ${pkg.name}`);
+          }
+          if (semver === null) {
+            throw new Error(`package version is not valid SemVer: ${pkg.version}`);
+          }
+          const prerelease = semver[1];
+          if (
+            prerelease !== undefined &&
+            prerelease.split('.').some((identifier) => /^\d+$/u.test(identifier) && /^0\d+/u.test(identifier))
+          ) {
+            throw new Error(`package version has an invalid numeric prerelease identifier: ${pkg.version}`);
           }
           if (process.env.GITHUB_REF_NAME !== expectedTag) {
             throw new Error(`tag ${process.env.GITHUB_REF_NAME} does not match TypeScript SDK version ${pkg.version}`);
           }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `dist_tag=${prerelease === undefined ? 'latest' : 'next'}\n`);
           NODE
-
-      - name: Test
-        run: pnpm --filter @pylva/sdk test
-
-      - name: Build shared type references
-        run: pnpm exec tsc -b packages/shared/tsconfig.json --force
-
-      - name: Typecheck
-        run: pnpm --filter @pylva/sdk typecheck
-
-      - name: Build
-        run: pnpm --filter @pylva/sdk build
-
-      - name: Size limit
-        run: pnpm --filter @pylva/sdk size
 
       - name: Download the exact attested TypeScript release artifact
         uses: actions/download-artifact@v7
@@ -164,12 +101,16 @@ jobs:
       # Every verification below and the publish step consume the artifact
       # built by the exact-SHA authoritative workflow attested above.
       - name: Verify and fingerprint immutable release artifact
+        env:
+          EXPECTED_VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           ARTIFACT_DIR="$RUNNER_TEMP/pylva-typescript-release"
           METADATA="$ARTIFACT_DIR/metadata.json"
+          test "$(find "$ARTIFACT_DIR" -maxdepth 1 -type f | wc -l)" -eq 2
           mapfile -t TARBALLS < <(find "$ARTIFACT_DIR" -type f -name '*.tgz' -print)
           test "${#TARBALLS[@]}" -eq 1
+          node -e "const fs=require('node:fs'),m=require(process.argv[1]),p=require('./packages/sdk-ts/package.json');if(m.name!==p.name||m.version!==p.version)throw new Error('artifact metadata does not match release source metadata')" "$METADATA"
           TARBALL="$(node -e "const p=require('node:path'),m=require(process.argv[1]);process.stdout.write(p.resolve(p.dirname(process.argv[1]),m.tarball))" "$METADATA")"
           test "$(realpath "${TARBALLS[0]}")" = "$(realpath "$TARBALL")"
           SHA256="$(node -e "const m=require(process.argv[1]);process.stdout.write(m.sha256)" "$METADATA")"
@@ -228,9 +169,17 @@ jobs:
       # GitHub Actions workflow. npm exchanges the job OIDC token for a
       # short-lived publish credential and records provenance automatically.
       - name: Publish exact verified artifact
+        env:
+          NPM_DIST_TAG: ${{ steps.release_metadata.outputs.dist_tag }}
         run: |
           set -euo pipefail
           ACTUAL_SHA256="$(node -e "const fs=require('node:fs'),c=require('node:crypto');process.stdout.write(c.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex'))" "$PYLVA_TYPESCRIPT_TARBALL")"
           test "$ACTUAL_SHA256" = "$PYLVA_TYPESCRIPT_TARBALL_SHA256"
-          NPM_DIST_TAG="$(node -e "const p=require('./packages/sdk-ts/package.json');process.stdout.write(p.version.includes('-')?'next':'latest')")"
+          if [ "$NPM_DIST_TAG" = 'next' ]; then
+            LATEST_BEFORE="$(npm view '@pylva/sdk' dist-tags.latest --json)"
+          fi
           npm publish "$PYLVA_TYPESCRIPT_TARBALL" --access public --ignore-scripts --tag "$NPM_DIST_TAG"
+          if [ "$NPM_DIST_TAG" = 'next' ]; then
+            LATEST_AFTER="$(npm view '@pylva/sdk' dist-tags.latest --json)"
+            test "$LATEST_AFTER" = "$LATEST_BEFORE"
+          fi
