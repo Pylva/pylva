@@ -245,11 +245,7 @@ async function flushBatch(
   if (owner !== telemetryEpoch) return;
   if (!response || response.status >= 500) {
     // Retries exhausted. Re-queue the batch at the head so the next flush retries.
-    buffer = [...newBatch, ...buffer];
-    if (buffer.length > BUFFER_CAP) {
-      const drop = buffer.length - BUFFER_CAP;
-      buffer = buffer.slice(drop);
-    }
+    requeueBatch(newBatch);
 
     console.warn(`[pylva] flush failed after retries: ${lastError?.message ?? 'unknown'}`);
     return;
@@ -262,11 +258,16 @@ async function flushBatch(
     return;
   }
 
-  let parsed: IngestResponse;
+  let parsedValue: unknown;
   try {
-    parsed = JSON.parse(response.bodyText) as IngestResponse;
+    parsedValue = JSON.parse(response.bodyText) as unknown;
   } catch {
-    // server success but unparseable — drop the batch and move on.
+    retainMalformedSuccessBatch(newBatch);
+    return;
+  }
+  const parsed = ingestResponseContainer(parsedValue);
+  if (parsed === null) {
+    retainMalformedSuccessBatch(newBatch);
     return;
   }
   if (owner !== telemetryEpoch) return;
@@ -277,17 +278,27 @@ async function flushBatch(
   }
 
   if (parsed.errors) {
-    for (const e of parsed.errors) {
-      const ev = newBatch[e.index];
+    for (const e of parsed.errors as unknown[]) {
+      if (typeof e !== 'object' || e === null) continue;
+      const index = (e as { index?: unknown }).index;
+      const message = (e as { message?: unknown }).message;
+      if (!Number.isSafeInteger(index) || (index as number) < 0 || typeof message !== 'string') {
+        continue;
+      }
+      const ev = newBatch[index as number];
 
-      console.warn(`[pylva] event rejected: ${e.message} (span_id=${ev?.span_id ?? '?'})`);
+      console.warn(`[pylva] event rejected: ${message} (span_id=${ev?.span_id ?? '?'})`);
     }
   }
 
   if (parsed.warnings) {
-    for (const w of parsed.warnings) {
-      if (w.code === 'needs_pricing_input' || w.code === 'pending_pricing') {
-        const key = w.metric ? `metric:${w.metric}` : `llm:${w.provider ?? ''}:${w.model ?? ''}`;
+    for (const w of parsed.warnings as unknown[]) {
+      if (typeof w !== 'object' || w === null) continue;
+      const warning = w as Record<string, unknown>;
+      if (warning['code'] === 'needs_pricing_input' || warning['code'] === 'pending_pricing') {
+        const key = warning['metric']
+          ? `metric:${String(warning['metric'])}`
+          : `llm:${String(warning['provider'] ?? '')}:${String(warning['model'] ?? '')}`;
         warnOnce(
           warnedUnknownModel,
           key,
@@ -303,6 +314,34 @@ async function flushBatch(
       markExceededFromBackend(flag);
     }
   }
+}
+
+function requeueBatch(batch: TelemetryEvent[]): void {
+  buffer = [...batch, ...buffer];
+  if (buffer.length > BUFFER_CAP) {
+    const drop = buffer.length - BUFFER_CAP;
+    buffer = buffer.slice(drop);
+  }
+}
+
+function retainMalformedSuccessBatch(batch: TelemetryEvent[]): void {
+  requeueBatch(batch);
+  console.warn('[pylva] flush received malformed success response; batch retained');
+}
+
+function ingestResponseContainer(value: unknown): IngestResponse | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  for (const key of ['accepted', 'rejected'] as const) {
+    const count = record[key];
+    if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) return null;
+  }
+  for (const key of ['errors', 'warnings', 'budget_exceeded'] as const) {
+    if (record[key] !== undefined && record[key] !== null && !Array.isArray(record[key])) {
+      return null;
+    }
+  }
+  return record as IngestResponse;
 }
 
 function enterDegraded(owner: number, cfg: RuntimeConfig): void {
