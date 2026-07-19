@@ -88,5 +88,11 @@ updates:
         update-types:
           - minor
           - patch
+    # PostgreSQL 18 changes the official image's data layout. A major upgrade
+    # requires an explicit self-host data migration, not an image-only bump.
+    ignore:
+      - dependency-name: postgres
+        update-types:
+          - version-update:semver-major
     commit-message:
       prefix: 'chore(deps)'

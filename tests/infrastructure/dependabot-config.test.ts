@@ -74,4 +74,12 @@ describe('Dependabot public-repository configuration', () => {
     expect(new Set(times).size).toBe(times.length);
     expect(times).toEqual([...times].sort());
   });
+
+  it('does not propose image-only PostgreSQL major upgrades for the self-host volume', () => {
+    const block = blocks.get('docker-compose');
+    expect(block).toBeDefined();
+    expect(block).toMatch(
+      /ignore:\n\s+- dependency-name: postgres\n\s+update-types:\n\s+- version-update:semver-major/,
+    );
+  });
 });
