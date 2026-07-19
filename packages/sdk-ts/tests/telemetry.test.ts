@@ -153,6 +153,43 @@ describe('telemetry HTTP exporter', () => {
     warnSpy.mockRestore();
   });
 
+  it.each([
+    ['non-object body', 'null'],
+    ['missing required counts', '{}'],
+    ['invalid required counts', JSON.stringify({ accepted: -1, rejected: 0 })],
+    ['non-integer required counts', JSON.stringify({ accepted: true, rejected: 0 })],
+    ['malformed optional collections', JSON.stringify({ accepted: 1, rejected: 0, errors: {} })],
+  ])('retains a batch when a successful response has %s', async (_case, malformedBody) => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let telemetryRequests = 0;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const path = new URL(input instanceof Request ? input.url : String(input)).pathname;
+      if (!path.endsWith('/api/v1/events')) {
+        return new Response(
+          JSON.stringify(path.endsWith('/rules') ? { rules: [] } : { models: [] }),
+          {
+            status: 200,
+          },
+        );
+      }
+      telemetryRequests += 1;
+      return telemetryRequests === 1
+        ? new Response(malformedBody, { status: 200 })
+        : new Response(JSON.stringify({ accepted: 1, rejected: 0 }), { status: 200 });
+    });
+    init({ apiKey: VALID_KEY, endpoint: 'http://mock', batchSize: 100, flushInterval: 60_000 });
+    enqueue(makeEvent(makeSpanId(47)));
+
+    await expect(flush()).resolves.toBeUndefined();
+    expect(bufferSize()).toBe(1);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('malformed success response'));
+
+    await flush();
+    expect(telemetryRequests).toBe(2);
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(bufferSize()).toBe(0);
+  });
+
   it('applies backend budget_exceeded flags to the local accumulator', async () => {
     const periodStart = '2026-04-01T00:00:00.000Z';
     vi.spyOn(globalThis, 'fetch').mockImplementation(
