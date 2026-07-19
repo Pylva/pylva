@@ -57,9 +57,34 @@ async function refresh(now: number, age: number, owner: number): Promise<void> {
       state.passthrough = true;
       return;
     }
-    const body = JSON.parse(res.bodyText) as { rules?: unknown[] };
+    let body: unknown;
+    try {
+      body = JSON.parse(res.bodyText) as unknown;
+    } catch {
+      if (owner !== cacheEpoch) return;
+      if (!warnedPassthrough) {
+        console.warn(
+          '[pylva] rules cache stale — backend returned malformed rules; passthrough mode',
+        );
+      }
+      warnedPassthrough = true;
+      state.passthrough = true;
+      return;
+    }
     if (owner !== cacheEpoch) return;
-    state = { rules: body.rules ?? [], fetchedAt: now, passthrough: false };
+    const rules =
+      typeof body === 'object' && body !== null ? (body as { rules?: unknown }).rules : undefined;
+    if (!Array.isArray(rules)) {
+      if (!warnedPassthrough) {
+        console.warn(
+          '[pylva] rules cache stale — backend returned malformed rules; passthrough mode',
+        );
+      }
+      warnedPassthrough = true;
+      state.passthrough = true;
+      return;
+    }
+    state = { rules, fetchedAt: now, passthrough: false };
     warnedPassthrough = false;
   } catch {
     if (owner !== cacheEpoch) return;

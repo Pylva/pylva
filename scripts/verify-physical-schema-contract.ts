@@ -29,7 +29,9 @@ export const AUTHORITATIVE_BUDGET_LEGACY_RLS_COMPATIBILITY_MIGRATION =
   '053_legacy_catalog_owner_rls_compatibility.sql' as const;
 export const GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION =
   '054_general_app_runtime_owner_boundary.sql' as const;
-export const AUTHORITATIVE_BUDGET_SCHEMA_HEAD = GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION;
+export const MONTHLY_INVOICE_PERIOD_RETRY_MIGRATION =
+  '055_monthly_invoice_period_retry.sql' as const;
+export const AUTHORITATIVE_BUDGET_SCHEMA_HEAD = MONTHLY_INVOICE_PERIOD_RETRY_MIGRATION;
 export const AUTHORITATIVE_BUDGET_MIGRATIONS = [
   AUTHORITATIVE_BUDGET_LEDGER_MIGRATION,
   AUTHORITATIVE_BUDGET_RUNTIME_MIGRATION,
@@ -2953,6 +2955,7 @@ expected_legacy_relations(schema_name, relation_name, relation_kind) AS (
     ('public'::pg_catalog.name, 'invoices'::pg_catalog.name, 'r'::"char"),
     ('public'::pg_catalog.name, 'llm_pricing'::pg_catalog.name, 'r'::"char"),
     ('public'::pg_catalog.name, 'llm_pricing_id_seq'::pg_catalog.name, 'S'::"char"),
+    ('public'::pg_catalog.name, 'monthly_invoice_periods'::pg_catalog.name, 'r'::"char"),
     ('public'::pg_catalog.name, 'portal_access_grants'::pg_catalog.name, 'r'::"char"),
     ('public'::pg_catalog.name, 'portal_configs'::pg_catalog.name, 'r'::"char"),
     ('public'::pg_catalog.name, 'portal_domains'::pg_catalog.name, 'r'::"char"),
