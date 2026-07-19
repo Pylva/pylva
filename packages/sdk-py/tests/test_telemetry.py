@@ -728,3 +728,69 @@ async def test_flush_applies_backend_budget_exceeded_flag(
     )
     assert result.over_limit is True
     assert result.source == "backend_ingest_flag"
+
+
+@pytest.mark.parametrize(
+    "invalid_flag",
+    [
+        {
+            "rule_id": "rule-1",
+            "customer_id": "cust_test",
+            "limit_usd": True,
+            "period_start": "2026-04-01T00:00:00Z",
+        },
+        {
+            "rule_id": "rule-1",
+            "customer_id": "cust_test",
+            "limit_usd": float("nan"),
+            "period_start": "2026-04-01T00:00:00Z",
+        },
+        {
+            "rule_id": "rule-1",
+            "customer_id": "cust_test",
+            "limit_usd": float("inf"),
+            "period_start": "2026-04-01T00:00:00Z",
+        },
+        {
+            "rule_id": "rule-1",
+            "customer_id": 7,
+            "limit_usd": 10,
+            "period_start": "2026-04-01T00:00:00Z",
+        },
+    ],
+    ids=["boolean-limit", "nan-limit", "infinite-limit", "invalid-customer"],
+)
+async def test_flush_ignores_malformed_backend_budget_exceeded_flag(
+    invalid_flag: dict[str, object],
+    patched_httpx: dict[str, _FakeClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    period_start = "2026-04-01T00:00:00Z"
+    monkeypatch.setattr(telemetry, "_schedule_flush", lambda *_args: None)
+    patched_httpx["client"] = _FakeClient(
+        [
+            _FakeResponse(
+                200,
+                {
+                    "accepted": 1,
+                    "rejected": 0,
+                    "budget_exceeded": [invalid_flag],
+                },
+            )
+        ],
+    )
+    telemetry.enqueue(_ev(8))
+
+    await telemetry.flush()
+
+    for scope, customer_id in (("per_customer", "cust_test"), ("pooled", None)):
+        result = ba.check(
+            rule_id="rule-1",
+            scope=scope,  # type: ignore[arg-type]
+            customer_id=customer_id,
+            period_start=period_start,
+            estimated_usd=0,
+            limit_usd=10,
+        )
+        assert result.over_limit is False
+        assert result.source is None
