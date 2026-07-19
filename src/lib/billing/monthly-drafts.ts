@@ -1,18 +1,17 @@
 // SPDX-License-Identifier: Elastic-2.0
 // B2b T2-E — shared impl for the monthly-drafts cron + ad-hoc CLI runs.
 //
-// Finds every (builder, customer) whose billing_period cycle just rolled
-// over and calls `generateInvoice` for each. The same closed month is retried
-// daily for one week: authoritative usage projection can still be reconciling
-// at the first run, and the generator's deterministic draft keys make later
-// attempts safe. Auto-split + capabilities gate + pricing-not-configured are
-// handled by the generator; this loop only counts successes vs skips.
+// Enqueues the newly closed month for every monthly (builder, customer) pair,
+// then calls `generateInvoice` for every pending period. A period leaves the
+// queue only after generation succeeds. Authoritative usage projection can
+// therefore remain unavailable for any length of time without losing the
+// invoice when a retry window or a later month boundary passes. The generator's
+// deterministic draft keys make retries and concurrent cron runs safe.
 //
 // Billing period math: D6 says monthly only for B2b; weekly/custom
 // supported on the column but not exercised. We compute the previous
-// period as [firstOfPriorMonth, firstOfThisMonth) when now is within the
-// first 24h of the month. The cron fires daily but only does work on
-// month-boundary days.
+// period as [firstOfPriorMonth, firstOfThisMonth). The cron fires daily: every
+// run idempotently records that period and drains all outstanding periods.
 
 import { sql } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
@@ -20,7 +19,13 @@ import { generateInvoice, BillingError } from '@/lib/billing/invoice-generator';
 import { logger } from '@/lib/logger';
 
 const log = logger.child({ module: 'scripts.generate-monthly-drafts' });
-const MONTHLY_DRAFT_RETRY_WINDOW_HOURS = 7 * 24;
+
+interface PendingMonthlyPeriod extends Record<string, unknown> {
+  builder_id: string;
+  customer_id: string;
+  period_start: Date;
+  period_end: Date;
+}
 
 export interface GenerateMonthlyDraftsResult {
   scanned_builders: number;
@@ -42,21 +47,73 @@ function firstOfPriorMonth(d: Date): Date {
   return new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
 }
 
-/**
- * Find every (builder, customer) pair with an open pricing row + monthly
- * billing_period. We iterate the active-version rows directly (partial
- * unique index on effective_to IS NULL makes this fast) — no need to join
- * invoices to detect "no draft yet" because the idempotency rails in
- * generateInvoice absorb duplicates if we happen to call twice.
- */
-async function listActivePairs(): Promise<Array<{ builder_id: string; customer_id: string }>> {
-  const rows = await db.execute<{ builder_id: string; customer_id: string }>(
-    sql`SELECT builder_id, customer_id
-        FROM customer_pricing
-        WHERE effective_to IS NULL
-          AND billing_period = 'monthly'`,
-  );
-  return rows as Array<{ builder_id: string; customer_id: string }>;
+async function enqueueClosedPeriod(periodStart: Date, periodEnd: Date): Promise<void> {
+  await db.execute(sql`
+    INSERT INTO monthly_invoice_periods (
+      builder_id,
+      customer_id,
+      period_start,
+      period_end
+    )
+    SELECT
+      builder_id,
+      customer_id,
+      ${periodStart},
+      ${periodEnd}
+    FROM customer_pricing AS active_pricing
+    WHERE active_pricing.effective_to IS NULL
+      AND active_pricing.billing_period = 'monthly'
+      AND EXISTS (
+        SELECT 1
+        FROM customer_pricing AS period_pricing
+        WHERE period_pricing.builder_id = active_pricing.builder_id
+          AND period_pricing.customer_id = active_pricing.customer_id
+          AND period_pricing.billing_period = 'monthly'
+          AND period_pricing.effective_from < ${periodEnd}
+          AND (
+            period_pricing.effective_to IS NULL
+            OR period_pricing.effective_to > ${periodStart}
+          )
+      )
+    ON CONFLICT (builder_id, customer_id, period_start) DO NOTHING
+  `);
+}
+
+async function listPendingPeriods(): Promise<PendingMonthlyPeriod[]> {
+  const rows = await db.execute<PendingMonthlyPeriod>(sql`
+    SELECT builder_id, customer_id, period_start, period_end
+    FROM monthly_invoice_periods
+    WHERE status = 'pending'
+    ORDER BY period_start ASC, builder_id ASC, customer_id ASC
+  `);
+  return rows as PendingMonthlyPeriod[];
+}
+
+async function completePeriod(period: PendingMonthlyPeriod): Promise<void> {
+  await db.execute(sql`
+    UPDATE monthly_invoice_periods
+    SET status = 'completed',
+        completed_at = NOW(),
+        last_error = NULL
+    WHERE builder_id = ${period.builder_id}::uuid
+      AND customer_id = ${period.customer_id}::uuid
+      AND period_start = ${period.period_start}
+      AND status = 'pending'
+  `);
+}
+
+async function recordFailedAttempt(period: PendingMonthlyPeriod, error: unknown): Promise<void> {
+  const message = error instanceof Error ? error.message : String(error);
+  await db.execute(sql`
+    UPDATE monthly_invoice_periods
+    SET attempts = attempts + 1,
+        last_attempt_at = NOW(),
+        last_error = ${message}
+    WHERE builder_id = ${period.builder_id}::uuid
+      AND customer_id = ${period.customer_id}::uuid
+      AND period_start = ${period.period_start}
+      AND status = 'pending'
+  `);
 }
 
 export async function generateMonthlyDrafts(opts: {
@@ -66,27 +123,11 @@ export async function generateMonthlyDrafts(opts: {
   const thisMonthStart = firstOfMonth(now);
   const priorMonthStart = firstOfPriorMonth(now);
 
-  // Retry throughout the first week. A single 24h window gives the daily
-  // schedule only one attempt; if authoritative projection is pending at that
-  // run, the whole month is otherwise skipped permanently. Deterministic
-  // draft keys absorb successful re-runs without creating another invoice.
-  const hoursSinceBoundary = (now.getTime() - thisMonthStart.getTime()) / 3_600_000;
-  if (hoursSinceBoundary < 0 || hoursSinceBoundary >= MONTHLY_DRAFT_RETRY_WINDOW_HOURS) {
-    return {
-      scanned_builders: 0,
-      generated: 0,
-      skipped_pricing_not_configured: 0,
-      skipped_capabilities_pending: 0,
-      skipped_other: 0,
-      window_start: priorMonthStart.toISOString(),
-      window_end: thisMonthStart.toISOString(),
-    };
-  }
-
-  const pairs = await listActivePairs();
+  await enqueueClosedPeriod(priorMonthStart, thisMonthStart);
+  const periods = await listPendingPeriods();
 
   const result: GenerateMonthlyDraftsResult = {
-    scanned_builders: new Set(pairs.map((p) => p.builder_id)).size,
+    scanned_builders: new Set(periods.map((period) => period.builder_id)).size,
     generated: 0,
     skipped_pricing_not_configured: 0,
     skipped_capabilities_pending: 0,
@@ -95,7 +136,7 @@ export async function generateMonthlyDrafts(opts: {
     window_end: thisMonthStart.toISOString(),
   };
 
-  for (const pair of pairs) {
+  for (const period of periods) {
     try {
       // Track 1 PR 1.5 (O28): deterministic per-(builder, customer,
       // period) base. The generator suffixes with :v{version}:s{slice}
@@ -112,15 +153,19 @@ export async function generateMonthlyDrafts(opts: {
       // the next cron run inside the 24h boundary window (bug_005).
       // Future non-monthly callers passing draftKeyBase MUST encode
       // period_end themselves (e.g. `oneoff:{start}:{end}:{customer}`).
-      const draftKeyBase = `monthly:${priorMonthStart.toISOString().slice(0, 10)}:${pair.customer_id}`;
+      const periodStart = new Date(period.period_start);
+      const periodEnd = new Date(period.period_end);
+      const draftKeyBase = `monthly:${periodStart.toISOString().slice(0, 10)}:${period.customer_id}`;
       const drafts = await generateInvoice({
-        builderId: pair.builder_id,
-        customerId: pair.customer_id,
-        period: { start: priorMonthStart, end: thisMonthStart },
+        builderId: period.builder_id,
+        customerId: period.customer_id,
+        period: { start: periodStart, end: periodEnd },
         draftKeyBase,
       });
       result.generated += drafts.length;
+      await completePeriod(period);
     } catch (err) {
+      await recordFailedAttempt(period, err);
       if (err instanceof BillingError) {
         if (err.code === 'pricing_not_configured') result.skipped_pricing_not_configured += 1;
         else if (err.code === 'stripe_capabilities_pending')
@@ -131,7 +176,12 @@ export async function generateMonthlyDrafts(opts: {
       result.skipped_other += 1;
       const message = err instanceof Error ? err.message : String(err);
       log.warn(
-        { builder_id: pair.builder_id, customer_id: pair.customer_id, error: message },
+        {
+          builder_id: period.builder_id,
+          customer_id: period.customer_id,
+          period_start: new Date(period.period_start).toISOString(),
+          error: message,
+        },
         'draft generation skipped',
       );
     }

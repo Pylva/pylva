@@ -33,14 +33,35 @@ const { BillingError } = await import('../../src/lib/billing/invoice-generator.j
 
 const builderId = '00000000-0000-4000-8000-000000000001';
 const customerId = '00000000-0000-4000-8000-000000000002';
+const junePeriod = {
+  builder_id: builderId,
+  customer_id: customerId,
+  period_start: new Date('2026-06-01T00:00:00.000Z'),
+  period_end: new Date('2026-07-01T00:00:00.000Z'),
+};
+let pendingPeriods = [junePeriod];
+
+function queryText(query: unknown): string {
+  return JSON.stringify(query, (_key, value) => (typeof value === 'function' ? undefined : value));
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.dbExecute.mockResolvedValue([{ builder_id: builderId, customer_id: customerId }]);
+  pendingPeriods = [junePeriod];
+  mocks.dbExecute.mockImplementation((query: unknown) => {
+    const text = queryText(query);
+    if (text.includes('SELECT builder_id') && text.includes('FROM monthly_invoice_periods')) {
+      return Promise.resolve(pendingPeriods);
+    }
+    if (text.includes('UPDATE monthly_invoice_periods') && text.includes('completed')) {
+      pendingPeriods = [];
+    }
+    return Promise.resolve([]);
+  });
 });
 
 describe('generateMonthlyDrafts projection retries', () => {
-  it('retries a customer on the next daily run after projection was pending at month rollover', async () => {
+  it('keeps retrying a queued period after the next month boundary', async () => {
     mocks.generateInvoice
       .mockRejectedValueOnce(
         new BillingError('projection_pending', 'Authoritative usage is still reconciling'),
@@ -58,16 +79,17 @@ describe('generateMonthlyDrafts projection retries', () => {
       now: new Date('2026-07-01T04:00:00.000Z'),
     });
     const retryRun = await generateMonthlyDrafts({
-      now: new Date('2026-07-02T04:00:00.000Z'),
+      now: new Date('2026-08-15T04:00:00.000Z'),
     });
+    await generateMonthlyDrafts({ now: new Date('2026-08-15T05:00:00.000Z') });
 
     expect(rolloverRun).toMatchObject({ generated: 0, skipped_other: 1 });
     expect(retryRun).toMatchObject({
       scanned_builders: 1,
       generated: 1,
       skipped_other: 0,
-      window_start: '2026-06-01T00:00:00.000Z',
-      window_end: '2026-07-01T00:00:00.000Z',
+      window_start: '2026-07-01T00:00:00.000Z',
+      window_end: '2026-08-01T00:00:00.000Z',
     });
     expect(mocks.generateInvoice).toHaveBeenCalledTimes(2);
     expect(mocks.generateInvoice).toHaveBeenLastCalledWith({
@@ -79,5 +101,14 @@ describe('generateMonthlyDrafts projection retries', () => {
       },
       draftKeyBase: `monthly:2026-06-01:${customerId}`,
     });
+
+    const queries = mocks.dbExecute.mock.calls.map(([query]) => queryText(query));
+    expect(
+      queries.filter((query) => query.includes('INSERT INTO monthly_invoice_periods')),
+    ).toHaveLength(3);
+    expect(queries.some((query) => query.includes('period_pricing.effective_from'))).toBe(true);
+    expect(queries.some((query) => query.includes('ON CONFLICT'))).toBe(true);
+    expect(queries.some((query) => query.includes('UPDATE monthly_invoice_periods'))).toBe(true);
+    expect(queries.some((query) => query.includes("'completed'"))).toBe(true);
   });
 });
