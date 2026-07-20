@@ -43,8 +43,8 @@ importers:
         specifier: ^2.3.4
         version: 2.3.4
       argon2:
-        specifier: ^0.44.0
-        version: 0.44.0
+        specifier: ^0.45.0
+        version: 0.45.0
       drizzle-orm:
         specifier: ^0.45.2
         version: 0.45.2(@opentelemetry/api@1.9.1)(@types/pg@8.6.1)(postgres@3.4.9)
@@ -2559,8 +2559,8 @@ packages:
   arctic@2.3.4:
     resolution: {integrity: sha512-+p30BOWsctZp+CVYCt7oAean/hWGW42sH5LAcRQX56ttEkFJWbzXBhmSpibbzwSJkRrotmsA+oAoJoVsU0f5xA==}
 
-  argon2@0.44.0:
-    resolution: {integrity: sha512-zHPGN3S55sihSQo0dBbK0A5qpi2R31z7HZDZnry3ifOyj8bZZnpZND2gpmhnRGO1V/d555RwBqIK5W4Mrmv3ig==}
+  argon2@0.45.0:
+    resolution: {integrity: sha512-Ob6jYdMisRcYU+FUF4zEVl5nTGSTCA78dKaDyRzSkQB8iU0ZRJfpWV7XMIRj87VDmNvPdQqOjuFhGRQCvTMShA==}
     engines: {node: '>=16.17.0'}
 
   aria-query@5.3.0:
@@ -2965,6 +2965,10 @@ packages:
 
   enhanced-resolve@5.24.2:
     resolution: {integrity: sha512-rpsZEGT1jFuve6QlpyRp9ckQ+kN61hvF9BzCPyMdaKTm8UJce96KBn3sorXOFXlzjPrs3Vc4T1NsSroZ3PxlFw==}
+    engines: {node: '>=10.13.0'}
+
+  enhanced-resolve@5.24.3:
+    resolution: {integrity: sha512-PwKooW9JUzh5chmYfHM3IQl5OkK2u2Nm011MgeZrss3JmFraUx/fqrf78kk8GUMYoibx/14MdwTl/1WKkG7TpQ==}
     engines: {node: '>=10.13.0'}
 
   entities@4.5.0:
@@ -7268,7 +7272,7 @@ snapshots:
       '@oslojs/encoding': 1.1.0
       '@oslojs/jwt': 0.2.0
 
-  argon2@0.44.0:
+  argon2@0.45.0:
     dependencies:
       '@phc/format': 1.0.0
       cross-env: 10.1.0
@@ -7537,6 +7541,11 @@ snapshots:
       once: 1.4.0
 
   enhanced-resolve@5.24.2:
+    dependencies:
+      graceful-fs: 4.2.11
+      tapable: 2.3.3
+
+  enhanced-resolve@5.24.3:
     dependencies:
       graceful-fs: 4.2.11
       tapable: 2.3.3
@@ -9121,7 +9130,7 @@ snapshots:
       acorn-import-phases: 1.0.4(acorn@8.17.0)
       browserslist: 4.28.6
       chrome-trace-event: 1.0.4
-      enhanced-resolve: 5.24.2
+      enhanced-resolve: 5.24.3
       es-module-lexer: 2.3.1
       eslint-scope: 5.1.1
       events: 3.3.0
