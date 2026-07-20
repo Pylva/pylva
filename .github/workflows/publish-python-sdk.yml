@@ -40,7 +40,7 @@ jobs:
           RELEASE_SHA: ${{ steps.release_commit.outputs.sha }}
         run: node scripts/ci/attest-release-sha.mjs
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
