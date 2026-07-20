@@ -56,24 +56,16 @@ async function enqueueClosedPeriod(periodStart: Date, periodEnd: Date): Promise<
       period_end
     )
     SELECT
-      builder_id,
-      customer_id,
+      DISTINCT period_pricing.builder_id,
+      period_pricing.customer_id,
       ${periodStart},
       ${periodEnd}
-    FROM customer_pricing AS active_pricing
-    WHERE active_pricing.effective_to IS NULL
-      AND active_pricing.billing_period = 'monthly'
-      AND EXISTS (
-        SELECT 1
-        FROM customer_pricing AS period_pricing
-        WHERE period_pricing.builder_id = active_pricing.builder_id
-          AND period_pricing.customer_id = active_pricing.customer_id
-          AND period_pricing.billing_period = 'monthly'
-          AND period_pricing.effective_from < ${periodEnd}
-          AND (
-            period_pricing.effective_to IS NULL
-            OR period_pricing.effective_to > ${periodStart}
-          )
+    FROM customer_pricing AS period_pricing
+    WHERE period_pricing.billing_period = 'monthly'
+      AND period_pricing.effective_from < ${periodEnd}
+      AND (
+        period_pricing.effective_to IS NULL
+        OR period_pricing.effective_to > ${periodStart}
       )
     ON CONFLICT (builder_id, customer_id, period_start) DO NOTHING
   `);
