@@ -753,12 +753,30 @@ async def test_flush_applies_backend_budget_exceeded_flag(
         },
         {
             "rule_id": "rule-1",
+            "customer_id": "cust_test",
+            "limit_usd": 10**400,
+            "period_start": "2026-04-01T00:00:00Z",
+        },
+        {
+            "rule_id": "rule-1",
             "customer_id": 7,
             "limit_usd": 10,
             "period_start": "2026-04-01T00:00:00Z",
         },
+        {
+            "rule_id": "rule-1",
+            "limit_usd": 10,
+            "period_start": "2026-04-01T00:00:00Z",
+        },
     ],
-    ids=["boolean-limit", "nan-limit", "infinite-limit", "invalid-customer"],
+    ids=[
+        "boolean-limit",
+        "nan-limit",
+        "infinite-limit",
+        "oversized-integer-limit",
+        "invalid-customer",
+        "missing-customer",
+    ],
 )
 async def test_flush_ignores_malformed_backend_budget_exceeded_flag(
     invalid_flag: dict[str, object],

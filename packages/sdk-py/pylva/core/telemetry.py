@@ -362,18 +362,22 @@ async def _flush_once(state: _State | None = None) -> None:
         limit_usd = flag.get("limit_usd")
         if not isinstance(rule_id, str) or not isinstance(period_start, str):
             continue
-        if customer_id is not None and not isinstance(customer_id, str):
-            continue
-        if (
-            not isinstance(limit_usd, int | float)
-            or isinstance(limit_usd, bool)
-            or not math.isfinite(limit_usd)
+        if "customer_id" not in flag or (
+            customer_id is not None and not isinstance(customer_id, str)
         ):
+            continue
+        if not isinstance(limit_usd, int | float) or isinstance(limit_usd, bool):
+            continue
+        try:
+            normalized_limit_usd = float(limit_usd)
+        except OverflowError:
+            continue
+        if not math.isfinite(normalized_limit_usd):
             continue
         mark_exceeded_from_backend(
             rule_id=rule_id,
             customer_id=customer_id,
-            limit_usd=float(limit_usd),
+            limit_usd=normalized_limit_usd,
             period_start=period_start,
             expected_config_generation=generation,
         )
