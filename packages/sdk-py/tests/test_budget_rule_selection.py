@@ -12,7 +12,11 @@ import pytest
 
 from pylva.core import budget_accumulator as ba
 from pylva.core import pricing_cache, rules_cache
-from pylva.core.budget_rules import period_start_utc, record_llm_spend
+from pylva.core.budget_rules import (
+    find_applicable_budget_rules,
+    period_start_utc,
+    record_llm_spend,
+)
 from pylva.errors.budget_exceeded import PylvaBudgetExceeded
 from pylva.wrappers._budget import maybe_enforce_pre_call
 
@@ -84,6 +88,18 @@ def _seed_pricing() -> None:
             }
         ]
     )
+
+
+@pytest.mark.parametrize(
+    "limit_usd",
+    [True, float("nan"), float("inf"), 10**400],
+    ids=["boolean", "nan", "infinite", "oversized-integer"],
+)
+def test_malformed_budget_rule_limits_are_ignored(limit_usd: object) -> None:
+    rule = _day_rule()
+    rule["config"]["limit_usd"] = limit_usd
+
+    assert find_applicable_budget_rules([rule], "alice") == []
 
 
 def test_record_llm_spend_blocks_after_local_spend_crosses_limit() -> None:

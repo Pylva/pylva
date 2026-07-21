@@ -67,7 +67,7 @@ export function findApplicableBudgetRules(
       hard_stop?: unknown;
       scope?: unknown;
     };
-    if (typeof limit_usd !== 'number' || limit_usd <= 0) continue;
+    if (typeof limit_usd !== 'number' || !Number.isFinite(limit_usd) || limit_usd <= 0) continue;
     if (period !== 'hour' && period !== 'day' && period !== 'week' && period !== 'month') continue;
     if (scope !== 'per_customer' && scope !== 'pooled') continue;
     if (typeof hard_stop !== 'boolean') continue;

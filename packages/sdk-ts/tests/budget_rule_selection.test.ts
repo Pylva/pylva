@@ -29,7 +29,8 @@ vi.mock('../src/core/pricing_cache.js', () => ({
 }));
 
 const { maybeEnforcePreCall } = await import('../src/wrappers/_budget.js');
-const { recordLlmSpend, periodStartUtc } = await import('../src/core/budget_rules.js');
+const { findApplicableBudgetRules, recordLlmSpend, periodStartUtc } =
+  await import('../src/core/budget_rules.js');
 const { add, get, _resetAccumulatorForTests } = await import('../src/core/budget_accumulator.js');
 const { PylvaBudgetExceeded } = await import('../src/errors/budget_exceeded.js');
 
@@ -118,6 +119,22 @@ describe('recordLlmSpend — local budget accounting', () => {
     customer_id: null,
     config: { limit_usd: 1, period: 'day', hard_stop: true, scope: 'per_customer' },
     ...overrides,
+  });
+
+  it.each([
+    ['NaN', Number.NaN],
+    ['infinity', Number.POSITIVE_INFINITY],
+  ])('ignores a non-finite %s budget limit from the rules cache', (_label, limitUsd) => {
+    const rule = dayRule({
+      config: {
+        limit_usd: limitUsd,
+        period: 'day',
+        hard_stop: true,
+        scope: 'per_customer',
+      },
+    });
+
+    expect(findApplicableBudgetRules([rule], 'alice')).toEqual([]);
   });
 
   it('blocks the call after local spend crosses the limit — no backend flag involved', () => {
