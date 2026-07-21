@@ -61,6 +61,30 @@ beforeEach(() => {
 });
 
 describe('generateMonthlyDrafts projection retries', () => {
+  it('queues a closed monthly period after the customer switches billing periods', async () => {
+    mocks.generateInvoice.mockResolvedValueOnce([
+      {
+        invoice_id: '00000000-0000-4000-8000-000000000003',
+        stripe_invoice_id: 'in_123',
+        amount_usd: 25,
+        has_unpriced_events: false,
+      },
+    ]);
+
+    await generateMonthlyDrafts({ now: new Date('2026-07-01T04:00:00.000Z') });
+
+    const queries = mocks.dbExecute.mock.calls.map(([query]) => queryText(query));
+    const enqueueQuery = queries.find((query) =>
+      query.includes('INSERT INTO monthly_invoice_periods'),
+    );
+
+    expect(enqueueQuery).toContain('DISTINCT period_pricing.builder_id');
+    expect(enqueueQuery).toContain("period_pricing.billing_period = 'monthly'");
+    expect(enqueueQuery).toContain('period_pricing.effective_from <');
+    expect(enqueueQuery).toContain('period_pricing.effective_to >');
+    expect(enqueueQuery).not.toContain('active_pricing.effective_to IS NULL');
+  });
+
   it('keeps retrying a queued period after the next month boundary', async () => {
     mocks.generateInvoice
       .mockRejectedValueOnce(
