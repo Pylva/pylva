@@ -14,6 +14,7 @@ const CLICKHOUSE_URL = process.env['CLICKHOUSE_URL'];
 const describeClickHouse =
   CLICKHOUSE_URL && process.env['CLICKHOUSE_LIVE_TESTS'] === 'true' ? describe : describe.skip;
 const BUILDER_ID = `retention-test-${crypto.randomBytes(6).toString('hex')}`;
+const EVENT_TIMESTAMP = new Date(Date.now() - 24 * 60 * 60 * 1000);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '../..');
 
@@ -24,7 +25,7 @@ function requiredClickHouseUrl(): string {
 
 function eventRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    timestamp: chTimestamp(new Date('2026-04-18T10:00:00.000Z')),
+    timestamp: chTimestamp(EVENT_TIMESTAMP),
     builder_id: BUILDER_ID,
     trace_id: crypto.randomUUID(),
     span_id: crypto.randomUUID(),
