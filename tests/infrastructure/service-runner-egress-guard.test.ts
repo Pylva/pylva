@@ -73,7 +73,7 @@ describe('clean-artifact service runner egress guard', () => {
     expect(unitStart).toBeGreaterThanOrEqual(0);
     expect(unitEnd).toBeGreaterThan(unitStart);
     const unitJob = workflow.slice(unitStart, unitEnd);
-    expect(unitJob).toContain('actions/setup-python@v6');
+    expect(unitJob).toContain('actions/setup-python@v7');
     expect(unitJob).toContain("python-version: '3.12'");
     expect(unitJob).toContain("'httpx==0.28.1'");
     expect(unitJob.indexOf("'httpx==0.28.1'")).toBeLessThan(unitJob.indexOf('pnpm test'));
