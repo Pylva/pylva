@@ -29,6 +29,14 @@ interface SeedKey {
   hash: string;
 }
 
+export function assertSafeSeedEnvironment(
+  environment: Record<string, string | undefined>,
+): void {
+  if (environment['NODE_ENV'] === 'production') {
+    throw new Error('Refusing to seed a production database');
+  }
+}
+
 function applySeedEnvDefaults(): void {
   for (const [name, value] of Object.entries(SEED_ENV_DEFAULTS)) {
     if (!Object.prototype.hasOwnProperty.call(process.env, name)) {
@@ -58,6 +66,7 @@ async function generateSeedKey(keyId: string, argon2Secret: string): Promise<See
 }
 
 async function seed() {
+  assertSafeSeedEnvironment(process.env);
   applySeedEnvDefaults();
   const { env } = await import('../src/lib/config.js');
   const databaseUrl = env.DATABASE_URL;
