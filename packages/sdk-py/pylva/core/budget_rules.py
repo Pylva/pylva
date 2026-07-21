@@ -7,6 +7,7 @@ Parity with the TS SDK's core/budget_rules.ts.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -58,7 +59,13 @@ def find_applicable_budget_rules(rules: list[Any], customer_id: str | None) -> l
         period = cfg.get("period")
         hard_stop = cfg.get("hard_stop")
         scope = cfg.get("scope")
-        if not isinstance(limit_usd, (int, float)) or limit_usd <= 0:
+        if not isinstance(limit_usd, (int, float)) or isinstance(limit_usd, bool):
+            continue
+        try:
+            normalized_limit_usd = float(limit_usd)
+        except OverflowError:
+            continue
+        if not math.isfinite(normalized_limit_usd) or normalized_limit_usd <= 0:
             continue
         if period not in ("hour", "day", "week", "month"):
             continue
@@ -74,7 +81,7 @@ def find_applicable_budget_rules(rules: list[Any], customer_id: str | None) -> l
                 "scope": scope,
                 "scope_token_customer_id": None if scope == "pooled" else customer_id,
                 "period": period,
-                "limit_usd": float(limit_usd),
+                "limit_usd": normalized_limit_usd,
                 "hard_stop": hard_stop,
             }
         )
