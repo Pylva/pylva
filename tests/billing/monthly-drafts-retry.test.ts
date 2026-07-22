@@ -61,7 +61,7 @@ beforeEach(() => {
 });
 
 describe('generateMonthlyDrafts projection retries', () => {
-  it('queues a closed monthly period after the customer switches billing periods', async () => {
+  it('queues from the billing period active at the closed month boundary', async () => {
     mocks.generateInvoice.mockResolvedValueOnce([
       {
         invoice_id: '00000000-0000-4000-8000-000000000003',
@@ -81,7 +81,7 @@ describe('generateMonthlyDrafts projection retries', () => {
     expect(enqueueQuery).toContain('DISTINCT period_pricing.builder_id');
     expect(enqueueQuery).toContain("period_pricing.billing_period = 'monthly'");
     expect(enqueueQuery).toContain('period_pricing.effective_from <');
-    expect(enqueueQuery).toContain('period_pricing.effective_to >');
+    expect(enqueueQuery).toContain('period_pricing.effective_to >=');
     expect(enqueueQuery).not.toContain('active_pricing.effective_to IS NULL');
   });
 
