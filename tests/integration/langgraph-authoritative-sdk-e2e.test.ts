@@ -9,7 +9,12 @@ import {
   createBudgetControlCutover,
   markBudgetControlReady,
 } from '../../src/lib/budget-control/readiness.js';
-import { applyMigrationsThrough, createScratchDb, type ScratchDb } from '../helpers/scratch-db.js';
+import {
+  applyMigrationsThrough,
+  createScratchDb,
+  installWorkspaceLifecycleFixtureColumns,
+  type ScratchDb,
+} from '../helpers/scratch-db.js';
 import { startEgressSentinel, type EgressSentinel } from '../helpers/egress-sentinel.js';
 import { assertPythonSdkArtifactEvidence } from '../helpers/python-sdk-artifact-evidence.js';
 
@@ -415,12 +420,16 @@ async function requestCounts(server: HarnessServer): Promise<Record<string, numb
 async function createControlledBuilder(runtime: Runtime): Promise<BuilderFixture> {
   const suffix = crypto.randomBytes(6).toString('hex');
   const [builder] = await db()<{ id: string }[]>`
-    INSERT INTO public.builders (email, name, tier, slug)
+    INSERT INTO public.builders (
+      email, name, tier, slug, access_state, entitlement_source
+    )
     VALUES (
       ${`langgraph-${runtime}-${suffix}@example.com`},
       'LangGraph SDK gate',
       'pro',
-      ${`langgraph-${runtime}-${suffix}`}
+      ${`langgraph-${runtime}-${suffix}`},
+      'active',
+      'admin'
     )
     RETURNING id::TEXT AS id
   `;
@@ -721,6 +730,7 @@ beforeAll(async () => {
   scratch = await createScratchDb({ prefix: 'langgraph_authoritative_sdk' });
   try {
     await applyMigrationsThrough(scratch, '051');
+    await installWorkspaceLifecycleFixtureColumns(scratch);
   } catch (error) {
     await scratch.drop();
     scratch = undefined;

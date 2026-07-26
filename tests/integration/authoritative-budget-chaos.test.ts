@@ -11,7 +11,12 @@ import {
 } from '../../src/lib/budget-control/readiness.js';
 import { createBudgetLifecycleService } from '../../src/lib/budget-control/lifecycle-service.js';
 import { ensureRedisCommandClient, redisClient } from '../../src/lib/redis/client.js';
-import { applyMigrationsThrough, createScratchDb, type ScratchDb } from '../helpers/scratch-db.js';
+import {
+  applyMigrationsThrough,
+  createScratchDb,
+  installWorkspaceLifecycleFixtureColumns,
+  type ScratchDb,
+} from '../helpers/scratch-db.js';
 import { startEgressSentinel, type EgressSentinel } from '../helpers/egress-sentinel.js';
 import { assertPythonSdkArtifactEvidence } from '../helpers/python-sdk-artifact-evidence.js';
 
@@ -460,9 +465,12 @@ function commitRequest(): JsonObject {
 async function createControlledBuilder(rules: RuleSpec[]): Promise<ControlledBuilder> {
   const suffix = crypto.randomBytes(6).toString('hex');
   const [builder] = await db()<{ id: string }[]>`
-    INSERT INTO public.builders (email, name, tier, slug)
+    INSERT INTO public.builders (
+      email, name, tier, slug, access_state, entitlement_source
+    )
     VALUES (
-      ${`chaos-${suffix}@example.com`}, 'Chaos gate', 'pro', ${`chaos-${suffix}`}
+      ${`chaos-${suffix}@example.com`}, 'Chaos gate', 'pro', ${`chaos-${suffix}`},
+      'active', 'admin'
     )
     RETURNING id::TEXT AS id
   `;
@@ -638,6 +646,7 @@ beforeAll(async () => {
     // integration suite; this general chaos database uses the ordinary test
     // login and applies the application-owned runtime schema through 051.
     await applyMigrationsThrough(scratch, '051');
+    await installWorkspaceLifecycleFixtureColumns(scratch);
   } catch (error) {
     await scratch.drop();
     scratch = undefined;
