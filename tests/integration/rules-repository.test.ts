@@ -7,7 +7,6 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import crypto from 'node:crypto';
 import type { Sql } from 'postgres';
 import { RuleEnforcement, RuleStatus, RuleType, type Rule } from '@pylva/shared';
-import { ensureLedger, type MigrateSqlClient } from '../../scripts/db-migrate-core.js';
 import { applyMigrationsThrough, createScratchDb, type ScratchDb } from '../helpers/scratch-db.js';
 
 // This repository suite uses the local PostgreSQL URL and never exercises the
@@ -59,10 +58,10 @@ async function createBuilder(label: string): Promise<string> {
     VALUES (
       ${`${label}-${suffix}@example.com`},
       ${label},
-      NULL,
+      'pro',
       ${`${label}-${suffix}`},
       'active',
-      'self_hosted'
+      'admin'
     )
     RETURNING id
   `;
@@ -86,8 +85,17 @@ function budgetConfig(limit = 5): Record<string, unknown> {
 beforeAll(async () => {
   const candidate = await createScratchDb({ prefix: 'rules_repository' });
   try {
-    await ensureLedger(candidate.sql as unknown as MigrateSqlClient);
-    await applyMigrationsThrough(candidate, '058');
+    await applyMigrationsThrough(candidate, '051');
+    // This focused repository suite deliberately predates the sealed runtime
+    // ownership boundary in migration 054 so its scratch connection can own
+    // fixtures. Mirror the additive lifecycle columns now read by the current
+    // repository; migration behavior and ACLs are covered by their dedicated
+    // integration suites.
+    await candidate.sql`
+      ALTER TABLE builders
+        ADD COLUMN access_state VARCHAR(32),
+        ADD COLUMN entitlement_source VARCHAR(32)
+    `;
     process.env['DATABASE_URL'] = candidate.url;
     process.env['ALLOW_BUDGET_CONTROL_DATABASE_URL_FALLBACK'] = 'true';
     // Keep this disposable local integration suite pinned to its scratch
