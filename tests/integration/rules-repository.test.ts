@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import crypto from 'node:crypto';
 import type { Sql } from 'postgres';
 import { RuleEnforcement, RuleStatus, RuleType, type Rule } from '@pylva/shared';
+import { ensureLedger, type MigrateSqlClient } from '../../scripts/db-migrate-core.js';
 import { applyMigrationsThrough, createScratchDb, type ScratchDb } from '../helpers/scratch-db.js';
 
 // This repository suite uses the local PostgreSQL URL and never exercises the
@@ -85,6 +86,7 @@ function budgetConfig(limit = 5): Record<string, unknown> {
 beforeAll(async () => {
   const candidate = await createScratchDb({ prefix: 'rules_repository' });
   try {
+    await ensureLedger(candidate.sql as unknown as MigrateSqlClient);
     await applyMigrationsThrough(candidate, '058');
     process.env['DATABASE_URL'] = candidate.url;
     process.env['ALLOW_BUDGET_CONTROL_DATABASE_URL_FALLBACK'] = 'true';
