@@ -6,9 +6,22 @@ export interface RecordedCall {
   params?: unknown[];
 }
 
+export interface FreshInstallPrincipal {
+  currentUserName: string;
+  sessionUserName: string;
+  canLogin: boolean;
+  canCreateRole: boolean;
+  isSuperuser: boolean;
+  bypassesRls: boolean;
+  canReplicate: boolean;
+  ownsCurrentDatabase: boolean;
+}
+
 export function createRecordingSqlClient(opts?: {
   ledgerRows?: Array<{ filename: string; checksum: string }>;
   regclasses?: Partial<Record<'schema_migrations' | 'builders', boolean>>;
+  builderRowsExist?: boolean;
+  freshInstallPrincipal?: Partial<FreshInstallPrincipal> | null;
   failOn?: (query: string) => Error | undefined;
 }): { client: MigrateSqlClient; calls: RecordedCall[] } {
   const calls: RecordedCall[] = [];
@@ -43,6 +56,37 @@ export function createRecordingSqlClient(opts?: {
     }
     if (query.includes("to_regclass('public.builders')")) {
       return regclassRows('builders');
+    }
+    if (query.includes('SELECT EXISTS (SELECT 1 FROM builders LIMIT 1)')) {
+      return [{ has_builders: opts?.builderRowsExist ?? false }];
+    }
+    if (query.includes('FROM pg_catalog.pg_roles AS role')) {
+      if (opts?.freshInstallPrincipal === null) {
+        return [];
+      }
+      const principal: FreshInstallPrincipal = {
+        currentUserName: 'pylva_migration',
+        sessionUserName: 'pylva_migration',
+        canLogin: true,
+        canCreateRole: true,
+        isSuperuser: false,
+        bypassesRls: false,
+        canReplicate: false,
+        ownsCurrentDatabase: true,
+        ...opts?.freshInstallPrincipal,
+      };
+      return [
+        {
+          current_user_name: principal.currentUserName,
+          session_user_name: principal.sessionUserName,
+          can_login: principal.canLogin,
+          can_create_role: principal.canCreateRole,
+          is_superuser: principal.isSuperuser,
+          bypasses_rls: principal.bypassesRls,
+          can_replicate: principal.canReplicate,
+          owns_current_database: principal.ownsCurrentDatabase,
+        },
+      ];
     }
     if (query.includes('FROM schema_migrations')) {
       return ledgerRows;

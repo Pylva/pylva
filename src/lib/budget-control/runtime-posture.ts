@@ -137,12 +137,21 @@ expected_runtime_relation_acl AS (
     ('budget_reservations', ARRAY['INSERT', 'SELECT', 'UPDATE']::pg_catalog.text[]),
     ('budget_rule_revisions', ARRAY['INSERT', 'SELECT', 'UPDATE']::pg_catalog.text[]),
     ('budget_usage_ledger', ARRAY['INSERT', 'SELECT']::pg_catalog.text[]),
-    ('builders', ARRAY['SELECT']::pg_catalog.text[]),
     ('cost_sources', ARRAY['SELECT']::pg_catalog.text[]),
     ('custom_pricing', ARRAY['SELECT']::pg_catalog.text[]),
     ('llm_pricing', ARRAY['SELECT']::pg_catalog.text[]),
     ('rules', ARRAY['DELETE', 'INSERT', 'SELECT', 'UPDATE']::pg_catalog.text[])
   ) AS expected(relation_name, privileges)
+),
+expected_runtime_column_acl AS (
+  SELECT *
+  FROM (VALUES
+    ('builders', 'access_state', 'SELECT'),
+    ('builders', 'entitlement_source', 'SELECT'),
+    ('builders', 'id', 'SELECT'),
+    ('builders', 'id', 'UPDATE'),
+    ('builders', 'tier', 'SELECT')
+  ) AS expected(relation_name, column_name, privilege_type)
 ),
 runtime_relation_acl AS (
   SELECT namespace.nspname AS schema_name,
@@ -158,11 +167,19 @@ runtime_relation_acl AS (
     AND privilege.grantee = runtime.oid
 ),
 runtime_column_acl AS (
-  SELECT privilege.is_grantable
+  SELECT relation.relname AS relation_name,
+         attribute.attname AS column_name,
+         privilege.privilege_type,
+         privilege.is_grantable
   FROM pg_catalog.pg_attribute AS attribute
+  JOIN pg_catalog.pg_class AS relation
+    ON relation.oid = attribute.attrelid
+  JOIN pg_catalog.pg_namespace AS namespace
+    ON namespace.oid = relation.relnamespace
   CROSS JOIN runtime_role AS runtime
   CROSS JOIN LATERAL pg_catalog.aclexplode(attribute.attacl) AS privilege
-  WHERE attribute.attnum > 0
+  WHERE namespace.nspname = 'public'
+    AND attribute.attnum > 0
     AND NOT attribute.attisdropped
     AND privilege.grantee = runtime.oid
 ),
@@ -232,7 +249,31 @@ runtime_acl_contract AS (
     AND NOT EXISTS (
       SELECT 1 FROM runtime_relation_acl AS actual WHERE actual.is_grantable
     )
-    AND NOT EXISTS (SELECT 1 FROM runtime_column_acl)
+    AND NOT EXISTS (
+      SELECT expected.relation_name,
+             expected.column_name,
+             expected.privilege_type
+      FROM expected_runtime_column_acl AS expected
+      EXCEPT
+      SELECT actual.relation_name,
+             actual.column_name,
+             actual.privilege_type
+      FROM runtime_column_acl AS actual
+    )
+    AND NOT EXISTS (
+      SELECT actual.relation_name,
+             actual.column_name,
+             actual.privilege_type
+      FROM runtime_column_acl AS actual
+      EXCEPT
+      SELECT expected.relation_name,
+             expected.column_name,
+             expected.privilege_type
+      FROM expected_runtime_column_acl AS expected
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM runtime_column_acl AS actual WHERE actual.is_grantable
+    )
     AND NOT EXISTS (
       SELECT 'public'::pg_catalog.name,
              'pylva_budget_authority_order_seq'::pg_catalog.name,

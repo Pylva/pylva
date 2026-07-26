@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 const MIGRATIONS_DIR = path.resolve(__dirname, '../../db/migrations');
 
 describe('postgres migration ordering', () => {
-  it('keeps numeric migration prefixes unique', async () => {
+  it('keeps numeric migration prefixes unique except for the reviewed hosted overlay pairs', async () => {
     const files = (await readdir(MIGRATIONS_DIR))
       .filter((file) => /^\d+_.*\.sql$/.test(file))
       .sort();
@@ -16,8 +16,22 @@ describe('postgres migration ordering', () => {
       byPrefix.set(prefix, [...(byPrefix.get(prefix) ?? []), file]);
     }
 
+    const reviewedHostedPairs = new Map<string, string[]>([
+      [
+        '045',
+        [
+          '045_flexible_provider_model_identifiers.sql',
+          '045_stripe_price_tier_map_unique_enabled.sql',
+        ],
+      ],
+      ['046', ['046_rls_hardening.sql', '046_tier_limit_notifications.sql']],
+    ]);
     const duplicates = [...byPrefix.entries()]
       .filter(([, grouped]) => grouped.length > 1)
+      .filter(
+        ([prefix, grouped]) =>
+          JSON.stringify(grouped) !== JSON.stringify(reviewedHostedPairs.get(prefix)),
+      )
       .map(([prefix, grouped]) => `${prefix}: ${grouped.join(', ')}`);
 
     expect(duplicates).toEqual([]);

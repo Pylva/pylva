@@ -1,17 +1,31 @@
 // SPDX-License-Identifier: Elastic-2.0
 import type Stripe from 'stripe';
+import { BuilderAccessState } from '@pylva/shared';
 import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import { db } from '../db/client.js';
+import { withRLS, type DrizzleTransaction } from '../db/rls.js';
+import { getBuilderEntitlementForShare } from '../db/advisory-locks.js';
 import { stripeConnect, stripeConnectEventLog } from '../db/schema.js';
 import { env } from '../config.js';
 import { logger } from '../logger.js';
-import { dispatch } from './webhook-handlers.js';
+import {
+  dispatch,
+  type ConnectWebhookAlertEffect,
+} from './webhook-handlers.js';
+import { deliverBuilderAlert } from '../alerts/builder-alert.js';
 import { stripeFor } from './client.js';
 import { emptyResponse, textResponse, type PublicHttpResponse } from '../public-http/response.js';
 
 const log = logger.child({ module: 'billing.webhooks' });
 const CONNECT_WEBHOOK_IN_PROGRESS_MS = 5 * 60 * 1000;
 const CONNECT_WEBHOOK_RETRY_AFTER_SECONDS = 30;
+
+class ConnectWebhookEntitlementUnavailableError extends Error {
+  constructor(message = 'connect webhook entitlement is unavailable') {
+    super(message);
+    this.name = 'ConnectWebhookEntitlementUnavailableError';
+  }
+}
 
 async function resolveBuilderId(stripeAccountId: string): Promise<string | null> {
   const rows = await db
@@ -37,9 +51,10 @@ async function claimConnectEvent(params: {
   stripeEventId: string;
   type: string;
   builderId: string;
+  transaction: DrizzleTransaction;
 }): Promise<PublicHttpResponse | null> {
   const now = new Date();
-  const inserted = await db
+  const inserted = await params.transaction
     .insert(stripeConnectEventLog)
     .values({
       stripe_account_id: params.stripeAccountId,
@@ -55,7 +70,7 @@ async function claimConnectEvent(params: {
 
   if (inserted.length > 0) return null;
 
-  const existing = await db
+  const existing = await params.transaction
     .select({
       handled_at: stripeConnectEventLog.handled_at,
       processing_started_at: stripeConnectEventLog.processing_started_at,
@@ -89,7 +104,7 @@ async function claimConnectEvent(params: {
   }
 
   const staleBefore = new Date(now.getTime() - CONNECT_WEBHOOK_IN_PROGRESS_MS);
-  const reclaimed = await db
+  const reclaimed = await params.transaction
     .update(stripeConnectEventLog)
     .set({
       type: params.type,
@@ -125,8 +140,9 @@ async function markConnectEventHandled(params: {
   stripeAccountId: string;
   stripeEventId: string;
   builderId: string;
+  transaction: DrizzleTransaction;
 }): Promise<void> {
-  const updated = await db
+  const updated = await params.transaction
     .update(stripeConnectEventLog)
     .set({
       builder_id: params.builderId,
@@ -144,37 +160,8 @@ async function markConnectEventHandled(params: {
     .returning({ stripe_event_id: stripeConnectEventLog.stripe_event_id });
 
   if (updated.length === 0) {
-    log.warn(
-      { account: params.stripeAccountId, event_id: params.stripeEventId },
-      'markConnectEventHandled matched 0 rows - row missing or already handled',
-    );
-  }
-}
-
-async function markConnectEventFailed(params: {
-  stripeAccountId: string;
-  stripeEventId: string;
-  error: string;
-}): Promise<void> {
-  const updated = await db
-    .update(stripeConnectEventLog)
-    .set({
-      processing_started_at: null,
-      last_error: params.error,
-    })
-    .where(
-      and(
-        eq(stripeConnectEventLog.stripe_account_id, params.stripeAccountId),
-        eq(stripeConnectEventLog.stripe_event_id, params.stripeEventId),
-        isNull(stripeConnectEventLog.handled_at),
-      ),
-    )
-    .returning({ stripe_event_id: stripeConnectEventLog.stripe_event_id });
-
-  if (updated.length === 0) {
-    log.warn(
-      { account: params.stripeAccountId, event_id: params.stripeEventId },
-      'markConnectEventFailed matched 0 rows - row missing or already handled',
+    throw new Error(
+      `Connect event ${params.stripeAccountId}/${params.stripeEventId} lost its transactional claim`,
     );
   }
 }
@@ -214,7 +201,23 @@ export async function handleConnectStripeWebhook(params: {
     return emptyResponse(200);
   }
 
-  const builderId = await resolveBuilderId(event.account);
+  let builderId: string | null;
+  try {
+    builderId = await resolveBuilderId(event.account);
+  } catch (error) {
+    log.error(
+      {
+        account: event.account,
+        event_id: event.id,
+        type: event.type,
+        error_type: error instanceof Error ? error.name : 'UnknownError',
+      },
+      'connect webhook builder lookup failed - retry',
+    );
+    return textResponse('builder lookup unavailable', 503, {
+      'Retry-After': String(CONNECT_WEBHOOK_RETRY_AFTER_SECONDS),
+    });
+  }
   if (!builderId) {
     log.info(
       { account: event.account, event_id: event.id },
@@ -223,37 +226,115 @@ export async function handleConnectStripeWebhook(params: {
     return emptyResponse(200);
   }
 
-  const claimResponse = await claimConnectEvent({
-    stripeAccountId: event.account,
-    stripeEventId: event.id,
-    type: event.type,
-    builderId,
-  });
-  if (claimResponse) return claimResponse;
-
+  let alertEffect: ConnectWebhookAlertEffect | null;
   try {
-    await dispatch(event, {
+    const transactionResult = await withRLS(
       builderId,
-      eventId: event.id,
-      eventCreated: event.created,
-    });
-    await markConnectEventHandled({
-      stripeAccountId: event.account,
-      stripeEventId: event.id,
-      builderId,
-    });
+      async (transaction) => {
+        const claimResponse = await claimConnectEvent({
+          stripeAccountId: event.account!,
+          stripeEventId: event.id,
+          type: event.type,
+          builderId,
+          transaction,
+        });
+        if (claimResponse) {
+          return { response: claimResponse, alertEffect: null };
+        }
+
+        let resolution: Awaited<
+          ReturnType<typeof getBuilderEntitlementForShare>
+        >;
+        try {
+          resolution = await getBuilderEntitlementForShare(
+            transaction,
+            builderId,
+          );
+        } catch (error) {
+          throw new ConnectWebhookEntitlementUnavailableError(
+            error instanceof Error ? error.name : undefined,
+          );
+        }
+        if (resolution === null || !resolution.ok) {
+          throw new ConnectWebhookEntitlementUnavailableError();
+        }
+        const entitlement = resolution.entitlement;
+        if (
+          entitlement.access_state === BuilderAccessState.CHECKOUT_REQUIRED ||
+          entitlement.access_state === BuilderAccessState.SUSPENDED
+        ) {
+          await markConnectEventHandled({
+            stripeAccountId: event.account!,
+            stripeEventId: event.id,
+            builderId,
+            transaction,
+          });
+          return { response: null, alertEffect: null };
+        }
+        if (!entitlement.has_product_access) {
+          throw new ConnectWebhookEntitlementUnavailableError();
+        }
+
+        const effect = await dispatch(
+          event,
+          {
+            builderId,
+            eventId: event.id,
+            eventCreated: event.created,
+          },
+          transaction,
+        );
+        await markConnectEventHandled({
+          stripeAccountId: event.account!,
+          stripeEventId: event.id,
+          builderId,
+          transaction,
+        });
+        return { response: null, alertEffect: effect };
+      },
+    );
+    if (transactionResult.response) return transactionResult.response;
+    alertEffect = transactionResult.alertEffect;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await markConnectEventFailed({
-      stripeAccountId: event.account,
-      stripeEventId: event.id,
-      error: message,
-    });
+    if (err instanceof ConnectWebhookEntitlementUnavailableError) {
+      log.error(
+        {
+          builder_id: builderId,
+          event_id: event.id,
+          type: event.type,
+          error_type: err.name,
+        },
+        'connect webhook entitlement fence failed before atomic commit - retry',
+      );
+      return textResponse('workspace entitlement unavailable', 503, {
+        'Retry-After': String(CONNECT_WEBHOOK_RETRY_AFTER_SECONDS),
+      });
+    }
     log.error(
       { builder_id: builderId, event_id: event.id, type: event.type, error: message },
       'handler threw',
     );
     return textResponse('handler error', 500);
+  }
+
+  if (alertEffect) {
+    try {
+      await deliverBuilderAlert({
+        builderId: alertEffect.builderId,
+        payload: alertEffect.payload,
+      });
+    } catch (error) {
+      log.error(
+        {
+          builder_id: alertEffect.builderId,
+          event_id: event.id,
+          type: event.type,
+          error_type: error instanceof Error ? error.name : 'UnknownError',
+        },
+        'post-commit Connect alert delivery threw; event remains terminal',
+      );
+    }
   }
 
   return emptyResponse(200);

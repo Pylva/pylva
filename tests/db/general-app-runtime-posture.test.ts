@@ -27,6 +27,7 @@ function healthyRow(
     ambient_access_ready: true,
     authority_access_denied: true,
     current_user_matches_login: true,
+    hosted_billing_access_valid: true,
     legacy_crud_available: true,
     login_direct_acl_safe: true,
     login_ownership_safe: true,
@@ -60,6 +61,7 @@ describe('general application runtime attestation evaluation', () => {
     ['login_ownership_safe', 'unsafe_login_ownership'],
     ['login_direct_acl_safe', 'unsafe_login_acl'],
     ['authority_access_denied', 'authority_access_exposed'],
+    ['hosted_billing_access_valid', 'hosted_billing_access_invalid'],
     ['schema_migrations_select_only', 'migration_ledger_access_invalid'],
     ['legacy_crud_available', 'legacy_access_missing'],
     ['ambient_access_ready', 'ambient_access_missing'],
@@ -92,7 +94,11 @@ describe('production general application posture', () => {
     expect(query).toContain('pylva_budget_authority_order_seq');
     expect(query).toContain('pylva_budget_projection_actionable_builders');
     expect(query).toContain('pylva_budget_expiry_actionable_builders');
+    expect(query).toContain('pylva_hosted_billing_discovery_owner');
+    expect(query).toContain('expected_hosted_runtime_column_acl');
+    expect(query).toContain('pylva_hosted_notification_candidates');
     expect(query).toContain('user_builder_memberships');
+    expect(query.match(/'monthly_invoice_periods'/gu)).toHaveLength(1);
     expect(query).toContain('SELECT pg_catalog.count(*) = 3');
     expect(query).toContain('FROM runtime_migrator');
     expect(query).toContain('complete_expected_runtime_relations');

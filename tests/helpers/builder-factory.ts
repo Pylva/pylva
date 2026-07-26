@@ -10,6 +10,14 @@
 import argon2 from 'argon2';
 import crypto from 'node:crypto';
 import postgres, { type Sql } from 'postgres';
+import {
+  BuilderAccessState,
+  EntitlementSource,
+  type BuilderAccessState as BuilderAccessStateValue,
+  BuilderPlan,
+  type EntitlementSource as EntitlementSourceValue,
+} from '@pylva/shared';
+import { env } from '../../src/lib/config.js';
 
 const DATABASE_URL =
   process.env['PYLVA_TEST_DATABASE_URL'] ??
@@ -26,7 +34,9 @@ export interface TestBuilder {
   id: string;
   email: string;
   slug: string;
-  tier: 'free' | 'pro' | 'scale' | 'enterprise';
+  plan: BuilderPlan | null;
+  accessState: BuilderAccessStateValue;
+  entitlementSource: EntitlementSourceValue | null;
 }
 
 export interface TestApiKey {
@@ -51,23 +61,49 @@ export function getSql(): Sql {
  * against the same DB without UNIQUE(email) collisions.
  */
 export async function createTestBuilder(
-  args: { tier?: TestBuilder['tier']; sql?: Sql } = {},
+  args: {
+    plan?: BuilderPlan | null;
+    accessState?: BuilderAccessStateValue;
+    entitlementSource?: EntitlementSourceValue | null;
+    sql?: Sql;
+  } = {},
 ): Promise<TestBuilder> {
   const sql = args.sql ?? getSql();
   const suffix = crypto.randomBytes(6).toString('hex');
   const email = `test-${suffix}@example.com`;
   const slug = `test-builder-${suffix}`;
-  const tier = args.tier ?? 'free';
+  const plan =
+    args.plan === undefined
+      ? env.PYLVA_DEPLOYMENT_MODE === 'hosted'
+        ? BuilderPlan.PRO
+        : null
+      : args.plan;
+  const accessState = args.accessState ?? BuilderAccessState.ACTIVE;
+  const entitlementSource =
+    args.entitlementSource !== undefined
+      ? args.entitlementSource
+      : accessState === BuilderAccessState.ACTIVE
+        ? plan === null
+          ? EntitlementSource.SELF_HOSTED
+          : EntitlementSource.ADMIN
+        : null;
 
   const [row] = await sql<{ id: string }[]>`
-    INSERT INTO builders (email, name, tier, slug)
-    VALUES (${email}, ${`Test Builder ${suffix}`}, ${tier}, ${slug})
+    INSERT INTO builders (email, name, tier, access_state, entitlement_source, slug)
+    VALUES (
+      ${email},
+      ${`Test Builder ${suffix}`},
+      ${plan},
+      ${accessState},
+      ${entitlementSource},
+      ${slug}
+    )
     RETURNING id
   `;
 
   if (!args.sql) await sql.end();
 
-  return { id: row!.id, email, slug, tier };
+  return { id: row!.id, email, slug, plan, accessState, entitlementSource };
 }
 
 /**

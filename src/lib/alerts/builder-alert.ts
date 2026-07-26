@@ -11,7 +11,12 @@
 // builders without an alert config have opted out.
 
 import { eq } from 'drizzle-orm';
-import type { AlertChannelEntry, AlertPayload, WebhookPayload } from '@pylva/shared';
+import type {
+  AlertChannelEntry,
+  AlertPayload,
+  DeliveryResult,
+  WebhookPayload,
+} from '@pylva/shared';
 import { withRLS } from '../db/rls.js';
 import { auditLog } from '../auth/audit-log.js';
 import { AuditAction } from '../audit/actions.js';
@@ -20,6 +25,11 @@ import { deliverEmail } from './channels/email.js';
 import { deliverSlack } from './channels/slack.js';
 import { deliverWebhook } from './channels/webhook.js';
 import { logger } from '../logger.js';
+import {
+  isAlertDeliveryAccessDeniedError,
+  requireAlertDeliveryAccess,
+  withAlertDeliveryAccessMutation,
+} from './entitlement-fence.js';
 
 const log = logger.child({ module: 'alerts.builder-alert' });
 
@@ -54,6 +64,12 @@ interface BuilderAlertRow {
   slack_webhook_url: string | null;
 }
 
+export type DeliverBuilderAlertOutcome =
+  | { kind: 'delivered' }
+  | { kind: 'access_denied' }
+  | { kind: 'skipped'; reason: 'no_config' | 'invalid_config' }
+  | { kind: 'failed'; error: string };
+
 /**
  * Dispatch a single event to the builder's configured alert channel. No
  * retry here beyond whatever the channel impl does internally (webhook has
@@ -62,7 +78,20 @@ interface BuilderAlertRow {
 export async function deliverBuilderAlert(params: {
   builderId: string;
   payload: WebhookPayload;
-}): Promise<void> {
+}): Promise<DeliverBuilderAlertOutcome> {
+  try {
+    await requireAlertDeliveryAccess(params.builderId);
+  } catch (error) {
+    if (isAlertDeliveryAccessDeniedError(error)) {
+      log.info(
+        { builder_id: params.builderId, event_type: params.payload.type },
+        'builder alert skipped without product access',
+      );
+      return { kind: 'access_denied' };
+    }
+    throw error;
+  }
+
   const configRow = await withRLS(params.builderId, async (tx) => {
     const rows = await tx
       .select({
@@ -79,23 +108,34 @@ export async function deliverBuilderAlert(params: {
   });
 
   if (!configRow || !configRow.enabled) {
-    await withRLS(params.builderId, async (tx) => {
-      await auditLog(tx, {
-        builder_id: params.builderId,
-        actor_type: 'system',
-        actor_id: 'stripe-webhook',
-        action: AuditAction.ALERT_SKIPPED_NO_CONFIG,
-        resource_type: 'builder_alert_config',
-        details: { event_type: params.payload.type },
+    try {
+      await withAlertDeliveryAccessMutation(params.builderId, async (tx) => {
+        await auditLog(tx, {
+          builder_id: params.builderId,
+          actor_type: 'system',
+          actor_id: 'stripe-webhook',
+          action: AuditAction.ALERT_SKIPPED_NO_CONFIG,
+          resource_type: 'builder_alert_config',
+          details: { event_type: params.payload.type },
+        });
       });
-    });
-    return;
+    } catch (error) {
+      if (isAlertDeliveryAccessDeniedError(error)) {
+        log.info(
+          { builder_id: params.builderId, event_type: params.payload.type },
+          'builder alert audit skipped after workspace access changed',
+        );
+        return { kind: 'access_denied' };
+      }
+      throw error;
+    }
+    return { kind: 'skipped', reason: 'no_config' };
   }
 
   const entry = buildEntry(params.builderId, configRow as BuilderAlertRow);
   if (!entry) {
     log.warn({ builder_id: params.builderId }, 'builder_alert_config row has no usable target');
-    return;
+    return { kind: 'skipped', reason: 'invalid_config' };
   }
 
   const alertPayload: AlertPayload = {
@@ -107,18 +147,37 @@ export async function deliverBuilderAlert(params: {
 
   const ctx = { builder_id: params.builderId, rule_id: alertPayload.rule_id };
   try {
+    let result: DeliveryResult;
     switch (entry.channel) {
       case 'webhook':
-        await deliverWebhook([alertPayload], entry, ctx);
+        result = await deliverWebhook([alertPayload], entry, ctx);
         break;
       case 'email':
-        await deliverEmail([alertPayload], entry, ctx);
+        result = await deliverEmail([alertPayload], entry, ctx);
         break;
       case 'slack':
-        await deliverSlack([alertPayload], entry, ctx);
+        result = await deliverSlack([alertPayload], entry, ctx);
         break;
     }
+    if (!result.ok) {
+      return {
+        kind: 'failed',
+        error: result.last_error ?? `${entry.channel} delivery failed`,
+      };
+    }
+
+    // Channel attempts hold the authoritative lifecycle lock through their
+    // external side effect. A successful result therefore means this delivery
+    // linearized before any concurrent suspension and may be counted.
+    return { kind: 'delivered' };
   } catch (err) {
+    if (isAlertDeliveryAccessDeniedError(err)) {
+      log.info(
+        { builder_id: params.builderId, channel: entry.channel },
+        'builder alert stopped by workspace lifecycle fence',
+      );
+      return { kind: 'access_denied' };
+    }
     // Channel impl bug: log + swallow. Stripe webhook must still 200 so it
     // doesn't retry — our status-update side-effect is what matters.
     const message = err instanceof Error ? err.message : String(err);
@@ -126,5 +185,6 @@ export async function deliverBuilderAlert(params: {
       { builder_id: params.builderId, channel: entry.channel, error: message },
       'builder alert dispatch threw',
     );
+    return { kind: 'failed', error: message };
   }
 }

@@ -44,6 +44,7 @@ vi.mock('@anthropic-ai/sdk/resources/messages', () => esmResources.anthropic);
 vi.mock('../src/core/rules_cache.js', () => ({
   ensureRulesCache: vi.fn(async () => {}),
   getCachedRules: () => [],
+  getRulesForEvaluation: () => [],
   isPassthrough: () => false,
 }));
 

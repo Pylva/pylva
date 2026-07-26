@@ -57,7 +57,15 @@ describe('middleware login redirects for /o/{slug} pages', () => {
 
   it('redirects sessions without a userId to the configured origin', async () => {
     authMocks.withJwtAuth.mockResolvedValue({
-      context: { builderId: 'b-1', userId: null, role: 'owner', tier: 'free', jti: 'j-1' },
+      context: {
+        builderId: 'b-1',
+        userId: null,
+        role: 'owner',
+        plan: 'pro',
+        accessState: 'active',
+        tier: 'pro',
+        jti: 'j-1',
+      },
       refreshToken: null,
     });
 

@@ -76,17 +76,17 @@ describe('B4 kill switches', () => {
     expect(env['ENABLE_PORTAL_CUSTOM_DOMAINS']).toBe(false);
   });
 
-  it('defaults event-cap enforcement off for self-host', async () => {
-    const env = await loadConfigFresh();
-
-    expect(env['ENABLE_EVENT_LIMITS']).toBe(false);
-  });
-
-  it('can enable event-cap enforcement independently', async () => {
-    process.env['ENABLE_EVENT_LIMITS'] = 'true';
-
+  it('defaults event-cap enforcement on for the explicit self-host policy', async () => {
     const env = await loadConfigFresh();
 
     expect(env['ENABLE_EVENT_LIMITS']).toBe(true);
+  });
+
+  it('can disable event-cap enforcement as an explicit operational override', async () => {
+    process.env['ENABLE_EVENT_LIMITS'] = 'false';
+
+    const env = await loadConfigFresh();
+
+    expect(env['ENABLE_EVENT_LIMITS']).toBe(false);
   });
 });

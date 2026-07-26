@@ -11,7 +11,7 @@ import { and, eq } from 'drizzle-orm';
 import { readDashboardHeaders } from '@/lib/dashboard/headers';
 import { withRLS } from '@/lib/db/rls';
 import { invoices } from '@/lib/db/schema';
-import type { InvoiceLineItem } from '@pylva/shared';
+import { hasProductAccess, type InvoiceLineItem } from '@pylva/shared';
 import { notFound } from 'next/navigation';
 import { formatUsd } from '@/lib/formatting';
 import { UnpricedBanner } from '@/components/billing/UnpricedBanner';
@@ -26,6 +26,7 @@ import {
 } from '@/components/ui/table';
 import { isUuid } from '@/lib/validation/uuid';
 import { DashboardActionButton } from '@/components/dashboard/DashboardActionButton';
+import { loadBuilderEntitlement } from '@/lib/auth/builder-entitlement';
 
 export const metadata: Metadata = { title: 'Invoice' };
 
@@ -39,6 +40,12 @@ export default async function InvoiceDetailPage({
 
   const { builderId, role } = await readDashboardHeaders();
   const isOwner = role === 'owner';
+  const entitlement = await loadBuilderEntitlement(builderId);
+  const canMutate =
+    isOwner &&
+    entitlement.kind === 'resolved' &&
+    entitlement.resolution.ok &&
+    hasProductAccess(entitlement.resolution);
 
   const row = await withRLS(builderId, async (tx) => {
     const rows = await tx
@@ -69,14 +76,14 @@ export default async function InvoiceDetailPage({
           </p>
         </div>
         <div className="flex gap-2">
-          {row.status === 'draft' && isOwner ? (
+          {row.status === 'draft' && canMutate ? (
             <DashboardActionButton
               endpoint={`/api/v1/billing/invoices/${row.id}/finalize`}
               label="Finalize"
               className="rounded-md bg-[color:var(--primary)] px-4 py-2 text-sm text-[color:var(--primary-foreground)]"
             />
           ) : null}
-          {['draft', 'pending'].includes(row.status) && isOwner ? (
+          {['draft', 'pending'].includes(row.status) && canMutate ? (
             <DashboardActionButton
               endpoint={`/api/v1/billing/invoices/${row.id}/void`}
               label="Void"

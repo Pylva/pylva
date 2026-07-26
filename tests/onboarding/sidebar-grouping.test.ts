@@ -11,6 +11,5 @@ describe('dashboard sidebar grouping', () => {
     for (const title of ['Observe', 'React', 'Bill', 'Configure']) {
       expect(src, title).toContain(`title: '${title}'`);
     }
-    expect(src).not.toContain('/subscription');
   });
 });

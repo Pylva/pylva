@@ -38,7 +38,13 @@ import { invalidateMembershipCache, resolveSlugForUserCached } from '@/lib/auth/
 
 const INPUT = { slug: 'acme', userId: 'user-1' };
 const KEY = 'membership:user-1:acme';
-const CTX = { builderId: 'b-1', role: 'owner', tier: 'pro' };
+const CTX = {
+  builderId: 'b-1',
+  role: 'owner',
+  plan: 'pro',
+  accessState: 'active',
+  entitlementSource: 'stripe',
+};
 
 beforeEach(() => {
   redisMock.get.mockReset();
@@ -53,6 +59,27 @@ describe('resolveSlugForUserCached', () => {
     const result = await resolveSlugForUserCached(INPUT);
     expect(result).toEqual(CTX);
     expect(redisMock.get).toHaveBeenCalledWith(KEY);
+    expect(resolveSlugForUserMock).not.toHaveBeenCalled();
+  });
+
+  it('normalizes a cached old-writer legacy Free tuple before returning it', async () => {
+    redisMock.get.mockResolvedValue(
+      JSON.stringify({
+        builderId: 'b-legacy',
+        role: 'owner',
+        plan: 'free',
+        accessState: null,
+        entitlementSource: null,
+      }),
+    );
+
+    await expect(resolveSlugForUserCached(INPUT)).resolves.toEqual({
+      builderId: 'b-legacy',
+      role: 'owner',
+      plan: null,
+      accessState: 'checkout_required',
+      entitlementSource: null,
+    });
     expect(resolveSlugForUserMock).not.toHaveBeenCalled();
   });
 
@@ -102,6 +129,22 @@ describe('resolveSlugForUserCached', () => {
     resolveSlugForUserMock.mockResolvedValue(CTX);
     const result = await resolveSlugForUserCached(INPUT);
     expect(result).toEqual(CTX);
+    expect(resolveSlugForUserMock).toHaveBeenCalledOnce();
+  });
+
+  it('treats every non-legacy invalid entitlement tuple as a cache miss', async () => {
+    redisMock.get.mockResolvedValue(
+      JSON.stringify({
+        ...CTX,
+        plan: 'pro',
+        accessState: 'suspended',
+        entitlementSource: 'stripe',
+      }),
+    );
+    redisMock.set.mockResolvedValue('OK');
+    resolveSlugForUserMock.mockResolvedValue(CTX);
+
+    await expect(resolveSlugForUserCached(INPUT)).resolves.toEqual(CTX);
     expect(resolveSlugForUserMock).toHaveBeenCalledOnce();
   });
 });

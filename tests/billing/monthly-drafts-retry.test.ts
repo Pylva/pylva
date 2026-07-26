@@ -50,7 +50,10 @@ beforeEach(() => {
   pendingPeriods = [junePeriod];
   mocks.dbExecute.mockImplementation((query: unknown) => {
     const text = queryText(query);
-    if (text.includes('SELECT builder_id') && text.includes('FROM monthly_invoice_periods')) {
+    if (
+      text.includes('pending_period.builder_id') &&
+      text.includes('FROM monthly_invoice_periods')
+    ) {
       return Promise.resolve(pendingPeriods);
     }
     if (text.includes('UPDATE monthly_invoice_periods') && text.includes('completed')) {
@@ -79,10 +82,42 @@ describe('generateMonthlyDrafts projection retries', () => {
     );
 
     expect(enqueueQuery).toContain('DISTINCT period_pricing.builder_id');
+    expect(enqueueQuery).toContain('INNER JOIN builders');
+    expect(enqueueQuery).toContain("period_builder.access_state = 'active'");
     expect(enqueueQuery).toContain("period_pricing.billing_period = 'monthly'");
     expect(enqueueQuery).toContain('period_pricing.effective_from <');
     expect(enqueueQuery).toContain('period_pricing.effective_to >');
     expect(enqueueQuery).not.toContain('active_pricing.effective_to IS NULL');
+  });
+
+  it('retains a pending period when access is revoked after the active scan', async () => {
+    mocks.generateInvoice.mockRejectedValueOnce(
+      new BillingError('workspace_access_unavailable', 'Workspace product access is unavailable'),
+    );
+
+    const result = await generateMonthlyDrafts({
+      now: new Date('2026-07-01T04:00:00.000Z'),
+    });
+
+    expect(result).toMatchObject({
+      scanned_builders: 1,
+      generated: 0,
+      skipped_workspace_access: 1,
+    });
+    expect(pendingPeriods).toEqual([junePeriod]);
+    const queries = mocks.dbExecute.mock.calls.map(([query]) => queryText(query));
+    expect(
+      queries.some(
+        (query) =>
+          query.includes('UPDATE monthly_invoice_periods') && query.includes('attempts + 1'),
+      ),
+    ).toBe(false);
+    expect(
+      queries.some(
+        (query) =>
+          query.includes('UPDATE monthly_invoice_periods') && query.includes("'completed'"),
+      ),
+    ).toBe(false);
   });
 
   it('keeps retrying a queued period after the next month boundary', async () => {

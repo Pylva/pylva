@@ -31,6 +31,8 @@ import {
   AUTHORITATIVE_BUDGET_WIDE_NUMERIC_COLUMNS,
   GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION,
   MONTHLY_INVOICE_PERIOD_RETRY_MIGRATION,
+  REMOVE_FREE_PLAN_CONTRACT_MIGRATION,
+  WORKSPACE_ACCESS_STATE_EXPAND_MIGRATION,
   parseVerifyPhysicalSchemaArgs,
   physicalSchemaResultJson,
   scopeValuesFromConstraintDefinition,
@@ -206,6 +208,18 @@ const authoritativeLedgerMigrations = [
     content: '',
     filename: MONTHLY_INVOICE_PERIOD_RETRY_MIGRATION,
     phase: 'pre_roll' as const,
+  },
+  {
+    checksum: 'workspace-access-state-expand-checksum',
+    content: '',
+    filename: WORKSPACE_ACCESS_STATE_EXPAND_MIGRATION,
+    phase: 'pre_roll' as const,
+  },
+  {
+    checksum: 'remove-free-plan-contract-checksum',
+    content: '',
+    filename: REMOVE_FREE_PLAN_CONTRACT_MIGRATION,
+    phase: 'post_roll' as const,
   },
 ];
 
@@ -603,7 +617,7 @@ describe('physical authoritative budget-ledger schema contract', () => {
   });
 
   it('passes an exact physical schema and serializes deterministically', async () => {
-    expect(AUTHORITATIVE_BUDGET_SCHEMA_HEAD).toBe(MONTHLY_INVOICE_PERIOD_RETRY_MIGRATION);
+    expect(AUTHORITATIVE_BUDGET_SCHEMA_HEAD).toBe(REMOVE_FREE_PLAN_CONTRACT_MIGRATION);
     expect(AUTHORITATIVE_BUDGET_MIGRATIONS).toEqual([
       AUTHORITATIVE_BUDGET_LEDGER_MIGRATION,
       AUTHORITATIVE_BUDGET_RUNTIME_MIGRATION,
@@ -773,7 +787,7 @@ describe('physical authoritative budget-ledger schema contract', () => {
         {
           checksum: 'future-checksum',
           content: '',
-          filename: '056_unreviewed_schema_head.sql',
+          filename: '060_unreviewed_schema_head.sql',
           phase: 'pre_roll' as const,
         },
       ],
@@ -788,7 +802,7 @@ describe('physical authoritative budget-ledger schema contract', () => {
     });
     expect(headDrift.ok).toBe(false);
     expect(headDrift.schema_head).toEqual({
-      actual: '056_unreviewed_schema_head.sql',
+      actual: '060_unreviewed_schema_head.sql',
       expected: AUTHORITATIVE_BUDGET_SCHEMA_HEAD,
       matches: false,
     });

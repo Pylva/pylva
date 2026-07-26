@@ -1,5 +1,5 @@
-// Database seed — full test environment
-// Decision #24: 3 builders (free/pro/scale), multiple API keys, 10+ customers
+// Database seed — full self-hosted test environment
+// Decision #24: 3 builders, multiple API keys, 10+ customers
 // Usage: pnpm db:seed
 
 import fs from 'node:fs';
@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
 import argon2 from 'argon2';
 import { createClient } from '@clickhouse/client';
+import { BuilderAccessState, EntitlementSource } from '@pylva/shared';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDirectExecution =
@@ -29,9 +30,7 @@ interface SeedKey {
   hash: string;
 }
 
-export function assertSafeSeedEnvironment(
-  environment: Record<string, string | undefined>,
-): void {
+export function assertSafeSeedEnvironment(environment: Record<string, string | undefined>): void {
   if (environment['NODE_ENV'] === 'production') {
     throw new Error('Refusing to seed a production database');
   }
@@ -80,26 +79,50 @@ async function seed() {
   // --- Builders ---
   console.log('Creating builders...');
   const [builderA] = await sql`
-    INSERT INTO builders (email, name, tier, slug)
-    VALUES ('alice@example.com', 'Alice (Free)', 'free', 'alice-free')
-    ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, tier = EXCLUDED.tier, slug = EXCLUDED.slug
+    INSERT INTO builders (email, name, tier, access_state, entitlement_source, slug)
+    VALUES (
+      'alice@example.com',
+      'Alice',
+      NULL,
+      ${BuilderAccessState.ACTIVE},
+      ${EntitlementSource.SELF_HOSTED},
+      'alice-self-hosted'
+    )
+    ON CONFLICT (email) DO UPDATE SET
+      name = COALESCE(builders.name, EXCLUDED.name)
     RETURNING id
   `;
   const [builderB] = await sql`
-    INSERT INTO builders (email, name, tier, slug)
-    VALUES ('bob@example.com', 'Bob (Pro)', 'pro', 'bob-pro')
-    ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, tier = EXCLUDED.tier, slug = EXCLUDED.slug
+    INSERT INTO builders (email, name, tier, access_state, entitlement_source, slug)
+    VALUES (
+      'bob@example.com',
+      'Bob',
+      NULL,
+      ${BuilderAccessState.ACTIVE},
+      ${EntitlementSource.SELF_HOSTED},
+      'bob-self-hosted'
+    )
+    ON CONFLICT (email) DO UPDATE SET
+      name = COALESCE(builders.name, EXCLUDED.name)
     RETURNING id
   `;
   const [builderC] = await sql`
-    INSERT INTO builders (email, name, tier, slug)
-    VALUES ('carol@example.com', 'Carol (Scale)', 'scale', 'carol-scale')
-    ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, tier = EXCLUDED.tier, slug = EXCLUDED.slug
+    INSERT INTO builders (email, name, tier, access_state, entitlement_source, slug)
+    VALUES (
+      'carol@example.com',
+      'Carol',
+      NULL,
+      ${BuilderAccessState.ACTIVE},
+      ${EntitlementSource.SELF_HOSTED},
+      'carol-self-hosted'
+    )
+    ON CONFLICT (email) DO UPDATE SET
+      name = COALESCE(builders.name, EXCLUDED.name)
     RETURNING id
   `;
-  console.log(`  ✓ Builder A (free): ${builderA!.id}`);
-  console.log(`  ✓ Builder B (pro):  ${builderB!.id}`);
-  console.log(`  ✓ Builder C (scale): ${builderC!.id}\n`);
+  console.log(`  ✓ Builder A (self-hosted): ${builderA!.id}`);
+  console.log(`  ✓ Builder B (self-hosted): ${builderB!.id}`);
+  console.log(`  ✓ Builder C (self-hosted): ${builderC!.id}\n`);
 
   // --- Users + Owner Memberships ---
   console.log('Creating builder owners...');
@@ -160,17 +183,17 @@ async function seed() {
   console.log('Creating customers...');
   const customerIds: string[] = [];
   const allCustomers = [
-    // Builder A: 3 customers (free tier limit = 10)
+    // Builder A: 3 customers
     { builder_id: builderA!.id, external_id: 'cust_1', name: 'Customer 1' },
     { builder_id: builderA!.id, external_id: 'cust_2', name: 'Customer 2' },
     { builder_id: builderA!.id, external_id: 'cust_3', name: 'Customer 3' },
-    // Builder B: 5 customers (pro tier limit = 50)
+    // Builder B: 5 customers
     { builder_id: builderB!.id, external_id: 'cust_4', name: 'Customer 4' },
     { builder_id: builderB!.id, external_id: 'cust_5', name: 'Customer 5' },
     { builder_id: builderB!.id, external_id: 'cust_6', name: 'Customer 6' },
     { builder_id: builderB!.id, external_id: 'cust_7', name: 'Customer 7' },
     { builder_id: builderB!.id, external_id: 'cust_8', name: 'Customer 8' },
-    // Builder C: 10 customers (scale tier limit = 500)
+    // Builder C: 10 customers
     { builder_id: builderC!.id, external_id: 'cust_9', name: 'Customer 9' },
     { builder_id: builderC!.id, external_id: 'cust_10', name: 'Customer 10' },
     { builder_id: builderC!.id, external_id: 'cust_11', name: 'Customer 11' },

@@ -13,6 +13,7 @@ import { and, desc, eq, gte, lt } from 'drizzle-orm';
 import { Role, type Role as RoleType, ErrorCode } from '@pylva/shared';
 import { readBuilderContextFromDashboard } from '@/lib/auth/builder-context';
 import { withRole } from '@/lib/auth/middleware';
+import { checkDashboardCapabilityGate } from '@/lib/auth/dashboard-feature-gate';
 import { checkBuilderFeatureGate } from '@/lib/auth/tier-enforcement';
 import { withRLS } from '@/lib/db/rls';
 import { invoices } from '@/lib/db/schema';
@@ -33,8 +34,8 @@ const GenerateBody = v.object({
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const ctx = readBuilderContextFromDashboard(request);
   if (ctx instanceof NextResponse) return ctx;
-  const tierGate = await checkBuilderFeatureGate(ctx.builderId, 'billing');
-  if (tierGate) return tierGate;
+  const capabilityGate = await checkDashboardCapabilityGate(ctx.builderId, 'invoices');
+  if (capabilityGate) return capabilityGate;
 
   const url = new URL(request.url);
   const customerId = url.searchParams.get('customer_id');

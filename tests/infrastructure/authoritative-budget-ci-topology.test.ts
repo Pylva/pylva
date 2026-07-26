@@ -9,7 +9,7 @@ const workflowDir = path.join(repoRoot, '.github/workflows');
 
 const BOOTSTRAP_COMMAND =
   'pnpm exec tsx scripts/ci/bootstrap-authoritative-budget-migration-role.ts';
-const DB_SETUP_COMMAND = 'pnpm db:setup';
+const DB_SETUP_COMMAND = 'pnpm db:setup --fresh-install';
 const GENERAL_APP_PROVISION_COMMAND = 'pnpm exec tsx scripts/ci/provision-general-app-runtime.ts';
 const RUNTIME_PROVISION_COMMAND =
   'pnpm exec tsx scripts/ci/provision-authoritative-budget-runtime.ts';
@@ -161,6 +161,10 @@ describe('authoritative budget-control CI topology', () => {
       expect(installIndex, `${file}:${job} installs before bootstrap`).toBeGreaterThanOrEqual(0);
       expect(bootstrapIndex, `${file}:${job} contains bootstrap`).toBeGreaterThan(installIndex);
       expect(dbSetupIndex, `${file}:${job} contains db:setup`).toBeGreaterThan(bootstrapIndex);
+      expect(
+        dbSetupStep,
+        `${file}:${job} uses the exact authorized fresh-install command`,
+      ).toMatch(/^\s+run:\s+pnpm db:setup --fresh-install\s*$/mu);
       expect(
         occurrences(bootstrapStep, `CI_POSTGRES_ADMIN_URL: ${CI_POSTGRES_ADMIN_URL}`),
         `${file}:${job} gives only the bootstrap its CI admin URL`,

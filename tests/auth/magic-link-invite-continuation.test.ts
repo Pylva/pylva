@@ -3,8 +3,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   redisSet: vi.fn(),
   sendCommand: vi.fn(),
+  insert: vi.fn(),
+  insertOnConflictDoNothing: vi.fn(),
+  insertReturning: vi.fn(),
+  insertValues: vi.fn(),
   select: vi.fn(),
+  selectLimit: vi.fn(),
   update: vi.fn(),
+  updateSet: vi.fn(),
+  updateWhere: vi.fn(),
 }));
 
 vi.mock('@/lib/config', () => ({ env: { MAGIC_LINK_TTL_SECONDS: 900 } }));
@@ -15,7 +22,7 @@ vi.mock('@/lib/db/schema', () => ({
   users: { id: 'id', email: 'email', auth_provider: 'auth_provider' },
 }));
 vi.mock('@/lib/db/client', () => ({
-  db: { select: mocks.select, update: mocks.update },
+  db: { insert: mocks.insert, select: mocks.select, update: mocks.update },
 }));
 vi.mock('drizzle-orm', () => ({ eq: vi.fn(() => 'predicate') }));
 
@@ -27,14 +34,26 @@ describe('magic-link pending invite continuation', () => {
     const selectChain = {
       from: vi.fn(),
       where: vi.fn(),
-      limit: vi.fn(async () => [{ id: 'user-1', auth_provider: 'magic_link' }]),
+      limit: mocks.selectLimit,
     };
     selectChain.from.mockReturnValue(selectChain);
     selectChain.where.mockReturnValue(selectChain);
     mocks.select.mockReturnValue(selectChain);
+    mocks.selectLimit.mockResolvedValue([{ id: 'user-1', auth_provider: 'magic_link' }]);
 
-    const updateChain = { set: vi.fn(), where: vi.fn(async () => undefined) };
-    updateChain.set.mockReturnValue(updateChain);
+    const insertChain = {
+      values: mocks.insertValues,
+      onConflictDoNothing: mocks.insertOnConflictDoNothing,
+      returning: mocks.insertReturning,
+    };
+    mocks.insertValues.mockReturnValue(insertChain);
+    mocks.insertOnConflictDoNothing.mockReturnValue(insertChain);
+    mocks.insertReturning.mockResolvedValue([{ id: 'new-user' }]);
+    mocks.insert.mockReturnValue(insertChain);
+
+    const updateChain = { set: mocks.updateSet, where: mocks.updateWhere };
+    mocks.updateSet.mockReturnValue(updateChain);
+    mocks.updateWhere.mockResolvedValue(undefined);
     mocks.update.mockReturnValue(updateChain);
     mocks.redisSet.mockResolvedValue('OK');
   });
@@ -70,6 +89,28 @@ describe('magic-link pending invite continuation', () => {
 
     await expect(consumeMagicToken('magic-token')).resolves.toEqual(
       expect.objectContaining({ pendingInviteToken: null }),
+    );
+  });
+
+  it('re-reads a concurrent duplicate-email winner and merges its OAuth provider', async () => {
+    mocks.selectLimit
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: 'raced-user', auth_provider: 'oauth_github' }]);
+    mocks.insertReturning.mockResolvedValueOnce([]);
+    mocks.sendCommand.mockResolvedValue(
+      JSON.stringify({ email: 'invitee@example.com' }),
+    );
+
+    await expect(consumeMagicToken('magic-token')).resolves.toEqual({
+      userId: 'raced-user',
+      email: 'invitee@example.com',
+      isNewUser: false,
+      next: null,
+      pendingInviteToken: null,
+    });
+    expect(mocks.insertOnConflictDoNothing).toHaveBeenCalledWith({ target: 'email' });
+    expect(mocks.updateSet).toHaveBeenCalledWith(
+      expect.objectContaining({ auth_provider: 'mixed' }),
     );
   });
 });

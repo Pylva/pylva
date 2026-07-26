@@ -8,9 +8,9 @@ import { AuthenticatedRoute, coreRuntime } from '../internal/core-runtime-state.
 
 // PR #70 follow-up — 60s per remaining-implementation-plan.md O25
 // (was 300s; plan tightened to keep newly-activated rules reaching
-// SDKs in &lt;1 min). Stale-serve semantics unchanged: on fetch error
-// past TTL we keep the last successful rules array and flip
-// passthrough=true so the engine fails open.
+// SDKs in &lt;1 min). A failed refresh may retain the last successful
+// array for diagnostics/recovery, but passthrough=true prevents that stale
+// snapshot from affecting routing, failover, or budget decisions.
 const RULES_CACHE_TTL_MS = 60 * 1000;
 
 interface RulesCacheState {
@@ -29,6 +29,10 @@ export async function ensureRulesCache(): Promise<void> {
   const now = Date.now();
   const age = now - state.fetchedAt;
   if (age < RULES_CACHE_TTL_MS && !state.passthrough) return;
+  // Never evaluate an expired snapshot while its refresh is in flight. The
+  // wrapper intentionally does not await this refresh, so this assignment
+  // must happen before refresh() reaches its first await.
+  if (age >= RULES_CACHE_TTL_MS) state.passthrough = true;
   if (inFlight) return inFlight;
   const owner = cacheEpoch;
   const promise = refresh(now, age, owner);
@@ -51,6 +55,12 @@ async function refresh(now: number, age: number, owner: number): Promise<void> {
     });
     if (owner !== cacheEpoch) return;
     if (!res.ok) {
+      // Authentication/authorization failures are definitive for the current
+      // SDK identity. A suspended workspace must not keep applying routing or
+      // failover rules that were warmed while it was active.
+      if (res.status === 401 || res.status === 403) {
+        state.rules = [];
+      }
       if (!warnedPassthrough)
         console.warn('[pylva] rules cache stale — backend returned non-ok; passthrough mode');
       warnedPassthrough = true;
@@ -104,6 +114,16 @@ export function isPassthrough(): boolean {
 
 export function getCachedRules(): unknown[] {
   return state.rules;
+}
+
+/**
+ * Rules that may affect a provider call right now. Degraded/restricted cache
+ * states retain transient stale data only for a future successful refresh;
+ * they never expose it to routing, failover, or budget evaluation.
+ */
+export function getRulesForEvaluation(): unknown[] {
+  const stale = Date.now() - state.fetchedAt >= RULES_CACHE_TTL_MS;
+  return state.passthrough || stale ? [] : state.rules;
 }
 
 export function _resetRulesCacheForTests(): void {

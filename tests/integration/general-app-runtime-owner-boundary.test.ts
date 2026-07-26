@@ -114,7 +114,13 @@ suite('general-app runtime owner boundary (real PostgreSQL login)', () => {
       displayName: `General Owner ${suffix}`,
       avatarUrl: null,
     });
-    expect(created).toMatchObject({ isNew: true, role: 'owner', tier: 'free' });
+    expect(created).toMatchObject({
+      isNew: true,
+      role: 'owner',
+      plan: null,
+      accessState: 'active',
+      entitlementSource: 'self_hosted',
+    });
     builderId = created.builderId;
     slug = created.slug;
 
@@ -129,7 +135,9 @@ suite('general-app runtime owner boundary (real PostgreSQL login)', () => {
     await expect(resolveSlugForUser({ slug, userId })).resolves.toMatchObject({
       builderId,
       role: 'owner',
-      tier: 'free',
+      plan: null,
+      accessState: 'active',
+      entitlementSource: 'self_hosted',
     });
   });
 
@@ -162,7 +170,7 @@ suite('general-app runtime owner boundary (real PostgreSQL login)', () => {
 
   it('reads SELECT-only schema status while direct authority access remains denied', async () => {
     await expect(getSchemaStatus(sql)).resolves.toMatchObject({
-      applied_head: '055_monthly_invoice_period_retry.sql',
+      applied_head: '058_remove_free_plan_contract.sql',
       pending_count: 0,
       state: 'in_sync',
     });

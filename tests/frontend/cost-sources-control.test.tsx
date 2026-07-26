@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { CostSourceTrackingStatus, CostSourceType, type PricingTier } from '@pylva/shared';
 import {
   CostSourcesControlTable,
@@ -97,7 +97,9 @@ describe('<CostSourcesControlTable>', () => {
     const { rerender } = render(<CostSourcesControlTable slug="acme" sources={rows} canMutate />);
 
     const ignoreButtons = screen.getAllByRole('button', { name: 'Ignore' });
-    fireEvent.click(ignoreButtons[0]!);
+    await act(async () => {
+      fireEvent.click(ignoreButtons[0]!);
+    });
 
     await waitFor(() =>
       expect(fetchSpy).toHaveBeenCalledWith(
@@ -113,8 +115,12 @@ describe('<CostSourcesControlTable>', () => {
     expect(tavilyRow).not.toBeNull();
     expect(within(tavilyRow!).getByText('⊘ Unpriced/uncontrolled')).toBeInTheDocument();
 
-    rerender(<CostSourcesControlTable slug="acme" sources={rows} canMutate={false} />);
-    expect(screen.queryByRole('button', { name: 'Ignore' })).not.toBeInTheDocument();
+    await act(async () => {
+      rerender(<CostSourcesControlTable slug="acme" sources={rows} canMutate={false} />);
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Ignore' })).not.toBeInTheDocument(),
+    );
   });
 });
 

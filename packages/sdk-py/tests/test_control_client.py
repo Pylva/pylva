@@ -369,6 +369,7 @@ def test_sync_readiness_caches_headers_timeout_and_uses_no_asyncio_run(
     assert len(router.requests) == 1
     request = router.requests[0]
     assert request.headers["X-Pylva-Key"] == KEY_A
+    assert request.headers["X-Pylva-Contract-Version"] == "2"
     assert request.headers["X-Pylva-SDK-Version"] == pylva.__version__
     assert request.headers["X-Pylva-SDK-Language"] == "python"
     assert timeouts == [0.321]

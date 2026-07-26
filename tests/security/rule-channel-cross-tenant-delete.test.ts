@@ -21,9 +21,9 @@ const DATABASE_URL =
 let sql: ReturnType<typeof postgres>;
 let attackerBuilderId = '';
 let victimBuilderId = '';
-let freeBuilderId = '';
+let otherBuilderId = '';
 let attackerUserId = '';
-let freeUserId = '';
+let otherUserId = '';
 let attackerWebhookConfigId = '';
 let victimWebhookConfigId = '';
 
@@ -112,28 +112,49 @@ beforeAll(async () => {
   sql = postgres(DATABASE_URL);
 
   const [attacker] = await sql<{ id: string }[]>`
-    INSERT INTO builders (email, name, tier, slug)
-    VALUES (${`rac-attacker-${suffix}@test.com`}, 'Attacker A', 'pro', ${`rac-attacker-${suffix}`})
+    INSERT INTO builders (email, name, tier, access_state, entitlement_source, slug)
+    VALUES (
+      ${`rac-attacker-${suffix}@test.com`},
+      'Attacker A',
+      'pro',
+      'active',
+      'admin',
+      ${`rac-attacker-${suffix}`}
+    )
     RETURNING id
   `;
   attackerBuilderId = attacker!.id;
   builderIdsToCleanup.push(attackerBuilderId);
 
   const [victim] = await sql<{ id: string }[]>`
-    INSERT INTO builders (email, name, tier, slug)
-    VALUES (${`rac-victim-${suffix}@test.com`}, 'Victim B', 'pro', ${`rac-victim-${suffix}`})
+    INSERT INTO builders (email, name, tier, access_state, entitlement_source, slug)
+    VALUES (
+      ${`rac-victim-${suffix}@test.com`},
+      'Victim B',
+      'pro',
+      'active',
+      'admin',
+      ${`rac-victim-${suffix}`}
+    )
     RETURNING id
   `;
   victimBuilderId = victim!.id;
   builderIdsToCleanup.push(victimBuilderId);
 
-  const [freeBuilder] = await sql<{ id: string }[]>`
-    INSERT INTO builders (email, name, tier, slug)
-    VALUES (${`rac-free-${suffix}@test.com`}, 'Free C', 'free', ${`rac-free-${suffix}`})
+  const [otherBuilder] = await sql<{ id: string }[]>`
+    INSERT INTO builders (email, name, tier, access_state, entitlement_source, slug)
+    VALUES (
+      ${`rac-other-${suffix}@test.com`},
+      'Other C',
+      'pro',
+      'active',
+      'admin',
+      ${`rac-other-${suffix}`}
+    )
     RETURNING id
   `;
-  freeBuilderId = freeBuilder!.id;
-  builderIdsToCleanup.push(freeBuilderId);
+  otherBuilderId = otherBuilder!.id;
+  builderIdsToCleanup.push(otherBuilderId);
 
   const [user] = await sql<{ id: string }[]>`
     INSERT INTO users (email, auth_provider)
@@ -143,13 +164,13 @@ beforeAll(async () => {
   attackerUserId = user!.id;
   userIdsToCleanup.push(attackerUserId);
 
-  const [freeUser] = await sql<{ id: string }[]>`
+  const [otherUser] = await sql<{ id: string }[]>`
     INSERT INTO users (email, auth_provider)
-    VALUES (${`rac-free-user-${suffix}@test.com`}, 'magic_link')
+    VALUES (${`rac-other-user-${suffix}@test.com`}, 'magic_link')
     RETURNING id
   `;
-  freeUserId = freeUser!.id;
-  userIdsToCleanup.push(freeUserId);
+  otherUserId = otherUser!.id;
+  userIdsToCleanup.push(otherUserId);
 
   await sql`
     INSERT INTO user_builder_memberships (user_id, builder_id, role)
@@ -157,7 +178,7 @@ beforeAll(async () => {
   `;
   await sql`
     INSERT INTO user_builder_memberships (user_id, builder_id, role)
-    VALUES (${freeUserId}, ${freeBuilderId}, 'owner')
+    VALUES (${otherUserId}, ${otherBuilderId}, 'owner')
   `;
 
   attackerWebhookConfigId = await insertWebhookConfig(attackerBuilderId, 'attacker');
@@ -257,8 +278,8 @@ describe('DELETE /api/v1/rules/[id]/channels/[channel_id] tenant isolation', () 
 });
 
 describe('POST /api/v1/rules/[id]/channels tenant isolation', () => {
-  it('returns 404 for a free-tier builder using another builder webhook target', async () => {
-    const freeRule = await insertRuleWithSlackChannel(freeBuilderId);
+  it('returns 404 for another builder using a foreign webhook target', async () => {
+    const otherRule = await insertRuleWithSlackChannel(otherBuilderId);
 
     const response = await postChannel(
       dashboardPostRequest(
@@ -266,18 +287,18 @@ describe('POST /api/v1/rules/[id]/channels tenant isolation', () => {
           channel: 'webhook',
           webhook_config_id: victimWebhookConfigId,
         },
-        { builderId: freeBuilderId, userId: freeUserId },
+        { builderId: otherBuilderId, userId: otherUserId },
       ),
       {
-        params: Promise.resolve({ id: freeRule.ruleId }),
+        params: Promise.resolve({ id: otherRule.ruleId }),
       },
     );
     expect(response.status).toBe(404);
 
     const rows = await sql<{ id: string }[]>`
       SELECT id
-        FROM rule_alert_channels
-       WHERE rule_id = ${freeRule.ruleId}
+       FROM rule_alert_channels
+       WHERE rule_id = ${otherRule.ruleId}
          AND webhook_config_id = ${victimWebhookConfigId}
     `;
     expect(rows).toHaveLength(0);

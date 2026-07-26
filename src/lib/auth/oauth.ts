@@ -209,6 +209,44 @@ export interface UpsertUserResult {
   previousAuthProvider: AuthProviderType | null;
 }
 
+interface ExistingOAuthUser {
+  id: string;
+  auth_provider: string | null;
+  display_name: string | null;
+  avatar_url: string | null;
+}
+
+async function recordOAuthLogin(
+  row: ExistingOAuthUser,
+  profile: OAuthProfile,
+  authProvider: AuthProviderType,
+): Promise<UpsertUserResult> {
+  const existingProvider = row.auth_provider as AuthProviderType | null;
+  const nextProvider: AuthProviderType =
+    existingProvider === null || existingProvider === authProvider
+      ? authProvider
+      : AuthProvider.MIXED;
+  const displayName = row.display_name ?? profile.displayName;
+  const avatarUrl = row.avatar_url ?? profile.avatarUrl;
+  await db
+    .update(users)
+    .set({
+      auth_provider: nextProvider,
+      display_name: displayName,
+      avatar_url: avatarUrl,
+      last_login_at: new Date(),
+    })
+    .where(eq(users.id, row.id));
+  return {
+    userId: row.id,
+    isNew: false,
+    email: profile.email,
+    displayName,
+    avatarUrl,
+    previousAuthProvider: existingProvider,
+  };
+}
+
 /**
  * Find user by email (CITEXT — case-insensitive), create if absent.
  * If the user exists with a different auth_provider, update to 'mixed'
@@ -232,29 +270,7 @@ export async function upsertUserFromOAuth(profile: OAuthProfile): Promise<Upsert
     .limit(1);
 
   if (existing.length > 0) {
-    const row = existing[0]!;
-    const existingProvider = row.auth_provider as AuthProviderType | null;
-    const nextProvider: AuthProviderType =
-      existingProvider === null || existingProvider === authProvider
-        ? authProvider
-        : AuthProvider.MIXED;
-    await db
-      .update(users)
-      .set({
-        auth_provider: nextProvider,
-        display_name: row.display_name ?? profile.displayName,
-        avatar_url: row.avatar_url ?? profile.avatarUrl,
-        last_login_at: new Date(),
-      })
-      .where(eq(users.id, row.id));
-    return {
-      userId: row.id,
-      isNew: false,
-      email: profile.email,
-      displayName: row.display_name ?? profile.displayName,
-      avatarUrl: row.avatar_url ?? profile.avatarUrl,
-      previousAuthProvider: existingProvider,
-    };
+    return recordOAuthLogin(existing[0]!, profile, authProvider);
   }
 
   const inserted = await db
@@ -266,13 +282,36 @@ export async function upsertUserFromOAuth(profile: OAuthProfile): Promise<Upsert
       auth_provider: authProvider,
       last_login_at: new Date(),
     })
+    .onConflictDoNothing({ target: users.email })
     .returning({ id: users.id });
-  return {
-    userId: inserted[0]!.id,
-    isNew: true,
-    email: profile.email,
-    displayName: profile.displayName,
-    avatarUrl: profile.avatarUrl,
-    previousAuthProvider: null,
-  };
+  const insertedUser = inserted[0];
+  if (insertedUser) {
+    return {
+      userId: insertedUser.id,
+      isNew: true,
+      email: profile.email,
+      displayName: profile.displayName,
+      avatarUrl: profile.avatarUrl,
+      previousAuthProvider: null,
+    };
+  }
+
+  // A concurrent first login won the unique-email insert. Re-read it after
+  // ON CONFLICT has synchronized with the winner, then retain the same
+  // provider and profile merge rules as the ordinary existing-user path.
+  const raced = await db
+    .select({
+      id: users.id,
+      auth_provider: users.auth_provider,
+      display_name: users.display_name,
+      avatar_url: users.avatar_url,
+    })
+    .from(users)
+    .where(eq(users.email, profile.email))
+    .limit(1);
+  const racedUser = raced[0];
+  if (!racedUser) {
+    throw new Error('[auth.oauth] user upsert conflict could not be resolved');
+  }
+  return recordOAuthLogin(racedUser, profile, authProvider);
 }

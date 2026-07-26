@@ -65,6 +65,10 @@ vi.mock('../../src/lib/rules/margin-evaluator.js', () => ({
   })),
 }));
 
+vi.mock('../../src/lib/auth/builder-entitlement.js', () => ({
+  authorizeBuilderCapability: vi.fn(async () => ({ allowed: true })),
+}));
+
 vi.mock('../../src/lib/logger.js', () => ({
   logger: { child: () => ({ warn: vi.fn(), info: vi.fn(), error: vi.fn() }) },
 }));
@@ -155,7 +159,7 @@ describe('bug_012 - anomaly runner persists external customer_id, not composite'
     insertAnomalyEventMock.mockImplementation((input: InsertAnomalyEventInput) =>
       Promise.resolve(echoInsertedRow(input)),
     );
-    deliverBuilderAlertMock.mockResolvedValue(undefined);
+    deliverBuilderAlertMock.mockResolvedValue({ kind: 'delivered' });
   });
 
   it('stores the external id on the row, the recommendation, and the alert payload', async () => {

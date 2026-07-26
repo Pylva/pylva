@@ -2,6 +2,7 @@
   "default": "pre_roll",
   "overrides": {
     "048_universal_api_key_scope.sql": "post_roll",
-    "049_backfill_builder_owner_memberships.sql": "post_roll"
+    "049_backfill_builder_owner_memberships.sql": "post_roll",
+    "058_remove_free_plan_contract.sql": "post_roll"
   }
 }

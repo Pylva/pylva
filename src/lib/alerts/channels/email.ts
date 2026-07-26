@@ -12,6 +12,10 @@ import { env } from '../../config.js';
 import { logger } from '../../logger.js';
 import { retryWithBackoff, isRetryableHttpError } from '../retry.js';
 import { writeToDlq } from '../dlq.js';
+import {
+  isAlertDeliveryAccessDeniedError,
+  withAlertDeliveryAccessMutation,
+} from '../entitlement-fence.js';
 import { renderAlertEmail } from '../templates/email/alert.js';
 import type { ChannelDeliverFn } from './channel.interface.ts';
 import type { AlertPayload, RuleAlertChannelEmail } from '@pylva/shared';
@@ -70,19 +74,27 @@ export const deliverEmail: ChannelDeliverFn = async (payloads, entry, ctx) => {
   const { subject, html } = renderAlertEmail(payloads);
 
   const result = await retryWithBackoff(
-    async () => {
-      const res = await client.emails.send({
-        from: env.ALERT_FROM_EMAIL,
-        to: emailEntry.email_recipients,
-        subject,
-        html,
-      });
-      if (res.error) throw new Error(`resend error: ${res.error.message}`);
+    () =>
+      withAlertDeliveryAccessMutation(ctx.builder_id, async () => {
+        // Hold authoritative product access through exactly one Resend call;
+        // retryWithBackoff sleeps only after this transaction has exited.
+        const res = await client.emails.send({
+          from: env.ALERT_FROM_EMAIL,
+          to: emailEntry.email_recipients,
+          subject,
+          html,
+        });
+        if (res.error) throw new Error(`resend error: ${res.error.message}`);
+      }),
+    {
+      retryable: (error) => !isAlertDeliveryAccessDeniedError(error) && isRetryableHttpError(error),
     },
-    { retryable: isRetryableHttpError },
   );
 
   if (!result.ok) {
+    if (isAlertDeliveryAccessDeniedError(result.cause)) {
+      throw result.cause;
+    }
     await writeToDlq({
       builder_id: ctx.builder_id,
       channel: 'email',
@@ -112,8 +124,10 @@ export const deliverEmail: ChannelDeliverFn = async (payloads, entry, ctx) => {
  * not write to DLQ — the retry library updates the existing row.
  */
 export async function sendEmailFromSnapshot(
+  builderId: string,
   snapshot: { email_recipients?: string[] },
   payload: unknown,
+  options: { productAccessLocked?: boolean } = {},
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   if (!Array.isArray(snapshot.email_recipients) || snapshot.email_recipients.length === 0) {
     return { ok: false, error: 'snapshot_missing_email_recipients' };
@@ -139,15 +153,20 @@ export async function sendEmailFromSnapshot(
 
   try {
     const { subject, html } = renderAlertEmail(payloads);
-    const res = await client.emails.send({
-      from: env.ALERT_FROM_EMAIL,
-      to: snapshot.email_recipients,
-      subject,
-      html,
-    });
+    const send = () =>
+      client.emails.send({
+        from: env.ALERT_FROM_EMAIL,
+        to: snapshot.email_recipients!,
+        subject,
+        html,
+      });
+    const res = options.productAccessLocked
+      ? await send()
+      : await withAlertDeliveryAccessMutation(builderId, async () => send());
     if (res.error) return { ok: false, error: res.error.message };
     return { ok: true };
   } catch (err) {
+    if (isAlertDeliveryAccessDeniedError(err)) throw err;
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }

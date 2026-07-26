@@ -5,11 +5,7 @@ import {
   IngestWarningCode,
   InstrumentationTier,
   Provider,
-  RETENTION_FALLBACK_DAYS,
-  TIER_LIMITS,
-  billingRetentionDays,
-  telemetryRetentionDays,
-  type BuilderTier,
+  type BuilderPlan,
   type IngestResponse,
   type TelemetryEvent,
   type RulePeriod,
@@ -28,7 +24,6 @@ import { customers } from '../db/schema.js';
 import {
   checkEventCap,
   formatTierUsage,
-  getCapContext,
   recordAcceptedEvents,
   type EventCapDecision,
 } from './event-cap.js';
@@ -38,7 +33,7 @@ import { periodStartFor } from '../budget/period-utils.js';
 import { aggregateSpendForRule } from '../budget/aggregate.js';
 import { recordSourceSighting } from './last-seen-buffer.js';
 import { publishFeedMessage } from '../realtime/feed-publisher.js';
-import { getBuilderTierForShare, lockCustomerLimit } from '../db/advisory-locks.js';
+import { getBuilderEntitlementForShare, lockCustomerLimit } from '../db/advisory-locks.js';
 import {
   forbiddenErrorResponse,
   internalErrorResponse,
@@ -47,11 +42,60 @@ import {
   type PublicHttpResponse,
 } from '../public-http/response.js';
 import { and, count, eq, inArray } from 'drizzle-orm';
+import { accessDeniedMessage, authorizeBuilderCapability } from '../auth/builder-entitlement.js';
+import { limitsForEntitlement, retentionStampForLimits } from '../auth/workspace-limits.js';
 
 export interface IngestHandlerInput {
   builderId: string;
   keyId: string;
   rawBody: string;
+  /**
+   * Set only by Next middleware after stripping the inbound trusted header and
+   * performing the authoritative lookup. Lambda/direct callers omit it and
+   * are checked here.
+   */
+  productAccessVerified?: boolean;
+}
+
+type UnstampedCostEventRow = Omit<
+  CostEventRow,
+  'retention_days' | 'billing_retention_days'
+>;
+
+type FencedPersistenceResult =
+  | { kind: 'persisted'; rows: CostEventRow[] }
+  | { kind: 'restricted' | 'invalid' };
+
+/**
+ * PostgreSQL is the authoritative lifecycle clock, while ClickHouse stores the
+ * accepted event. Keep a builder-row share lock from the final entitlement
+ * read through retention derivation and the ClickHouse insert so a concurrent
+ * suspension either wins before the insert or waits until the accepted batch
+ * is durably linearized. Middleware and quota checks are intentionally not
+ * trusted at this persistence boundary.
+ */
+async function persistCostEventsWithEntitlementFence(
+  builderId: string,
+  candidates: UnstampedCostEventRow[],
+): Promise<FencedPersistenceResult> {
+  return withRLS(builderId, async (tx) => {
+    const resolution = await getBuilderEntitlementForShare(tx, builderId);
+    if (resolution === null || !resolution.ok) return { kind: 'invalid' };
+
+    const entitlement = resolution.entitlement;
+    if (!entitlement.has_product_access) return { kind: 'restricted' };
+
+    const limits = limitsForEntitlement(entitlement);
+    if (limits === null) return { kind: 'invalid' };
+    const retention = retentionStampForLimits(limits);
+    const rows: CostEventRow[] = candidates.map((candidate) => ({
+      ...candidate,
+      retention_days: retention.retention_days,
+      billing_retention_days: retention.billing_retention_days,
+    }));
+    await insertCostEventsWithRetry(rows);
+    return { kind: 'persisted', rows };
+  });
 }
 
 function operationFromEvent(event: TelemetryEvent): string {
@@ -65,22 +109,6 @@ function onboardingMemoKey(event: TelemetryEvent): string {
     return `metric:${event.metric}`;
   }
   return `llm:${event.provider ?? ''}:${event.model ?? ''}`;
-}
-
-function retentionStampForTier(tier: BuilderTier | null): {
-  retention_days: number;
-  billing_retention_days: number;
-} {
-  if (!tier) {
-    return {
-      retention_days: RETENTION_FALLBACK_DAYS,
-      billing_retention_days: RETENTION_FALLBACK_DAYS,
-    };
-  }
-  return {
-    retention_days: telemetryRetentionDays(tier),
-    billing_retention_days: billingRetentionDays(tier),
-  };
 }
 
 function firstValibotIssue(
@@ -107,7 +135,8 @@ interface CustomerDiscoveryResult {
   current: number | null;
   limit: number;
   deferred: number;
-  tier: BuilderTier | null;
+  plan: BuilderPlan | null;
+  source: 'commercial_plan' | 'self_hosted' | null;
 }
 
 function distinctDiscoveredCustomerRefs(refs: DiscoveredCustomerRef[]): DiscoveredCustomerRef[] {
@@ -125,28 +154,50 @@ async function ensureDiscoveredCustomers(
   builderId: string,
   refs: DiscoveredCustomerRef[],
 ): Promise<CustomerDiscoveryResult> {
-  // The authoritative tier is read inside the locked transaction below; callers
+  // The authoritative entitlement is read inside the locked transaction below; callers
   // never pass one (a pre-transaction read would be stale for enforcement).
   if (refs.length === 0) {
-    return { skipped: [], current: null, limit: Infinity, deferred: 0, tier: null };
+    return {
+      skipped: [],
+      current: null,
+      limit: Infinity,
+      deferred: 0,
+      plan: null,
+      source: null,
+    };
   }
 
   const distinctRefs = distinctDiscoveredCustomerRefs(refs);
 
   return withRLS(builderId, async (tx) => {
     await lockCustomerLimit(tx, builderId);
-    const freshTier = await getBuilderTierForShare(tx, builderId);
-    if (freshTier === null) {
+    const resolution = await getBuilderEntitlementForShare(tx, builderId);
+    if (resolution === null || !resolution.ok || !resolution.entitlement.has_product_access) {
       return {
         skipped: [],
         current: null,
-        limit: Infinity,
+        limit: 0,
         deferred: distinctRefs.length,
-        tier: null,
+        plan: null,
+        source: null,
       };
     }
 
-    const limit = TIER_LIMITS[freshTier].max_customers;
+    const limits = limitsForEntitlement(resolution.entitlement);
+    if (limits === null) {
+      return {
+        skipped: [],
+        current: null,
+        limit: 0,
+        deferred: distinctRefs.length,
+        plan: resolution.entitlement.plan,
+        source: null,
+      };
+    }
+
+    const limit = limits.max_customers;
+    const plan = resolution.entitlement.plan;
+    const source = plan === null ? 'self_hosted' : 'commercial_plan';
     if (!Number.isFinite(limit)) {
       await tx
         .insert(customers)
@@ -157,7 +208,7 @@ async function ensureDiscoveredCustomers(
           })),
         )
         .onConflictDoNothing({ target: [customers.builder_id, customers.external_id] });
-      return { skipped: [], current: null, limit, deferred: 0, tier: freshTier };
+      return { skipped: [], current: null, limit, deferred: 0, plan, source };
     }
 
     const externalIds = distinctRefs.map((ref) => ref.externalId);
@@ -188,7 +239,14 @@ async function ensureDiscoveredCustomers(
         .onConflictDoNothing({ target: [customers.builder_id, customers.external_id] });
     }
 
-    return { skipped, current: current + allowedRefs.length, limit, deferred: 0, tier: freshTier };
+    return {
+      skipped,
+      current: current + allowedRefs.length,
+      limit,
+      deferred: 0,
+      plan,
+      source,
+    };
   });
 }
 
@@ -205,21 +263,11 @@ function usageHeaderForDecision(
 }
 
 function blockedCapMessage(decision: EventCapDecision): string {
-  const tier = decision.tier ?? 'current';
+  const limitLabel = decision.tier === null ? 'self-hosted deployment' : `${decision.tier} plan`;
   const cap = decision.cap;
   const used = decision.used ?? cap;
   const windowEnd = decision.window?.end ?? new Date();
-  return `${tier} tier is configured for ${cap} events per period. You have used ${used}. Ingestion is paused until ${windowEnd.toISOString()}. Ask the self-host operator to raise the event cap or disable ENABLE_EVENT_LIMITS.`;
-}
-
-async function tierForRetention(
-  builderId: string,
-  capDecision: EventCapDecision,
-): Promise<BuilderTier | null> {
-  if (capDecision.enabled) return capDecision.tier;
-
-  const context = await getCapContext(builderId);
-  return context.tier;
+  return `${limitLabel} is configured for ${cap} events per period. You have used ${used}. Ingestion is paused until ${windowEnd.toISOString()}. Ask the operator to raise the event cap or disable ENABLE_EVENT_LIMITS.`;
 }
 
 export async function handleTelemetryIngest(
@@ -232,7 +280,27 @@ export async function handleTelemetryIngest(
     key_id: keyId,
   });
 
+  // The Next.js middleware performs the same check, but hosted Lambda and
+  // direct handler callers bypass it. Keep the data-plane boundary
+  // authoritative so stale JWT/API-key caches can never ingest for a
+  // checkout-required, suspended, missing, or corrupt workspace.
+  if (!input.productAccessVerified) {
+    const entitlement = await authorizeBuilderCapability(builderId, 'product');
+    if (!entitlement.allowed) {
+      if (entitlement.lookup.kind !== 'resolved' || !entitlement.lookup.resolution.ok) {
+        return internalErrorResponse('workspace entitlement could not be verified');
+      }
+      return forbiddenErrorResponse(
+        ErrorCode.FEATURE_NOT_AVAILABLE,
+        accessDeniedMessage(entitlement),
+      );
+    }
+  }
+
   const capDecision = await checkEventCap(builderId);
+  if (capDecision.configuration_error) {
+    return internalErrorResponse('workspace limit configuration could not be verified');
+  }
   if (capDecision.blocked) {
     const response = forbiddenErrorResponse(
       ErrorCode.TIER_LIMIT_REACHED,
@@ -287,17 +355,6 @@ export async function handleTelemetryIngest(
   }
 
   const survivingEvents = semanticallyOk.map((x) => x.event);
-  let resolvedTier: BuilderTier | null;
-  try {
-    resolvedTier = await tierForRetention(builderId, capDecision);
-  } catch (err) {
-    log.warn(
-      { batch_id, error: err instanceof Error ? err.message : String(err) },
-      'event cap context threw; using fallback retention',
-    );
-    resolvedTier = null;
-  }
-  const retentionStamp = retentionStampForTier(resolvedTier);
   const [pricingMap, keptSpanIds] = await Promise.all([
     lookupPricing(builderId, survivingEvents),
     filterDuplicates(
@@ -309,7 +366,7 @@ export async function handleTelemetryIngest(
     ),
   ]);
 
-  const rows: CostEventRow[] = [];
+  const candidateRows: UnstampedCostEventRow[] = [];
   const feedMessages: CostUpdateMessage['data'][] = [];
   const onboardingNeeded = new Map<string, TelemetryEvent>();
   const discoveredCustomerRefs: DiscoveredCustomerRef[] = [];
@@ -340,7 +397,7 @@ export async function handleTelemetryIngest(
       timestamp: event.timestamp,
     });
 
-    rows.push({
+    candidateRows.push({
       timestamp: event.timestamp,
       builder_id: builderId,
       trace_id: event.trace_id,
@@ -363,8 +420,6 @@ export async function handleTelemetryIngest(
       metric_value: event.metric_value,
       stream_aborted: event.stream_aborted ? 1 : 0,
       abort_savings: event.abort_savings_usd,
-      retention_days: retentionStamp.retention_days,
-      billing_retention_days: retentionStamp.billing_retention_days,
       metadata: JSON.stringify({
         sdk_version: event.sdk_version,
         framework: event.framework,
@@ -376,19 +431,40 @@ export async function handleTelemetryIngest(
     });
   }
 
-  try {
-    if (rows.length > 0) await insertCostEventsWithRetry(rows);
-  } catch (err) {
-    const keptItems = rows.map((row) => ({
-      span_id: row.span_id,
-      timestamp: row.timestamp,
-    }));
-    await undoFilterDuplicates(builderId, keptItems);
-    log.error(
-      { batch_id, error: err instanceof Error ? err.message : String(err) },
-      'ingest persistence failed',
-    );
-    return internalErrorResponse('failed to persist events');
+  let rows: CostEventRow[] = [];
+  if (candidateRows.length > 0) {
+    let persistence: FencedPersistenceResult;
+    try {
+      persistence = await persistCostEventsWithEntitlementFence(builderId, candidateRows);
+    } catch (err) {
+      const keptItems = candidateRows.map((row) => ({
+        span_id: row.span_id,
+        timestamp: row.timestamp,
+      }));
+      await undoFilterDuplicates(builderId, keptItems);
+      log.error(
+        { batch_id, error: err instanceof Error ? err.message : String(err) },
+        'ingest persistence entitlement fence failed',
+      );
+      return internalErrorResponse('failed to verify or persist events');
+    }
+
+    if (persistence.kind !== 'persisted') {
+      const keptItems = candidateRows.map((row) => ({
+        span_id: row.span_id,
+        timestamp: row.timestamp,
+      }));
+      await undoFilterDuplicates(builderId, keptItems);
+      if (persistence.kind === 'restricted') {
+        return forbiddenErrorResponse(
+          ErrorCode.FEATURE_NOT_AVAILABLE,
+          'Workspace access is unavailable',
+        );
+      }
+      log.error({ batch_id }, 'workspace entitlement fence denied ingestion');
+      return internalErrorResponse('workspace entitlement could not be verified');
+    }
+    rows = persistence.rows;
   }
 
   let persistedEventCapUsed: number | null | undefined;
@@ -416,12 +492,19 @@ export async function handleTelemetryIngest(
             deferred_count: discovery.deferred,
             batch_id,
           },
-          'customer auto-registration deferred because builder tier is unknown',
+          'customer auto-registration deferred because workspace entitlement is unavailable',
         );
       } else if (discovery.skipped.length > 0) {
         const firstSkipped = discovery.skipped[0]!;
-        const discoveryTier = discovery.tier ?? 'current';
-        const message = `${discoveryTier} tier allows ${discovery.limit} customers. ${discovery.skipped.length} telemetry customer${discovery.skipped.length === 1 ? '' : 's'} were not added to the dashboard customer list; events were accepted. Upgrade to track more discovered customers.`;
+        const limitLabel =
+          discovery.source === 'self_hosted'
+            ? 'This self-hosted deployment'
+            : `${discovery.plan ?? 'Current'} plan`;
+        const nextStep =
+          discovery.source === 'self_hosted'
+            ? 'Raise SELF_HOSTED_MAX_CUSTOMERS to track more discovered customers.'
+            : 'Upgrade to track more discovered customers.';
+        const message = `${limitLabel} allows ${discovery.limit} customers. ${discovery.skipped.length} telemetry customer${discovery.skipped.length === 1 ? '' : 's'} were not added to the dashboard customer list; events were accepted. ${nextStep}`;
         warnings.push({
           event_index: firstSkipped.eventIndex,
           code: IngestWarningCode.CUSTOMER_LIMIT_REACHED,
@@ -430,7 +513,7 @@ export async function handleTelemetryIngest(
         log.warn(
           {
             event: 'customer_limit_reached',
-            tier: discovery.tier,
+            plan: discovery.plan,
             current: discovery.current,
             limit: discovery.limit,
             skipped_count: discovery.skipped.length,

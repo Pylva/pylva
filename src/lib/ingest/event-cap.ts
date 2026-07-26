@@ -1,12 +1,13 @@
 import { eq } from 'drizzle-orm';
 import {
-  BuilderTier,
-  isBuilderTier,
+  BuilderPlan,
   EventCapWindowSource,
-  TIER_LIMITS,
-  type BuilderTier as BuilderTierValue,
+  resolveBuilderEntitlement,
+  type BuilderPlan as BuilderPlanValue,
   type EventCapWindowSource as EventCapWindowSourceValue,
+  type PlanLimits,
 } from '@pylva/shared';
+import { limitsForEntitlement } from '../auth/workspace-limits.js';
 import { env } from '../config.js';
 import { db } from '../db/client.js';
 import { builders } from '../db/schema.js';
@@ -26,15 +27,20 @@ export interface EventCapWindow {
 export interface EventCapDecision {
   enabled: boolean;
   blocked: boolean;
-  tier: BuilderTierValue | null;
+  /** A catalog/entitlement integrity failure, never an operational fail-open. */
+  configuration_error?: true;
+  tier: BuilderPlanValue | null;
   cap: number;
   used: number | null;
   window: EventCapWindow | null;
 }
 
 export interface EventCapContext {
-  tier: BuilderTierValue | null;
+  tier: BuilderPlanValue | null;
+  limits: PlanLimits | null;
   period: { start: Date | null; end: Date | null } | null;
+  /** Present only when persisted entitlement/catalog state must fail closed. */
+  integrity_error?: string;
 }
 
 export interface EventCapUsage {
@@ -52,7 +58,7 @@ interface MemoEntry {
 
 interface EventCapThresholdPayload {
   builderId: string;
-  tier: BuilderTierValue;
+  tier: BuilderPlanValue | null;
   kind: 'warning_80' | 'exceeded';
   used: number;
   cap: number;
@@ -60,7 +66,7 @@ interface EventCapThresholdPayload {
 }
 
 interface FiniteCapState {
-  tier: BuilderTierValue;
+  tier: BuilderPlanValue | null;
   cap: number;
   window: EventCapWindow;
   key: string;
@@ -69,11 +75,16 @@ interface FiniteCapState {
 
 type CapStateResult =
   | { type: 'finite'; state: FiniteCapState }
-  | { type: 'unlimited'; tier: BuilderTierValue; cap: number }
+  | { type: 'unlimited'; tier: BuilderPlanValue | null; cap: number }
+  | {
+      type: 'invalid_configuration';
+      tier: BuilderPlanValue | null;
+      reason: string;
+    }
   | {
       type: 'fail_open';
       reason: 'pg' | 'redis' | 'clickhouse';
-      tier: BuilderTierValue | null;
+      tier: BuilderPlanValue | null;
       cap: number;
       window: EventCapWindow | null;
     };
@@ -262,11 +273,18 @@ async function seedFromClickHouse(
 async function loadCapState(builderId: string, now: Date): Promise<CapStateResult> {
   const context = await getCapContext(builderId);
   const tier = context.tier;
-  if (tier === null) {
-    return { type: 'fail_open', reason: 'pg', tier: null, cap: Infinity, window: null };
+  if (context.integrity_error !== undefined) {
+    return {
+      type: 'invalid_configuration',
+      tier,
+      reason: context.integrity_error,
+    };
+  }
+  if (context.limits === null) {
+    return { type: 'fail_open', reason: 'pg', tier, cap: Infinity, window: null };
   }
 
-  const cap = TIER_LIMITS[tier].monthly_events;
+  const cap = context.limits.monthly_events;
   if (!Number.isFinite(cap)) {
     return { type: 'unlimited', tier, cap };
   }
@@ -309,21 +327,57 @@ export async function getCapContext(builderId: string): Promise<EventCapContext>
     const rows = await db
       .select({
         tier: builders.tier,
+        access_state: builders.access_state,
+        entitlement_source: builders.entitlement_source,
       })
       .from(builders)
       .where(eq(builders.id, builderId))
       .limit(1);
     const row = rows[0];
-    const tier = row?.tier;
-    const parsedTier = isBuilderTier(tier) ? tier : null;
+    if (!row) {
+      return memoize(builderId, { tier: null, limits: null, period: null });
+    }
+
+    const resolution = resolveBuilderEntitlement({
+      plan: row.tier,
+      access_state: row.access_state,
+      entitlement_source: row.entitlement_source,
+    });
+    if (!resolution.ok) {
+      log.warn(
+        { builder_id: builderId, reason: resolution.reason },
+        'builder has invalid entitlement',
+      );
+      return memoize(builderId, {
+        tier: null,
+        limits: null,
+        period: null,
+        integrity_error: resolution.reason,
+      });
+    }
+
+    const limits = limitsForEntitlement(resolution.entitlement);
+    if (resolution.entitlement.has_product_access && limits === null) {
+      log.warn(
+        {
+          builder_id: builderId,
+          entitlement_source: resolution.entitlement.entitlement_source,
+          deployment_mode: env.PYLVA_DEPLOYMENT_MODE,
+        },
+        'builder entitlement has no limits in this deployment mode',
+      );
+      return memoize(builderId, {
+        tier: resolution.entitlement.plan,
+        limits: null,
+        period: null,
+        integrity_error: 'active_entitlement_limits_unavailable',
+      });
+    }
     const context: EventCapContext = {
-      tier: parsedTier,
+      tier: resolution.entitlement.plan,
+      limits,
       period: null,
     };
-
-    if (tier !== undefined && !isBuilderTier(tier)) {
-      log.warn({ builder_id: builderId, tier }, 'builder has unknown tier');
-    }
 
     return memoize(builderId, context);
   } catch (err) {
@@ -331,19 +385,17 @@ export async function getCapContext(builderId: string): Promise<EventCapContext>
       { builder_id: builderId, error: err instanceof Error ? err.message : String(err) },
       'event cap context lookup failed',
     );
-    return { tier: null, period: null };
+    return { tier: null, limits: null, period: null };
   }
 }
 
 export function resolveEventCapWindow(
   now: Date,
-  tier: BuilderTierValue,
+  tier: BuilderPlanValue | null,
   period: { start: Date | null; end: Date | null } | null,
 ): EventCapWindow {
-  if (tier === BuilderTier.FREE) return calendarMonthWindow(now);
-
   if (
-    (tier === BuilderTier.PRO || tier === BuilderTier.SCALE) &&
+    (tier === BuilderPlan.PRO || tier === BuilderPlan.SCALE) &&
     period?.start &&
     period.end &&
     period.start.getTime() <= now.getTime() &&
@@ -372,6 +424,26 @@ export async function checkEventCap(
   }
 
   const result = await loadCapState(builderId, now);
+  if (result.type === 'invalid_configuration') {
+    log.warn(
+      {
+        event: 'fail_closed',
+        reason: result.reason,
+        builder_id: builderId,
+        tier: result.tier,
+      },
+      'event cap configuration invalid; blocking ingest',
+    );
+    return {
+      enabled: true,
+      blocked: true,
+      configuration_error: true,
+      tier: result.tier,
+      cap: 0,
+      used: 0,
+      window: null,
+    };
+  }
   if (result.type === 'fail_open') {
     logFailOpen(builderId, result);
     return failOpenDecision(result);
@@ -432,7 +504,6 @@ export async function recordAcceptedEvents(
     count <= 0 ||
     !decision.enabled ||
     decision.window === null ||
-    decision.tier === null ||
     decision.used === null ||
     !Number.isFinite(decision.cap)
   ) {

@@ -31,7 +31,11 @@ export const GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION =
   '054_general_app_runtime_owner_boundary.sql' as const;
 export const MONTHLY_INVOICE_PERIOD_RETRY_MIGRATION =
   '055_monthly_invoice_period_retry.sql' as const;
-export const AUTHORITATIVE_BUDGET_SCHEMA_HEAD = MONTHLY_INVOICE_PERIOD_RETRY_MIGRATION;
+export const WORKSPACE_ACCESS_STATE_EXPAND_MIGRATION =
+  '056_workspace_access_state_expand.sql' as const;
+export const REMOVE_FREE_PLAN_CONTRACT_MIGRATION =
+  '058_remove_free_plan_contract.sql' as const;
+export const AUTHORITATIVE_BUDGET_SCHEMA_HEAD = REMOVE_FREE_PLAN_CONTRACT_MIGRATION;
 export const AUTHORITATIVE_BUDGET_MIGRATIONS = [
   AUTHORITATIVE_BUDGET_LEDGER_MIGRATION,
   AUTHORITATIVE_BUDGET_RUNTIME_MIGRATION,
@@ -2439,12 +2443,21 @@ expected_runtime_relation_acl AS (
     ('budget_reservations', ARRAY['INSERT', 'SELECT', 'UPDATE']::pg_catalog.text[]),
     ('budget_rule_revisions', ARRAY['INSERT', 'SELECT', 'UPDATE']::pg_catalog.text[]),
     ('budget_usage_ledger', ARRAY['INSERT', 'SELECT']::pg_catalog.text[]),
-    ('builders', ARRAY['SELECT']::pg_catalog.text[]),
     ('cost_sources', ARRAY['SELECT']::pg_catalog.text[]),
     ('custom_pricing', ARRAY['SELECT']::pg_catalog.text[]),
     ('llm_pricing', ARRAY['SELECT']::pg_catalog.text[]),
     ('rules', ARRAY['DELETE', 'INSERT', 'SELECT', 'UPDATE']::pg_catalog.text[])
   ) AS expected(relation_name, privileges)
+),
+expected_runtime_column_acl AS (
+  SELECT *
+  FROM (VALUES
+    ('builders', 'access_state', 'SELECT'),
+    ('builders', 'entitlement_source', 'SELECT'),
+    ('builders', 'id', 'SELECT'),
+    ('builders', 'id', 'UPDATE'),
+    ('builders', 'tier', 'SELECT')
+  ) AS expected(relation_name, column_name, privilege_type)
 ),
 runtime_relation_acl AS (
   SELECT namespace.nspname AS schema_name,
@@ -2457,6 +2470,23 @@ runtime_relation_acl AS (
   CROSS JOIN runtime_role AS runtime
   CROSS JOIN LATERAL pg_catalog.aclexplode(relation.relacl) AS privilege
   WHERE relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+    AND privilege.grantee = runtime.oid
+),
+runtime_column_acl AS (
+  SELECT relation.relname AS relation_name,
+         attribute.attname AS column_name,
+         privilege.privilege_type,
+         privilege.is_grantable
+  FROM pg_catalog.pg_attribute AS attribute
+  JOIN pg_catalog.pg_class AS relation
+    ON relation.oid = attribute.attrelid
+  JOIN pg_catalog.pg_namespace AS namespace
+    ON namespace.oid = relation.relnamespace
+  CROSS JOIN runtime_role AS runtime
+  CROSS JOIN LATERAL pg_catalog.aclexplode(attribute.attacl) AS privilege
+  WHERE namespace.nspname = 'public'
+    AND attribute.attnum > 0
+    AND NOT attribute.attisdropped
     AND privilege.grantee = runtime.oid
 ),
 runtime_sequence_acl AS (
@@ -2630,14 +2660,28 @@ SELECT
   )
   AND NOT EXISTS (SELECT 1 FROM runtime_relation_acl WHERE is_grantable)
   AND NOT EXISTS (
-    SELECT 1
-    FROM pg_catalog.pg_attribute AS attribute
-    CROSS JOIN runtime_role AS runtime
-    CROSS JOIN LATERAL pg_catalog.aclexplode(attribute.attacl) AS privilege
-    WHERE attribute.attnum > 0
-      AND NOT attribute.attisdropped
-      AND privilege.grantee = runtime.oid
+    SELECT expected.relation_name,
+           expected.column_name,
+           expected.privilege_type
+    FROM expected_runtime_column_acl AS expected
+    EXCEPT
+    SELECT actual.relation_name,
+           actual.column_name,
+           actual.privilege_type
+    FROM runtime_column_acl AS actual
   )
+  AND NOT EXISTS (
+    SELECT actual.relation_name,
+           actual.column_name,
+           actual.privilege_type
+    FROM runtime_column_acl AS actual
+    EXCEPT
+    SELECT expected.relation_name,
+           expected.column_name,
+           expected.privilege_type
+    FROM expected_runtime_column_acl AS expected
+  )
+  AND NOT EXISTS (SELECT 1 FROM runtime_column_acl WHERE is_grantable)
   AND NOT EXISTS (
     SELECT 'public'::pg_catalog.name,
            'pylva_budget_authority_order_seq'::pg_catalog.name,

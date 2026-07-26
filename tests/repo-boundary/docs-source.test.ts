@@ -27,6 +27,7 @@ const allowedPublicDocsPaths = [
   'docs/authoritative-budget-control-release-readiness.md',
   'docs/authoritative-budget-control-rollout.md',
   'docs/langgraph-authoritative-control.md',
+  'docs/runbooks/remove-free-forward-reexpand.sql',
   'docs/sdk-1.2-authoritative-control-release-notes.md',
 ] as const;
 
@@ -41,6 +42,21 @@ function readJson(relativePath: string): Record<string, unknown> {
   >;
 }
 
+function publicDocsSourcePaths(relativeDirectory = 'docs'): string[] {
+  const sources: string[] = [];
+  for (const entry of fs.readdirSync(path.join(repoRoot, relativeDirectory), {
+    withFileTypes: true,
+  })) {
+    const relativePath = path.join(relativeDirectory, entry.name);
+    if (entry.isDirectory() && relativePath !== 'docs/assets') {
+      sources.push(...publicDocsSourcePaths(relativePath));
+    } else {
+      sources.push(relativePath);
+    }
+  }
+  return sources.sort();
+}
+
 describe('docs and design source boundary', () => {
   it('keeps full docs and design source out of the public repo', () => {
     for (const relativePath of internalDocsSourcePaths) {
@@ -48,12 +64,7 @@ describe('docs and design source boundary', () => {
     }
 
     if (exists('docs')) {
-      const docsEntries = fs
-        .readdirSync(path.join(repoRoot, 'docs'))
-        .map((entry) => `docs/${entry}`)
-        .sort();
-
-      expect(docsEntries).toEqual([...allowedPublicDocsPaths]);
+      expect(publicDocsSourcePaths()).toEqual([...allowedPublicDocsPaths].sort());
     }
   });
 

@@ -4,6 +4,7 @@ engine glue without booting a real provider SDK."""
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
@@ -39,6 +40,8 @@ def _ctx(
 
 def _push_rule(rule: dict[str, Any]) -> None:
     rules_cache._rules.append(rule)  # type: ignore[attr-defined]
+    rules_cache._fetched_at = time.time()  # type: ignore[attr-defined]
+    rules_cache._passthrough = False  # type: ignore[attr-defined]
 
 
 def _budget_rule(rule_id: str = "budget-1") -> dict[str, Any]:
@@ -110,6 +113,31 @@ def test_sync_same_provider_routing_mutates_request_model() -> None:
     assert out.metadata.routing_applied is True
     assert out.metadata.routed_model == "gpt-4o-mini"
     assert out.metadata.original_model == "gpt-4o"
+
+
+def test_sync_passthrough_ignores_warmed_routing_and_failover_rules() -> None:
+    _push_rule(
+        routing_rule(
+            match={"provider": "openai", "model": "gpt-4o"},
+            route_to_model="gpt-4o-mini",
+        )
+    )
+    _push_rule(failover_rule())
+    rules_cache._passthrough = True  # type: ignore[attr-defined]
+    calls: list[str] = []
+
+    def call(req: dict[str, Any]) -> dict[str, Any]:
+        calls.append(req["model"])
+        return {"ok": True}
+
+    out = run_with_engine_sync(
+        request={"model": "gpt-4o"}, provider_id="openai", ctx=_ctx(), call=call
+    )
+
+    assert calls == ["gpt-4o"]
+    assert out.metadata.routing_applied is False
+    assert out.metadata.failover_active is False
+    assert len(ensure_state(_failover_cfg_obj()).samples) == 0
 
 
 def test_sync_non_string_route_to_model_is_not_forwarded() -> None:

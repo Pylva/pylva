@@ -19,12 +19,16 @@ filter:
 - `pre_roll` applies the pending prefix before the first pending `post_roll` marker.
 - `post_roll` refuses to run while that prefix remains pending, then applies the marker and the
   entire remaining numbered suffix, including later files whose default metadata is `pre_roll`.
-- An unqualified `pnpm db:migrate` applies every pending migration.
+- An unqualified `pnpm db:migrate` applies ordinary pending migrations, but fails closed when the
+  staged remove-Free windows are present. Those windows require their documented, receipt-backed
+  phase approvals. A truly empty installation uses `--fresh-install`; the runner proves zero
+  builder rows and a contiguous migration-ledger prefix before allowing an unphased bootstrap.
 
-Migration 048 is currently the only `post_roll` marker. A live database pending migrations before
-048 stops at 047 during `pre_roll`; after the compatible application is deployed, `post_roll`
-applies 048 and the remaining suffix. If 048 is already recorded, later pending migrations such as
-050–054 are eligible for `pre_roll`.
+Migration 048 is the post-roll marker for the universal API-key rollout. A live database pending
+migrations before 048 stops at 047 during `pre_roll`; after the compatible application is deployed,
+`post_roll` applies 048 and the remaining suffix. If 048 is already recorded, later pending
+migrations such as 050–054 are eligible for `pre_roll`. Later staged migrations have their own
+runbooks and approvals.
 
 ```bash
 MIGRATION_DATABASE_URL='postgresql://<migrator>:<password>@<host>/<database>' \
@@ -124,7 +128,8 @@ Before installing the schedule:
 
 1. Follow the [phased PostgreSQL migration procedure](#postgresql-migration-phase-and-rollback-safety). A
    live database below migration 048 must run `pre_roll`, deploy the scope-compatible application,
-   and only then run `post_roll`; unqualified `db:migrate` and `db:setup` apply every pending file.
+   and only then run `post_roll`. Unqualified runners stop at protected rollout windows; never use
+   `db:setup --fresh-install` to bypass a live upgrade.
    Then apply through `054_general_app_runtime_owner_boundary.sql` using only the separate migration
    principal and the historical migration time zone that created the existing audit partitions.
    The restricted task supplies `MIGRATION_DATABASE_URL` but not runtime database credentials:

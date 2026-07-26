@@ -9,14 +9,17 @@ import {
   ensureLedger,
   errorMessage,
   isMigrationPhase,
+  isRemoveFreeReservedMigration,
   ledgerExists,
   listMigrationFiles,
   logDrift,
   migrationHead,
   pendingMigrationFilesForPhase,
   pendingPreRollBlockers,
+  prepareFreshInstallLedger,
   readLedger,
   recordBaseline,
+  removeFreeApprovalError,
   statusForMigrationPhase,
   withMigrationAdvisoryLock,
   type LedgerRow,
@@ -25,8 +28,13 @@ import {
   type MigrationFile,
   type MigrationState,
   type MigrationStatus,
+  type RemoveFreeMigrationApprovals,
 } from './db-migrate-core.js';
 import { readDbMigrateEnv } from './db-migrate-env.js';
+import {
+  assertRemoveFreeContractTaskRole,
+  HOSTED_REMOVE_FREE_CONTRACT_MIGRATION,
+} from './remove-free-contract-authority.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT_DIR = path.resolve(__dirname, '..');
@@ -38,6 +46,9 @@ export interface DbMigrateArgs {
   through?: string;
   yes: boolean;
   json: boolean;
+  approveRemoveFreeExpand?: boolean;
+  approveRemoveFreeContract?: boolean;
+  freshInstall?: boolean;
 }
 
 interface DbMigrateDeps {
@@ -46,6 +57,7 @@ interface DbMigrateDeps {
   log: (l: string) => void;
   error: (l: string) => void;
   lockTimeout?: string;
+  assertHostedContractAuthority?: () => Promise<void>;
 }
 
 interface StatusJson {
@@ -79,6 +91,9 @@ export function parseArgs(argv: string[]): DbMigrateArgs {
   let through: string | undefined;
   let yes = false;
   let json = false;
+  let approveRemoveFreeExpand = false;
+  let approveRemoveFreeContract = false;
+  let freshInstall = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -119,6 +134,27 @@ export function parseArgs(argv: string[]): DbMigrateArgs {
       json = true;
       continue;
     }
+    if (arg === '--approve-remove-free-expand') {
+      if (approveRemoveFreeExpand) {
+        throw new Error('--approve-remove-free-expand can only be specified once');
+      }
+      approveRemoveFreeExpand = true;
+      continue;
+    }
+    if (arg === '--approve-remove-free-contract') {
+      if (approveRemoveFreeContract) {
+        throw new Error('--approve-remove-free-contract can only be specified once');
+      }
+      approveRemoveFreeContract = true;
+      continue;
+    }
+    if (arg === '--fresh-install') {
+      if (freshInstall) {
+        throw new Error('--fresh-install can only be specified once');
+      }
+      freshInstall = true;
+      continue;
+    }
     throw new Error(`Unknown argument: ${arg ?? ''}`);
   }
 
@@ -128,8 +164,32 @@ export function parseArgs(argv: string[]): DbMigrateArgs {
   if (phase !== undefined && mode === 'baseline') {
     throw new Error('--phase is not supported with --baseline');
   }
+  if (mode === 'baseline' && through === undefined) {
+    throw new Error('--baseline requires an explicit --through migration filename');
+  }
   if (json && mode !== 'status') {
     throw new Error('--json is only supported with --status');
+  }
+  if ((approveRemoveFreeExpand || approveRemoveFreeContract) && mode !== 'apply') {
+    throw new Error('remove-Free approval flags are only supported when applying migrations');
+  }
+  if (freshInstall && mode !== 'apply') {
+    throw new Error('--fresh-install is only supported when applying migrations');
+  }
+  if (approveRemoveFreeExpand && approveRemoveFreeContract) {
+    throw new Error('remove-Free expand and contract approvals require separate invocations');
+  }
+  if (approveRemoveFreeExpand && phase !== 'pre_roll') {
+    throw new Error('--approve-remove-free-expand requires --phase pre_roll');
+  }
+  if (approveRemoveFreeContract && phase !== 'post_roll') {
+    throw new Error('--approve-remove-free-contract requires --phase post_roll');
+  }
+  if (freshInstall && phase !== undefined) {
+    throw new Error('--fresh-install cannot be combined with --phase');
+  }
+  if (freshInstall && (approveRemoveFreeExpand || approveRemoveFreeContract)) {
+    throw new Error('--fresh-install cannot be combined with remove-Free rollout approvals');
   }
 
   return {
@@ -138,8 +198,13 @@ export function parseArgs(argv: string[]): DbMigrateArgs {
     ...(through === undefined ? {} : { through }),
     yes,
     json,
+    ...(approveRemoveFreeExpand ? { approveRemoveFreeExpand: true } : {}),
+    ...(approveRemoveFreeContract ? { approveRemoveFreeContract: true } : {}),
+    ...(freshInstall ? { freshInstall: true } : {}),
   };
 }
+
+export { removeFreeApprovalError } from './db-migrate-core.js';
 
 function statusExitCode(state: MigrationState): number {
   if (state === 'in_sync') return 0;
@@ -191,18 +256,33 @@ async function runApply(
   deps: DbMigrateDeps,
   files: MigrationFile[],
   phase: MigrationPhase | undefined,
+  approvals: RemoveFreeMigrationApprovals,
+  freshInstallRequested: boolean,
 ): Promise<number> {
   return withMigrationAdvisoryLock(deps.sql, async (lockedSql) => {
     const hasLedger = await ledgerExists(lockedSql);
     if (!hasLedger && (await buildersTableExists(lockedSql))) {
       deps.error(
-        'database predates migration tracking; run pnpm db:migrate --baseline --yes once before applying migrations',
+        'database predates migration tracking; inspect the physical schema, then run pnpm db:migrate --baseline --through <verified-historical-head-before-056> --yes',
       );
       return 4;
     }
 
-    await ensureLedger(lockedSql);
-    const ledger = await readLedger(lockedSql);
+    let freshInstallAuthorized = false;
+    let ledger: LedgerRow[];
+    if (freshInstallRequested) {
+      const preparation = await prepareFreshInstallLedger(lockedSql, files, hasLedger);
+      if (!preparation.authorized) {
+        deps.error(`refusing fresh-install migration mode: ${preparation.error}`);
+        return 4;
+      }
+      ledger = preparation.ledger;
+      freshInstallAuthorized = true;
+    } else {
+      await ensureLedger(lockedSql);
+      ledger = await readLedger(lockedSql);
+    }
+
     const status = computeStatus(files, ledger);
     if (status.drift.length > 0 || status.unknown.length > 0) {
       logDrift(status, deps.error);
@@ -219,6 +299,19 @@ async function runApply(
       }
     }
 
+    const selectedPending =
+      phase === undefined
+        ? status.pending
+        : pendingMigrationFilesForPhase(status, files, phase).map((file) => file.filename);
+    const approvalError = removeFreeApprovalError(selectedPending, approvals, {
+      ...(phase === undefined ? {} : { phase }),
+      freshInstallAuthorized,
+    });
+    if (approvalError !== null) {
+      deps.error(approvalError);
+      return 4;
+    }
+
     try {
       const { appliedCount } = await applyPending({
         sql: lockedSql,
@@ -226,6 +319,11 @@ async function runApply(
         ledger,
         appliedBy: 'db:migrate',
         phase,
+        removeFreePolicy: {
+          approvals,
+          ...(phase === undefined ? {} : { phase }),
+          freshInstallAuthorized,
+        },
         lockTimeout: deps.lockTimeout ?? '30s',
         log: deps.log,
       });
@@ -311,22 +409,38 @@ async function runBaseline(
       return 4;
     }
 
-    if (!(await buildersTableExists(lockedSql))) {
-      deps.error('empty database — run pnpm db:migrate to bootstrap instead');
+    if (args.through === undefined) {
+      deps.error(
+        '--baseline requires an explicit --through migration filename; never infer the current manifest head',
+      );
       return 4;
     }
 
-    const throughIndex =
-      args.through === undefined
-        ? files.length - 1
-        : files.findIndex((file) => file.filename === args.through);
+    if (!(await buildersTableExists(lockedSql))) {
+      deps.error(
+        'empty database — run pnpm db:migrate --fresh-install to bootstrap instead',
+      );
+      return 4;
+    }
+
+    const throughIndex = files.findIndex((file) => file.filename === args.through);
 
     if (throughIndex < 0) {
-      deps.error(`--through file not found: ${args.through ?? ''}`);
+      deps.error(`--through file not found: ${args.through}`);
       return 4;
     }
 
     const baselineFiles = files.slice(0, throughIndex + 1);
+    const protectedMigration = baselineFiles.find((file) =>
+      isRemoveFreeReservedMigration(file.filename),
+    );
+    if (protectedMigration !== undefined) {
+      deps.error(
+        `refusing to baseline through protected remove-Free migration ${protectedMigration.filename}; ` +
+          'migrations 056–059 must execute through the staged rollout or an authorized fresh install',
+      );
+      return 4;
+    }
 
     if (!args.yes) {
       logBaselineListing(baselineFiles, deps.log);
@@ -347,13 +461,35 @@ async function runBaseline(
 export async function runDbMigrate(args: DbMigrateArgs, deps: DbMigrateDeps): Promise<number> {
   const files = await listMigrationFiles(deps.migrationsDir);
 
+  if (
+    args.mode === 'apply' &&
+    args.approveRemoveFreeContract === true &&
+    files.some((file) => file.filename === HOSTED_REMOVE_FREE_CONTRACT_MIGRATION)
+  ) {
+    try {
+      await (deps.assertHostedContractAuthority ?? assertRemoveFreeContractTaskRole)();
+    } catch (error) {
+      deps.error(errorMessage(error));
+      return 4;
+    }
+  }
+
   if (args.mode === 'status') {
     return runStatus(deps, files, args.json, args.phase);
   }
   if (args.mode === 'baseline') {
     return runBaseline(args, deps, files);
   }
-  return runApply(deps, files, args.phase);
+  return runApply(
+    deps,
+    files,
+    args.phase,
+    {
+      expand: args.approveRemoveFreeExpand === true,
+      contract: args.approveRemoveFreeContract === true,
+    },
+    args.freshInstall === true,
+  );
 }
 
 async function main(): Promise<void> {

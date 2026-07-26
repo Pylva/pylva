@@ -16,7 +16,10 @@ import { costSources } from '../db/schema.js';
 import { withRLS } from '../db/rls.js';
 import { queryCostEvents } from '../clickhouse/client.js';
 import { chTimestamp } from '../clickhouse/datetime.js';
-import { deliverBuilderAlert } from '../alerts/builder-alert.js';
+import {
+  deliverBuilderAlert,
+  type DeliverBuilderAlertOutcome,
+} from '../alerts/builder-alert.js';
 import { logger } from '../logger.js';
 import {
   evaluateSourceHealth,
@@ -25,6 +28,8 @@ import {
   type DailyEventRow,
   type SourceHealthEvaluation,
 } from './source-checker.js';
+import { authorizeBuilderCapability } from '../auth/builder-entitlement.js';
+import { getBuilderEntitlementForShare } from '../db/advisory-locks.js';
 
 const BUILDER_CONCURRENCY = 5;
 
@@ -128,8 +133,28 @@ interface PendingStatusUpdate {
   next_status: CostSourceStatus;
 }
 
+async function retainsProductAccess(builderId: string): Promise<boolean> {
+  const entitlement = await authorizeBuilderCapability(builderId, 'product');
+  if (entitlement.allowed) return true;
+
+  // A database lookup outage is an operational failure, not an empty
+  // workspace. Surface it so an all-builders outage still fails the cron.
+  if (entitlement.lookup.kind === 'lookup_failed') {
+    throw new Error('workspace entitlement lookup failed');
+  }
+  return false;
+}
+
+function clearPendingEffectCounts(summary: BuilderSummary): void {
+  summary.silence_alerts = 0;
+  summary.cost_drop_alerts = 0;
+  summary.status_changes = 0;
+}
+
 async function checkBuilderSources(builderId: string, now: Date): Promise<BuilderSummary> {
   const summary: BuilderSummary = { ...EMPTY_SUMMARY };
+  if (!(await retainsProductAccess(builderId))) return summary;
+
   const sources = await loadSources(builderId);
   if (sources.length === 0) return summary;
 
@@ -147,11 +172,9 @@ async function checkBuilderSources(builderId: string, now: Date): Promise<Builde
 
     if (evaluation.silence) {
       pendingAlerts.push(buildSilencePayload(builderId, source, evaluation.silence));
-      summary.silence_alerts += 1;
     }
     if (evaluation.cost_drop) {
       pendingAlerts.push(buildCostDropPayload(builderId, source, evaluation.cost_drop));
-      summary.cost_drop_alerts += 1;
     }
 
     const nextStatus = decideStatus(evaluation);
@@ -161,10 +184,33 @@ async function checkBuilderSources(builderId: string, now: Date): Promise<Builde
     }
   }
 
-  await Promise.all([
-    pendingUpdates.length > 0 ? batchUpdateStatus(builderId, pendingUpdates) : null,
-    ...pendingAlerts.map((p) => dispatchAlert(builderId, p)),
-  ]);
+  if (
+    (pendingUpdates.length > 0 || pendingAlerts.length > 0) &&
+    !(await retainsProductAccess(builderId))
+  ) {
+    clearPendingEffectCounts(summary);
+    return summary;
+  }
+
+  if (pendingUpdates.length > 0) {
+    const statusesUpdated = await batchUpdateStatus(builderId, pendingUpdates);
+    if (!statusesUpdated) {
+      clearPendingEffectCounts(summary);
+      return summary;
+    }
+  }
+  const deliveryOutcomes = await Promise.all(
+    pendingAlerts.map((payload) => dispatchAlert(builderId, payload)),
+  );
+  for (let index = 0; index < deliveryOutcomes.length; index++) {
+    if (deliveryOutcomes[index]?.kind !== 'delivered') continue;
+    const payload = pendingAlerts[index];
+    if (payload?.type === WebhookEventType.INSTRUMENTATION_SILENCE) {
+      summary.silence_alerts += 1;
+    } else if (payload?.type === WebhookEventType.INSTRUMENTATION_COST_DROP) {
+      summary.cost_drop_alerts += 1;
+    }
+  }
 
   return summary;
 }
@@ -249,8 +295,11 @@ function decideStatus(evaluation: SourceHealthEvaluation): CostSourceStatus {
   return CostSourceStatus.HEALTHY;
 }
 
-async function batchUpdateStatus(builderId: string, updates: PendingStatusUpdate[]): Promise<void> {
-  if (updates.length === 0) return;
+async function batchUpdateStatus(
+  builderId: string,
+  updates: PendingStatusUpdate[],
+): Promise<boolean> {
+  if (updates.length === 0) return true;
 
   // CASE WHEN id = $X THEN $Y ... — one round-trip per builder regardless of
   // how many sources changed.
@@ -263,12 +312,21 @@ async function batchUpdateStatus(builderId: string, updates: PendingStatusUpdate
     sql.raw(', '),
   );
 
-  await withRLS(builderId, async (tx) => {
+  return withRLS(builderId, async (tx) => {
+    // Hold a share lock on the authoritative builder lifecycle row through
+    // the status update. A concurrent suspension must either commit first
+    // (and suppress this write) or wait until this already-authorized write
+    // commits; it cannot land between the check and mutation.
+    const resolution = await getBuilderEntitlementForShare(tx, builderId);
+    if (resolution === null || !resolution.ok || !resolution.entitlement.has_product_access) {
+      return false;
+    }
     await tx.execute(sql`
       UPDATE cost_sources
       SET status = CASE id ${cases} END
       WHERE builder_id = ${builderId} AND id IN (${ids})
     `);
+    return true;
   });
 }
 
@@ -312,18 +370,23 @@ function buildCostDropPayload(
   };
 }
 
-async function dispatchAlert(builderId: string, payload: WebhookPayload): Promise<void> {
+async function dispatchAlert(
+  builderId: string,
+  payload: WebhookPayload,
+): Promise<DeliverBuilderAlertOutcome> {
   try {
-    await deliverBuilderAlert({ builderId, payload });
+    return await deliverBuilderAlert({ builderId, payload });
   } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
     logger.warn(
       {
         module: 'health.runner',
         builder_id: builderId,
         type: payload.type,
-        error: err instanceof Error ? err.message : String(err),
+        error,
       },
       'builder alert dispatch failed; skipping',
     );
+    return { kind: 'failed', error };
   }
 }

@@ -10,12 +10,13 @@ import { toNextResponse } from '../../../../lib/public-http/response.js';
 export async function POST(request: NextRequest): Promise<Response> {
   const ctx = readBuilderContext(request);
   if (ctx instanceof NextResponse) return ctx;
-  const { builderId, keyId } = ctx;
+  const { builderId, keyId, productAccessVerified } = ctx;
 
   return toNextResponse(
     await handleTelemetryIngest({
       builderId,
       keyId,
+      productAccessVerified,
       rawBody: await request.text(),
     }),
   );

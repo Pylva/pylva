@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import postgres from 'postgres';
 import crypto from 'node:crypto';
-import { type BuilderTier } from '@pylva/shared';
+import type { BuilderAccessState, BuilderPlan, EntitlementSource } from '@pylva/shared';
 
 const authMock = vi.fn();
 const overviewMock = vi.fn();
@@ -33,18 +33,37 @@ function portalRequest(): import('next/server.js').NextRequest {
   ) as unknown as import('next/server.js').NextRequest;
 }
 
-async function setTier(tier: BuilderTier): Promise<void> {
-  await sql`UPDATE builders SET tier = ${tier} WHERE id = ${builderId}`;
+async function setEntitlement(input: {
+  plan: BuilderPlan | null;
+  accessState: BuilderAccessState;
+  source: EntitlementSource | null;
+}): Promise<void> {
+  await sql`
+    UPDATE builders
+    SET tier = ${input.plan},
+        access_state = ${input.accessState},
+        entitlement_source = ${input.source}
+    WHERE id = ${builderId}
+  `;
 }
 
 beforeAll(async () => {
   sql = postgres(DATABASE_URL);
   const [builder] = await sql<{ id: string }[]>`
-    INSERT INTO builders (email, name, tier, slug)
+    INSERT INTO builders (
+      email,
+      name,
+      tier,
+      access_state,
+      entitlement_source,
+      slug
+    )
     VALUES (
       ${`portal-entitlement-${crypto.randomBytes(4).toString('hex')}@test.com`},
       'Portal Entitlement Test',
-      'free',
+      NULL,
+      'active',
+      'self_hosted',
       ${`portal-entitlement-${crypto.randomBytes(4).toString('hex')}`}
     )
     RETURNING id
@@ -82,30 +101,27 @@ describe('portal entitlement integration', () => {
     byModelMock.mockResolvedValue([]);
   });
 
-  it('allows portal access for every self-host tier using the real builder row', async () => {
-    await setTier('free');
+  it('allows portal access for active self-hosted and paid entitlements', async () => {
+    await setEntitlement({ plan: null, accessState: 'active', source: 'self_hosted' });
     await expect(checkPortalEntitlement(builderId)).resolves.toBeNull();
 
-    await setTier('pro');
+    await setEntitlement({ plan: 'pro', accessState: 'active', source: 'admin' });
     await expect(checkPortalEntitlement(builderId)).resolves.toBeNull();
 
-    await setTier('scale');
+    await setEntitlement({ plan: 'scale', accessState: 'active', source: 'admin' });
     await expect(checkPortalEntitlement(builderId)).resolves.toBeNull();
   });
 
-  it('keeps an otherwise valid existing portal token usable after downgrade to Free', async () => {
-    await setTier('free');
+  it('denies an otherwise valid existing portal token after suspension', async () => {
+    await setEntitlement({ plan: null, accessState: 'suspended', source: 'stripe' });
 
     const response = await getPortalOverviewRoute(portalRequest());
     const body = await response.json();
 
-    expect(response.status).toBe(200);
-    expect(body).toMatchObject({
-      overview: { total_cost_usd: 1.23, event_count: 2 },
-      breakdown: { by_model: [] },
-    });
-    expect(rangeMock).toHaveBeenCalledOnce();
-    expect(overviewMock).toHaveBeenCalledOnce();
+    expect(response.status).toBe(403);
+    expect(body.error.code).toBe('FEATURE_NOT_AVAILABLE');
+    expect(rangeMock).not.toHaveBeenCalled();
+    expect(overviewMock).not.toHaveBeenCalled();
     expect(byModelMock).not.toHaveBeenCalled();
   });
 });

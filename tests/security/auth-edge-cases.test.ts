@@ -23,9 +23,21 @@ beforeAll(async () => {
   sql = postgres(DATABASE_URL);
 
   const [builder] = await sql`
-    INSERT INTO builders (email, name, tier, slug)
-    VALUES ('test-auth-edge@test.com', 'Auth Edge Test', 'pro', 'auth-edge-test')
-    ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, tier = EXCLUDED.tier, slug = EXCLUDED.slug
+    INSERT INTO builders (email, name, tier, access_state, entitlement_source, slug)
+    VALUES (
+      'test-auth-edge@test.com',
+      'Auth Edge Test',
+      'pro',
+      'active',
+      'admin',
+      'auth-edge-test'
+    )
+    ON CONFLICT (email) DO UPDATE SET
+      name = EXCLUDED.name,
+      tier = EXCLUDED.tier,
+      access_state = EXCLUDED.access_state,
+      entitlement_source = EXCLUDED.entitlement_source,
+      slug = EXCLUDED.slug
     RETURNING id
   `;
   builderId = builder!.id as string;

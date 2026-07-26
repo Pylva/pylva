@@ -10,8 +10,11 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-const externalFetchMock = vi.fn();
-const buildAlertBlocksMock = vi.fn();
+const mocks = vi.hoisted(() => ({
+  buildAlertBlocks: vi.fn(),
+  externalFetch: vi.fn(),
+  withProductAccessMutation: vi.fn(),
+}));
 
 // dlq-retry transitively imports logger + db/client (via db/rls), which read
 // the validated env at module load. Stub config so the module graph loads
@@ -26,14 +29,25 @@ vi.mock('../../src/lib/config.js', () => ({
 }));
 
 vi.mock('../../src/lib/external-egress.js', () => ({
-  externalFetch: externalFetchMock,
+  externalFetch: mocks.externalFetch,
 }));
 
 // Mock the renderer so the assertion isolates the retry wiring (does it wrap
 // in { blocks }?) from the Block Kit rendering details + env-dependent
 // deep-link construction.
 vi.mock('../../src/lib/alerts/templates/slack/block-builder.js', () => ({
-  buildAlertBlocks: buildAlertBlocksMock,
+  buildAlertBlocks: mocks.buildAlertBlocks,
+}));
+
+vi.mock('../../src/lib/auth/builder-entitlement.js', () => ({
+  authorizeBuilderCapability: vi.fn(async () => ({ allowed: true })),
+}));
+
+vi.mock('../../src/lib/auth/product-access-mutation.js', () => ({
+  isProductAccessMutationDeniedError: (error: unknown) =>
+    error instanceof Error &&
+    (error as Error & { code?: unknown }).code === 'product_access_mutation_denied',
+  withProductAccessMutation: mocks.withProductAccessMutation,
 }));
 
 const { deliverFromSnapshot } = await import('../../src/lib/alerts/dlq-retry.js');
@@ -75,21 +89,29 @@ function slackRow(overrides: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
-  externalFetchMock.mockReset();
-  buildAlertBlocksMock.mockReset();
-  buildAlertBlocksMock.mockReturnValue(SENTINEL_BLOCKS);
-  externalFetchMock.mockResolvedValue({ status: 200, statusText: 'OK', headers: {}, body: '' });
+  vi.clearAllMocks();
+  mocks.buildAlertBlocks.mockReturnValue(SENTINEL_BLOCKS);
+  mocks.externalFetch.mockResolvedValue({
+    status: 200,
+    statusText: 'OK',
+    headers: {},
+    body: '',
+  });
+  mocks.withProductAccessMutation.mockImplementation(
+    async (_builderId: string, callback: (tx: unknown) => Promise<unknown>) => callback({}),
+  );
 });
 
 describe('DLQ slack retry — payload shape', () => {
   it('re-renders Block Kit and posts a top-level { blocks } object, never the raw array', async () => {
-    const result = await deliverFromSnapshot(slackRow());
+    const result = await deliverFromSnapshot('b1', slackRow());
 
     expect(result).toEqual({ ok: true });
-    expect(buildAlertBlocksMock).toHaveBeenCalledWith(RAW_PAYLOADS);
-    expect(externalFetchMock).toHaveBeenCalledTimes(1);
+    expect(mocks.buildAlertBlocks).toHaveBeenCalledWith(RAW_PAYLOADS);
+    expect(mocks.externalFetch).toHaveBeenCalledTimes(1);
+    expect(mocks.withProductAccessMutation).toHaveBeenCalledTimes(1);
 
-    const req = externalFetchMock.mock.calls[0]![0] as {
+    const req = mocks.externalFetch.mock.calls[0]![0] as {
       target: string;
       url: string;
       body: string;
@@ -104,20 +126,21 @@ describe('DLQ slack retry — payload shape', () => {
   });
 
   it('surfaces a non-2xx slack response as a retry failure', async () => {
-    externalFetchMock.mockResolvedValue({
+    mocks.externalFetch.mockResolvedValue({
       status: 400,
       statusText: 'Bad Request',
       headers: {},
       body: 'invalid_payload',
     });
 
-    const result = await deliverFromSnapshot(slackRow());
+    const result = await deliverFromSnapshot('b1', slackRow());
     expect(result).toEqual({ ok: false, error: 'slack 400' });
   });
 
   it('fails closed when the frozen snapshot is missing the webhook url', async () => {
-    const result = await deliverFromSnapshot(slackRow({ snapshot: {} }));
+    const result = await deliverFromSnapshot('b1', slackRow({ snapshot: {} }));
     expect(result).toEqual({ ok: false, error: 'snapshot_missing_slack_url' });
-    expect(externalFetchMock).not.toHaveBeenCalled();
+    expect(mocks.externalFetch).not.toHaveBeenCalled();
+    expect(mocks.withProductAccessMutation).not.toHaveBeenCalled();
   });
 });

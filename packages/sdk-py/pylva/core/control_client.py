@@ -21,7 +21,7 @@ from typing import Any, Literal, TypeVar, cast
 import httpx
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from .._version import SDK_VERSION
+from .._version import API_CONTRACT_VERSION, SDK_VERSION
 from ..errors.budget_exceeded import BudgetExceededSource, PylvaBudgetExceeded
 from ..errors.control import (
     PylvaControlApiError,
@@ -144,6 +144,7 @@ def _headers(cfg: ResolvedConfig) -> dict[str, str]:
         "accept": "application/json",
         "content-type": "application/json",
         "X-Pylva-Key": cfg.api_key,
+        "X-Pylva-Contract-Version": API_CONTRACT_VERSION,
         "X-Pylva-SDK-Version": SDK_VERSION,
         "X-Pylva-SDK-Language": "python",
     }

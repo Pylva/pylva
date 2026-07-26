@@ -81,8 +81,9 @@ RUN chmod 755 /app/docker-migrate-entrypoint.sh /app/docker-migration-db-url.sh
 
 ENV NODE_ENV=production
 
-# Resolve the dedicated migration credential before db:migrate. Use a command
-# override for db:setup during fresh bootstraps.
+# Resolve the dedicated migration credential before db:migrate. Only verified
+# empty databases may override this with `pnpm db:setup --fresh-install`;
+# data-bearing databases stay on the phased `pnpm db:migrate` workflow.
 ENTRYPOINT ["/app/docker-migrate-entrypoint.sh"]
 CMD ["pnpm", "db:migrate"]
 

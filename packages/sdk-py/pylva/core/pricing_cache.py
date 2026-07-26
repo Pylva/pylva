@@ -10,6 +10,7 @@ from typing import Any, TypedDict
 
 import httpx
 
+from .._version import API_CONTRACT_VERSION
 from .config import get_config, get_config_generation
 
 TWENTY_FOUR_HOURS_SEC = 24 * 60 * 60
@@ -85,7 +86,10 @@ async def ensure_pricing_cache() -> None:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
                 f"{cfg.endpoint}/api/v1/pricing",
-                headers={"X-Pylva-Key": cfg.api_key},
+                headers={
+                    "X-Pylva-Key": cfg.api_key,
+                    "X-Pylva-Contract-Version": API_CONTRACT_VERSION,
+                },
             )
         if not resp.is_success:
             # Keep stale cache on non-ok; overgenerous TTL is fine (D22).
@@ -116,7 +120,10 @@ def _refresh_sync() -> None:
         with httpx.Client(timeout=10.0) as client:
             resp = client.get(
                 f"{cfg.endpoint}/api/v1/pricing",
-                headers={"X-Pylva-Key": cfg.api_key},
+                headers={
+                    "X-Pylva-Key": cfg.api_key,
+                    "X-Pylva-Contract-Version": API_CONTRACT_VERSION,
+                },
             )
         if not resp.is_success:
             return

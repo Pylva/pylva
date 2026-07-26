@@ -82,7 +82,7 @@ export function buildAgentSetupPrompt(options: { apiKey?: string } = {}): string
     `Read ${AGENT_SETUP_GUIDE_URL} and follow it: install the Pylva SDK for this project's language, initialize it at startup, and wrap the agent entrypoints so LLM and tool calls are attributed to a customer and step.`,
     'Never print, log, or commit the API key.',
     keyLine,
-    'You can verify the key with GET https://api.pylva.com/api/v1/whoami sent with the X-Pylva-Key header.',
+    'You can verify the key with GET https://api.pylva.com/api/v1/whoami sent with X-Pylva-Key and X-Pylva-Contract-Version: 2 headers.',
   ].join('\n\n');
 }
 

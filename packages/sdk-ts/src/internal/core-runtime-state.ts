@@ -1,4 +1,4 @@
-import { SDK_VERSION } from '../core/version.js';
+import { API_CONTRACT_VERSION, SDK_VERSION } from '../core/version.js';
 import type { NonLlmConfig } from '../core/non_llm_policy.js';
 import { isProxy } from 'node:util/types';
 
@@ -436,7 +436,10 @@ function createCoordinator(): {
       if (callerSignal?.aborted) forwardAbort();
       else callerSignal?.addEventListener('abort', forwardAbort, { once: true });
       state.activeControllers.add(controller);
-      const headers: Record<string, string> = { 'X-Pylva-Key': config.apiKey };
+      const headers: Record<string, string> = {
+        'X-Pylva-Key': config.apiKey,
+        'X-Pylva-Contract-Version': API_CONTRACT_VERSION,
+      };
       if (route.method === 'POST') headers['Content-Type'] = 'application/json';
       if (route.control) {
         headers['Accept'] = 'application/json';

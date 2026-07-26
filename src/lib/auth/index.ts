@@ -17,6 +17,7 @@ export {
 export { auditLog } from './audit-log.js';
 export {
   checkCustomerLimit,
+  checkCustomerLimitAgainstLimitInTransaction,
   checkCustomerLimitInTransaction,
   checkFeatureGate,
   shouldShowUpgradeBanner,
@@ -24,6 +25,6 @@ export {
 } from './tier-enforcement.js';
 export {
   customerLimitLockKey,
-  getBuilderTierForShare,
+  getBuilderEntitlementForShare,
   lockCustomerLimit,
 } from '../db/advisory-locks.js';

@@ -1,5 +1,6 @@
 // Database setup — runs PostgreSQL migrations + ClickHouse DDL
-// Usage: pnpm db:setup
+// Empty database: pnpm db:setup --fresh-install
+// Data-bearing upgrade: use the receipt-backed, phased pnpm db:migrate workflow.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -18,12 +19,33 @@ import {
   listMigrationFiles,
   logDrift,
   migrationHead,
+  prepareFreshInstallLedger,
   readLedger,
+  type LedgerRow,
+  type MigrateSqlClient,
   withMigrationAdvisoryLock,
 } from '../scripts/db-migrate-core.js';
 import { parseMigrationDatabaseEnv } from '../scripts/migration-database-env.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+export interface DbSetupArgs {
+  freshInstall: boolean;
+}
+
+export function parseSetupArgs(argv: string[]): DbSetupArgs {
+  let freshInstall = false;
+  for (const arg of argv) {
+    if (arg !== '--fresh-install') {
+      throw new Error(`Unknown db:setup argument: ${arg}`);
+    }
+    if (freshInstall) {
+      throw new Error('--fresh-install can only be specified once');
+    }
+    freshInstall = true;
+  }
+  return { freshInstall };
+}
 
 // Returns whether to skip ClickHouse DDL: SKIP_CLICKHOUSE=true OR an RFC 6761
 // `.invalid` host (a known-unreachable placeholder; never resolves via DNS).
@@ -58,6 +80,83 @@ export function shouldSkipPostgres(env: Record<string, string | undefined>): {
 
 export function isMainModule(importMetaUrl: string, argvPath: string | undefined): boolean {
   return argvPath !== undefined && importMetaUrl === pathToFileURL(argvPath).href;
+}
+
+export interface PostgresSetupDeps {
+  sql: MigrateSqlClient;
+  migrationsDir: string;
+  log: (line: string) => void;
+  error: (line: string) => void;
+}
+
+export async function runPostgresSetupMigrations(
+  args: DbSetupArgs,
+  deps: PostgresSetupDeps,
+): Promise<number> {
+  let exitCode = 0;
+
+  try {
+    await withMigrationAdvisoryLock(deps.sql, async (lockedSql) => {
+      const hasLedger = await ledgerExists(lockedSql);
+      if (!hasLedger && (await buildersTableExists(lockedSql))) {
+        deps.error(
+          'database predates migration tracking; inspect the physical schema, then run pnpm db:migrate --baseline --through <verified-historical-head-before-056> --yes',
+        );
+        exitCode = 1;
+        return;
+      }
+
+      const files = await listMigrationFiles(deps.migrationsDir);
+      let freshInstallAuthorized = false;
+      let ledger: LedgerRow[];
+      if (args.freshInstall) {
+        const preparation = await prepareFreshInstallLedger(lockedSql, files, hasLedger);
+        if (!preparation.authorized) {
+          deps.error(`refusing fresh-install migration mode: ${preparation.error}`);
+          exitCode = 1;
+          return;
+        }
+        ledger = preparation.ledger;
+        freshInstallAuthorized = true;
+      } else {
+        await ensureLedger(lockedSql);
+        ledger = await readLedger(lockedSql);
+      }
+
+      const status = computeStatus(files, ledger);
+      if (status.drift.length > 0 || status.unknown.length > 0) {
+        logDrift(status, deps.error);
+        exitCode = 1;
+        return;
+      }
+
+      const { appliedCount } = await applyPending({
+        sql: lockedSql,
+        files,
+        ledger,
+        appliedBy: 'db:setup',
+        removeFreePolicy: {
+          approvals: { expand: false, contract: false },
+          freshInstallAuthorized,
+        },
+        log: deps.log,
+      });
+      const headFile = migrationHead(files) ?? '(none)';
+      if (appliedCount === 0) {
+        deps.log(`0 pending — schema at head ${headFile}`);
+      } else {
+        deps.log(`applied ${appliedCount} migration(s); head: ${headFile}`);
+      }
+    });
+  } catch (error) {
+    if (!(error instanceof MigrationApplyError)) {
+      throw error;
+    }
+    deps.error(`failed to apply ${error.filename}: ${errorMessage(error.cause)}`);
+    exitCode = 1;
+  }
+
+  return exitCode;
 }
 
 function ownStringProperty(value: unknown, key: string): string | undefined {
@@ -111,7 +210,7 @@ export async function commandWithClickHouseRetry(
   }
 }
 
-async function setup() {
+async function setup(args: DbSetupArgs) {
   const clickhouseUrl = process.env['CLICKHOUSE_URL'] ?? 'http://localhost:8123';
 
   // --- PostgreSQL Migrations ---
@@ -123,47 +222,15 @@ async function setup() {
     const { databaseUrl } = parseMigrationDatabaseEnv(process.env);
     const sql = postgres(databaseUrl);
     const migrationsDir = path.join(__dirname, 'migrations');
-    let exitCode = 0;
+    let exitCode: number;
 
     try {
-      await withMigrationAdvisoryLock(sql, async (lockedSql) => {
-        const hasLedger = await ledgerExists(lockedSql);
-        if (!hasLedger && (await buildersTableExists(lockedSql))) {
-          console.error(
-            'database predates migration tracking; run pnpm db:migrate --baseline --yes once before applying migrations',
-          );
-          exitCode = 1;
-        } else {
-          const files = await listMigrationFiles(migrationsDir);
-          await ensureLedger(lockedSql);
-          const ledger = await readLedger(lockedSql);
-          const status = computeStatus(files, ledger);
-          if (status.drift.length > 0 || status.unknown.length > 0) {
-            logDrift(status, console.error);
-            exitCode = 1;
-          } else {
-            const { appliedCount } = await applyPending({
-              sql: lockedSql,
-              files,
-              ledger,
-              appliedBy: 'db:setup',
-              log: console.log,
-            });
-            const headFile = migrationHead(files) ?? '(none)';
-            if (appliedCount === 0) {
-              console.log(`0 pending — schema at head ${headFile}`);
-            } else {
-              console.log(`applied ${appliedCount} migration(s); head: ${headFile}`);
-            }
-          }
-        }
+      exitCode = await runPostgresSetupMigrations(args, {
+        sql,
+        migrationsDir,
+        log: console.log,
+        error: console.error,
       });
-    } catch (error) {
-      if (!(error instanceof MigrationApplyError)) {
-        throw error;
-      }
-      console.error(`failed to apply ${error.filename}: ${errorMessage(error.cause)}`);
-      exitCode = 1;
     } finally {
       await sql.end();
     }
@@ -215,7 +282,7 @@ async function setup() {
 
 // Run setup only when invoked as a script (not when imported by tests).
 if (isMainModule(import.meta.url, process.argv[1])) {
-  setup().catch((err) => {
+  setup(parseSetupArgs(process.argv.slice(2))).catch((err) => {
     console.error('Setup failed:', err);
     process.exit(1);
   });

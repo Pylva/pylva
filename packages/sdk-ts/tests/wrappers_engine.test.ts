@@ -7,11 +7,13 @@ import { Provider, RuleStatus, RuleType, RuleWarningCode } from '@pylva/shared';
 import { FAILOVER_CFG_BASE } from './helpers/failover_fixtures.js';
 
 const cachedRules: unknown[] = [];
+let passthrough = false;
 
 vi.mock('../src/core/rules_cache.js', () => ({
   ensureRulesCache: vi.fn(async () => {}),
   getCachedRules: () => cachedRules,
-  isPassthrough: () => false,
+  getRulesForEvaluation: () => (passthrough ? [] : cachedRules),
+  isPassthrough: () => passthrough,
 }));
 
 vi.mock('../src/core/budget_accumulator.js', () => ({
@@ -38,6 +40,7 @@ const FAILOVER_CFG = FAILOVER_CFG_BASE;
 
 beforeEach(() => {
   cachedRules.length = 0;
+  passthrough = false;
   vi.mocked(check).mockReset();
   vi.mocked(check).mockReturnValue({ over_limit: false, accumulated_usd: 0, projected_usd: 0 });
   _resetEngineForTests();
@@ -183,6 +186,58 @@ describe('runWithEngine — same-provider model routing', () => {
       }),
     ).rejects.toThrow('auth');
     expect(calls).toEqual(['gpt-4o-mini']);
+  });
+});
+
+describe('runWithEngine — restricted/degraded rules passthrough', () => {
+  it('does not apply warmed routing or failover rules after authorization is lost', async () => {
+    cachedRules.push(
+      {
+        id: 'route-before-suspension',
+        type: RuleType.MODEL_ROUTING,
+        enabled: true,
+        status: RuleStatus.ACTIVE,
+        customer_id: null,
+        updated_at: '2026-07-23T00:00:00Z',
+        config: {
+          scope: 'per_customer',
+          match: { provider: Provider.OPENAI, model: 'gpt-4o' },
+          route_to: { provider: Provider.OPENAI, model: 'gpt-4o-mini' },
+          fallback: FALLBACK,
+        },
+      },
+      {
+        id: 'failover-before-suspension',
+        type: RuleType.RELIABILITY_FAILOVER,
+        enabled: true,
+        status: RuleStatus.ACTIVE,
+        customer_id: 'cust_1',
+        updated_at: '2026-07-23T00:00:00Z',
+        config: FAILOVER_CFG,
+      },
+    );
+    passthrough = true;
+    const calls: string[] = [];
+
+    const out = await runWithEngine({
+      request: { model: 'gpt-4o' },
+      providerId: Provider.OPENAI,
+      ctx: {
+        customer_id: 'cust_1',
+        step_name: null,
+        provider: Provider.OPENAI,
+        model: 'gpt-4o',
+      },
+      call: async (request) => {
+        calls.push(request['model'] as string);
+        return { ok: true };
+      },
+    });
+
+    expect(calls).toEqual(['gpt-4o']);
+    expect(out.metadata.routing_applied).toBe(false);
+    expect(out.metadata.failover_active).toBe(false);
+    expect(ensureState(FAILOVER_CFG).samples).toHaveLength(0);
   });
 });
 

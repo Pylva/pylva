@@ -7,14 +7,13 @@ import * as v from 'valibot';
 import { eq } from 'drizzle-orm';
 import { ErrorCode, type Role as RoleType } from '@pylva/shared';
 import { readBuilderContextFromDashboard } from '@/lib/auth/builder-context';
-import { getBuilderTierGate } from '@/lib/auth/dashboard-feature-gate';
-import { checkFeatureGate } from '@/lib/auth/tier-enforcement';
+import { checkDashboardFeatureGate } from '@/lib/auth/dashboard-feature-gate';
 import { withRole, Role } from '@/lib/auth/middleware';
 import { auditLog } from '@/lib/auth/audit-log';
 import { AuditAction } from '@/lib/audit/actions';
 import { withRLS } from '@/lib/db/rls';
 import { portalConfigs } from '@/lib/db/schema';
-import { checkPortalEntitlement, checkPortalEntitlementForTier } from '@/lib/portal/entitlement';
+import { checkPortalEntitlement } from '@/lib/portal/entitlement';
 import { hasPortalBrandingFields, portalConfigUpdateSchema } from '@/lib/portal/validator';
 import { authError, validationError } from '@/lib/errors';
 
@@ -40,9 +39,7 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
   if (!ctx.userId) return authError(ErrorCode.INVALID_API_KEY, 'No user context');
   const gate = withRole([Role.OWNER], ctx.role as RoleType | null);
   if (gate) return gate;
-  const tier = await getBuilderTierGate(ctx.builderId);
-  if (tier instanceof Response) return tier;
-  const entitlement = checkPortalEntitlementForTier(tier);
+  const entitlement = await checkDashboardFeatureGate(ctx.builderId, 'portal');
   if (entitlement) return entitlement;
 
   let body: unknown;
@@ -56,7 +53,10 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
 
   const updateValues = parsed.output as Record<string, unknown>;
   if (hasPortalBrandingFields(parsed.output)) {
-    const whiteLabelGate = checkFeatureGate(tier, 'white_label_portal');
+    const whiteLabelGate = await checkDashboardFeatureGate(
+      ctx.builderId,
+      'white_label_portal',
+    );
     if (whiteLabelGate) return whiteLabelGate;
   }
 

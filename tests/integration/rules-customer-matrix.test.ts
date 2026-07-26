@@ -304,14 +304,28 @@ beforeAll(async () => {
 
   const suffix = crypto.randomBytes(5).toString('hex');
   const [rowA] = await sql<{ id: string }[]>`
-    INSERT INTO builders (email, name, tier, slug)
-    VALUES (${`matrix-a-${suffix}@example.com`}, 'Matrix A', 'scale', ${`matrix-a-${suffix}`})
+    INSERT INTO builders (email, name, tier, access_state, entitlement_source, slug)
+    VALUES (
+      ${`matrix-a-${suffix}@example.com`},
+      'Matrix A',
+      'scale',
+      'active',
+      'admin',
+      ${`matrix-a-${suffix}`}
+    )
     RETURNING id
   `;
   builderA = rowA!.id;
   const [rowB] = await sql<{ id: string }[]>`
-    INSERT INTO builders (email, name, tier, slug)
-    VALUES (${`matrix-b-${suffix}@example.com`}, 'Matrix B', 'scale', ${`matrix-b-${suffix}`})
+    INSERT INTO builders (email, name, tier, access_state, entitlement_source, slug)
+    VALUES (
+      ${`matrix-b-${suffix}@example.com`},
+      'Matrix B',
+      'scale',
+      'active',
+      'admin',
+      ${`matrix-b-${suffix}`}
+    )
     RETURNING id
   `;
   builderB = rowB!.id;

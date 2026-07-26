@@ -70,14 +70,40 @@ export interface ConsumeMagicTokenResult {
   pendingInviteToken: string | null;
 }
 
+export interface ConsumeMagicTokenIdentityResult {
+  email: string;
+  next: AllowedAuthNextPath | null;
+  pendingInviteToken: string | null;
+}
+
+interface ExistingMagicUser {
+  id: string;
+  auth_provider: string | null;
+}
+
+async function recordMagicLinkLogin(row: ExistingMagicUser): Promise<void> {
+  const existingProvider = row.auth_provider as AuthProviderType | null;
+  const nextProvider: AuthProviderType =
+    existingProvider === null || existingProvider === AuthProvider.MAGIC_LINK
+      ? AuthProvider.MAGIC_LINK
+      : AuthProvider.MIXED;
+  await db
+    .update(users)
+    .set({ auth_provider: nextProvider, last_login_at: new Date() })
+    .where(eq(users.id, row.id));
+}
+
 /**
- * Consume a magic-link token atomically (GETDEL). Upserts the user row on
- * first consumption and sets auth_provider accordingly.
+ * Consume and validate only the Redis identity payload. Auth callbacks use
+ * this form so user creation can share one PostgreSQL transaction with invite
+ * claim and membership creation.
  *
  * Throws AuthDegraded on Redis failure (I-T1-5 fail-closed). Returns null if
  * the token has expired or is already consumed.
  */
-export async function consumeMagicToken(token: string): Promise<ConsumeMagicTokenResult | null> {
+export async function consumeMagicTokenIdentity(
+  token: string,
+): Promise<ConsumeMagicTokenIdentityResult | null> {
   let raw: string | null = null;
   try {
     // GETDEL is atomic: if the key exists, it returns the value and deletes it.
@@ -101,6 +127,19 @@ export async function consumeMagicToken(token: string): Promise<ConsumeMagicToke
       ? payload.pendingInviteToken
       : null;
 
+  return { email, next, pendingInviteToken };
+}
+
+/**
+ * Standalone compatibility helper: consume the identity and upsert only its
+ * user row. The browser callback deliberately uses consumeMagicTokenIdentity
+ * plus provisionMagicLinkUserAndBuilder for user+membership atomicity.
+ */
+export async function consumeMagicToken(token: string): Promise<ConsumeMagicTokenResult | null> {
+  const identity = await consumeMagicTokenIdentity(token);
+  if (!identity) return null;
+  const { email, next, pendingInviteToken } = identity;
+
   // Upsert user.
   const existing = await db
     .select({ id: users.id, auth_provider: users.auth_provider })
@@ -110,15 +149,7 @@ export async function consumeMagicToken(token: string): Promise<ConsumeMagicToke
 
   if (existing.length > 0) {
     const row = existing[0]!;
-    const existingProvider = row.auth_provider as AuthProviderType | null;
-    const nextProvider: AuthProviderType =
-      existingProvider === null || existingProvider === AuthProvider.MAGIC_LINK
-        ? AuthProvider.MAGIC_LINK
-        : AuthProvider.MIXED;
-    await db
-      .update(users)
-      .set({ auth_provider: nextProvider, last_login_at: new Date() })
-      .where(eq(users.id, row.id));
+    await recordMagicLinkLogin(row);
     return { userId: row.id, email, isNewUser: false, next, pendingInviteToken };
   }
 
@@ -129,9 +160,28 @@ export async function consumeMagicToken(token: string): Promise<ConsumeMagicToke
       auth_provider: AuthProvider.MAGIC_LINK,
       last_login_at: new Date(),
     })
+    .onConflictDoNothing({ target: users.email })
     .returning({ id: users.id });
 
-  return { userId: inserted[0]!.id, email, isNewUser: true, next, pendingInviteToken };
+  const insertedUser = inserted[0];
+  if (insertedUser) {
+    return { userId: insertedUser.id, email, isNewUser: true, next, pendingInviteToken };
+  }
+
+  // Another first-login request inserted this CITEXT email after our initial
+  // read. ON CONFLICT waits for that transaction, so a new statement can
+  // safely re-read the winner and apply normal provider-merge semantics.
+  const raced = await db
+    .select({ id: users.id, auth_provider: users.auth_provider })
+    .from(users)
+    .where(eq(users.email, email))
+    .limit(1);
+  const racedUser = raced[0];
+  if (!racedUser) {
+    throw new AuthDegraded('user upsert conflict could not be resolved');
+  }
+  await recordMagicLinkLogin(racedUser);
+  return { userId: racedUser.id, email, isNewUser: false, next, pendingInviteToken };
 }
 
 /**

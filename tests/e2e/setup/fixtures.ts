@@ -6,7 +6,7 @@
 export const DASHBOARD_STORAGE_STATE = 'playwright/.auth/dashboard.json';
 
 // Stable builder slug from db/seed.ts.
-export const DASHBOARD_ORG_SLUG = 'alice-free';
+export const DASHBOARD_ORG_SLUG = 'alice-self-hosted';
 
 // Customer ids seeded by seed-dashboard-fixtures.ts. Deliberately include a
 // very long id (from the bug-report screenshots) and an Arabic id (RTL is a

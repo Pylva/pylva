@@ -22,6 +22,10 @@ import pytest
 
 import pylva
 from pylva.core import rules_cache
+from pylva.core.rules_engine import PreCallContext
+from pylva.wrappers._engine import run_with_engine
+
+from ._fixtures import failover_rule, routing_rule
 
 VALID_KEY = "pv_live_12345678_" + "a" * 32
 
@@ -189,6 +193,79 @@ async def test_non_success_response_enters_passthrough(
     )
     rules_cache._fetched_at -= rules_cache.RULES_CACHE_TTL_SEC + 1  # type: ignore[attr-defined]
     await rules_cache.ensure_rules_cache()
+    assert rules_cache.is_passthrough() is True
+
+
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_definitive_auth_failure_clears_warmed_rules(
+    patched_httpx: dict[str, _FakeAsyncClient],
+    status_code: int,
+) -> None:
+    patched_httpx["client"] = _FakeAsyncClient(
+        response=_FakeResponse(200, {"rules": [{"id": "warmed-routing-rule"}]}),
+    )
+    await rules_cache.ensure_rules_cache()
+    assert rules_cache.get_cached_rules() == [{"id": "warmed-routing-rule"}]
+
+    rules_cache._fetched_at -= rules_cache.RULES_CACHE_TTL_SEC + 1  # type: ignore[attr-defined]
+    patched_httpx["client"] = _FakeAsyncClient(
+        response=_FakeResponse(status_code, {"error": "restricted"}),
+    )
+    await rules_cache.ensure_rules_cache()
+
+    assert rules_cache.get_cached_rules() == []
+    assert rules_cache.get_rules_for_evaluation() == []
+    assert rules_cache.is_passthrough() is True
+
+
+async def test_expired_warmed_rules_are_quarantined_before_async_403_refresh(
+    patched_httpx: dict[str, _FakeAsyncClient],
+) -> None:
+    warmed_rules = [
+        routing_rule(
+            match={"provider": "openai", "model": "gpt-4o"},
+            route_to_model="gpt-4o-mini",
+        ),
+        failover_rule(),
+    ]
+    patched_httpx["client"] = _FakeAsyncClient(
+        response=_FakeResponse(200, {"rules": warmed_rules}),
+    )
+    await rules_cache.ensure_rules_cache()
+    rules_cache._fetched_at -= rules_cache.RULES_CACHE_TTL_SEC + 1  # type: ignore[attr-defined]
+    patched_httpx["client"] = _FakeAsyncClient(
+        response=_FakeResponse(403, {"error": "workspace_suspended"}),
+    )
+    calls: list[str] = []
+
+    async def call(request: dict[str, Any]) -> dict[str, Any]:
+        calls.append(request["model"])
+        await asyncio.sleep(0)
+        return {"ok": True}
+
+    async def issue_call() -> Any:
+        return await run_with_engine(
+            request={"model": "gpt-4o"},
+            provider_id="openai",
+            ctx=PreCallContext(
+                customer_id="cust_1",
+                step_name=None,
+                provider="openai",
+                model="gpt-4o",
+            ),
+            call=call,
+        )
+
+    first = await issue_call()
+    await rules_cache.ensure_rules_cache()
+    second = await issue_call()
+
+    assert calls == ["gpt-4o", "gpt-4o"]
+    assert first.metadata.routing_applied is False
+    assert first.metadata.failover_active is False
+    assert second.metadata.routing_applied is False
+    assert second.metadata.failover_active is False
+    assert rules_cache.get_cached_rules() == []
     assert rules_cache.is_passthrough() is True
 
 

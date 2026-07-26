@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server.js';
 import { readBuilderContextFromDashboard } from '@/lib/auth/builder-context';
+import { checkDashboardFeatureGate } from '@/lib/auth/dashboard-feature-gate';
 import { db } from '@/lib/db/client';
 import { llmPricing } from '@/lib/db/schema';
 import { env } from '@/lib/config';
@@ -25,6 +26,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   const ctx = readBuilderContextFromDashboard(request);
   if (ctx instanceof NextResponse) return ctx;
+
+  const gateResult = await checkDashboardFeatureGate(ctx.builderId, 'simulator');
+  if (gateResult) return gateResult;
 
   const rows = await db
     .select({

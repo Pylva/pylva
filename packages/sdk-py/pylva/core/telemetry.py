@@ -23,7 +23,7 @@ from typing import Any
 
 import httpx
 
-from .._version import SDK_VERSION
+from .._version import API_CONTRACT_VERSION, SDK_VERSION
 from .budget_accumulator import mark_exceeded_from_backend
 from .budget_rules import record_llm_spend
 from .config import (
@@ -275,6 +275,7 @@ async def _flush_once(state: _State | None = None) -> None:
                     headers={
                         "content-type": "application/json",
                         "X-Pylva-Key": cfg.api_key,
+                        "X-Pylva-Contract-Version": API_CONTRACT_VERSION,
                     },
                     content=json.dumps(body),
                 )

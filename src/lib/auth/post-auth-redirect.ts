@@ -8,6 +8,8 @@
 // org dashboard. The OAuth flow carries `next` inside the HMAC-signed state
 // value, so it also cannot be tampered with in transit.
 
+import type { BuilderAccessState } from '@pylva/shared';
+
 const OAUTH_STATE_PREFIX = 'v1.';
 const MAX_NEXT_LENGTH = 200;
 
@@ -54,8 +56,12 @@ export function buildPostAuthRedirectUrl(params: {
   baseUrl: string;
   orgSlug: string;
   next?: string | null;
+  accessState?: BuilderAccessState;
 }): string {
   const safeNext = validateAuthNext(params.next);
+  if (params.accessState && params.accessState !== 'active') {
+    return `${params.baseUrl}/o/${params.orgSlug}/subscription`;
+  }
   if (
     safeNext &&
     isDashboardAuthNext(safeNext) &&

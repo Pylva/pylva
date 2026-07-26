@@ -30,12 +30,21 @@ cp .env.example .env
 
 Set `RESEND_API_KEY` if you need to exercise magic-link, invite, alert, or tier-limit email delivery locally.
 
-Run migrations and seed data:
+Bootstrap the dedicated migration role, install a fresh database, and seed
+data. The scoped role is required; the fresh-install command deliberately
+rejects a superuser or the ordinary application credential.
 
 ```bash
-pnpm db:setup
+CI_POSTGRES_ADMIN_URL='postgresql://pylva:pylva_dev@localhost:5432/pylva' \
+MIGRATION_DATABASE_URL='postgresql://pylva_migration_ci:pylva_migration_dev@localhost:5432/pylva' \
+  pnpm exec tsx scripts/ci/bootstrap-authoritative-budget-migration-role.ts
+MIGRATION_DATABASE_URL='postgresql://pylva_migration_ci:pylva_migration_dev@localhost:5432/pylva' \
+  pnpm db:setup --fresh-install
 pnpm db:seed
 ```
+
+For a data-bearing database, use the reviewed phased `pnpm db:migrate`
+workflow instead of fresh-install mode.
 
 Start the app:
 

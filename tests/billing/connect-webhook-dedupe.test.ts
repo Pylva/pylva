@@ -58,8 +58,14 @@ const mockState = vi.hoisted(() => {
   let connectRows: StripeConnectRow[] = [];
   const eventRows = new Map<string, EventLogRow>();
   let currentEvent: unknown;
+  let lockedEntitlementResolution: unknown;
+  let builderLookupError: Error | null = null;
 
   const dispatchSpy = vi.fn();
+  const deliverBuilderAlertSpy = vi.fn();
+  const getBuilderEntitlementForShareSpy = vi.fn(
+    async () => lockedEntitlementResolution,
+  );
   const constructEventSpy = vi.fn(() => currentEvent);
   const warnSpy = vi.fn();
 
@@ -139,13 +145,18 @@ const mockState = vi.hoisted(() => {
     select: (fields: Fields) => ({
       from: (table: TableDesc) => ({
         where: (cond: Cond) => ({
-          limit: (n: number) =>
-            Promise.resolve(
-              rowsFor(table)
-                .filter((row) => matches(row, cond))
-                .slice(0, n)
-                .map((row) => project(row, fields)),
-            ),
+          limit: async (n: number) => {
+            if (
+              table.__table === 'stripe_connect' &&
+              builderLookupError
+            ) {
+              throw builderLookupError;
+            }
+            return rowsFor(table)
+              .filter((row) => matches(row, cond))
+              .slice(0, n)
+              .map((row) => project(row, fields));
+          },
         }),
       }),
     }),
@@ -176,7 +187,25 @@ const mockState = vi.hoisted(() => {
     connectRows = [{ stripe_account_id: ACCOUNT_ID, builder_id: BUILDER_ID }];
     eventRows.clear();
     currentEvent = makeEvent('evt_default');
+    builderLookupError = null;
+    lockedEntitlementResolution = {
+      ok: true,
+      entitlement: {
+        plan: null,
+        access_state: 'active',
+        entitlement_source: 'self_hosted',
+        has_product_access: true,
+        legacy_free: false,
+      },
+    };
     dispatchSpy.mockReset();
+    dispatchSpy.mockResolvedValue(null);
+    deliverBuilderAlertSpy.mockReset();
+    deliverBuilderAlertSpy.mockResolvedValue({ kind: 'delivered' });
+    getBuilderEntitlementForShareSpy.mockReset();
+    getBuilderEntitlementForShareSpy.mockImplementation(
+      async () => lockedEntitlementResolution,
+    );
     constructEventSpy.mockClear();
   }
 
@@ -196,11 +225,33 @@ const mockState = vi.hoisted(() => {
     eventRows.delete(eventKey(ACCOUNT_ID, eventId));
   }
 
+  function setLockedEntitlementResolution(resolution: unknown): void {
+    lockedEntitlementResolution = resolution;
+  }
+
+  function setBuilderLookupError(error: Error): void {
+    builderLookupError = error;
+  }
+
+  function snapshotEventRows(): Array<[string, EventLogRow]> {
+    return Array.from(eventRows.entries()).map(([key, row]) => [
+      key,
+      { ...row },
+    ]);
+  }
+
+  function restoreEventRows(snapshot: Array<[string, EventLogRow]>): void {
+    eventRows.clear();
+    for (const [key, row] of snapshot) eventRows.set(key, row);
+  }
+
   return {
     ACCOUNT_ID,
     BUILDER_ID,
     db,
     dispatchSpy,
+    deliverBuilderAlertSpy,
+    getBuilderEntitlementForShareSpy,
     constructEventSpy,
     warnSpy,
     makeEvent,
@@ -209,6 +260,10 @@ const mockState = vi.hoisted(() => {
     putEventRow,
     getEventRow,
     deleteEventRow,
+    setLockedEntitlementResolution,
+    setBuilderLookupError,
+    snapshotEventRows,
+    restoreEventRows,
     stripeConnect,
     stripeConnectEventLog,
   };
@@ -234,6 +289,26 @@ vi.mock('../../src/lib/logger.js', () => ({
 
 vi.mock('../../src/lib/db/client.js', () => ({ db: mockState.db }));
 
+vi.mock('../../src/lib/db/rls.js', () => ({
+  withRLS: async (
+    _builderId: string,
+    callback: (transaction: unknown) => Promise<unknown>,
+  ) => {
+    const snapshot = mockState.snapshotEventRows();
+    try {
+      return await callback(mockState.db);
+    } catch (error) {
+      mockState.restoreEventRows(snapshot);
+      throw error;
+    }
+  },
+}));
+
+vi.mock('../../src/lib/db/advisory-locks.js', () => ({
+  getBuilderEntitlementForShare:
+    mockState.getBuilderEntitlementForShareSpy,
+}));
+
 vi.mock('../../src/lib/db/schema.js', () => ({
   stripeConnect: mockState.stripeConnect,
   stripeConnectEventLog: mockState.stripeConnectEventLog,
@@ -257,6 +332,10 @@ vi.mock('../../src/lib/stripe/client.js', () => ({
 
 vi.mock('../../src/lib/stripe/webhook-handlers.js', () => ({
   dispatch: mockState.dispatchSpy,
+}));
+
+vi.mock('../../src/lib/alerts/builder-alert.js', () => ({
+  deliverBuilderAlert: mockState.deliverBuilderAlertSpy,
 }));
 
 const { handleConnectStripeWebhook } =
@@ -292,6 +371,16 @@ describe('Connect webhook route event-id dedupe', () => {
     const res = await postWebhook();
 
     expect(res.status).toBe(200);
+    expect(mockState.dispatchSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns retryable 503 when the Connect account lookup fails', async () => {
+    mockState.setBuilderLookupError(new Error('database unavailable'));
+
+    const res = await postWebhook();
+
+    expect(res.status).toBe(503);
+    expect(res.headers?.['Retry-After']).toBe('30');
     expect(mockState.dispatchSpy).not.toHaveBeenCalled();
   });
 
@@ -341,7 +430,7 @@ describe('Connect webhook route event-id dedupe', () => {
     expect(mockState.dispatchSpy).not.toHaveBeenCalled();
   });
 
-  it('leaves handled_at null and clears processing on handler error', async () => {
+  it('does not mark a failed dispatch as handled', async () => {
     const event = mockState.makeEvent('evt_error');
     mockState.setCurrentEvent(event);
     mockState.dispatchSpy.mockRejectedValueOnce(new Error('simulated handler failure'));
@@ -350,9 +439,7 @@ describe('Connect webhook route event-id dedupe', () => {
     const row = mockState.getEventRow('evt_error');
 
     expect(res.status).toBe(500);
-    expect(row?.handled_at).toBeNull();
-    expect(row?.processing_started_at).toBeNull();
-    expect(row?.last_error).toBe('simulated handler failure');
+    expect(row).toBeUndefined();
   });
 
   it('does not dispatch a replayed dispute twice', async () => {
@@ -368,7 +455,7 @@ describe('Connect webhook route event-id dedupe', () => {
     expect(mockState.dispatchSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('warns when the handled marker update matches zero rows', async () => {
+  it('fails the transaction when the handled marker cannot be written', async () => {
     const event = mockState.makeEvent('evt_missing_handled');
     mockState.setCurrentEvent(event);
     mockState.dispatchSpy.mockImplementationOnce(async () => {
@@ -377,27 +464,77 @@ describe('Connect webhook route event-id dedupe', () => {
 
     const res = await postWebhook();
 
-    expect(res.status).toBe(200);
-    expect(mockState.warnSpy).toHaveBeenCalledWith(
-      { account: mockState.ACCOUNT_ID, event_id: 'evt_missing_handled' },
-      'markConnectEventHandled matched 0 rows - row missing or already handled',
-    );
+    expect(res.status).toBe(500);
   });
 
-  it('warns when the failed marker update matches zero rows', async () => {
-    const event = mockState.makeEvent('evt_missing_failed');
+  it('allows a valid active self-hosted entitlement', async () => {
+    const event = mockState.makeEvent('evt_self_hosted');
     mockState.setCurrentEvent(event);
-    mockState.dispatchSpy.mockImplementationOnce(async () => {
-      mockState.deleteEventRow('evt_missing_failed');
-      throw new Error('simulated handler failure');
-    });
 
     const res = await postWebhook();
 
-    expect(res.status).toBe(500);
-    expect(mockState.warnSpy).toHaveBeenCalledWith(
-      { account: mockState.ACCOUNT_ID, event_id: 'evt_missing_failed' },
-      'markConnectEventFailed matched 0 rows - row missing or already handled',
+    expect(res.status).toBe(200);
+    expect(mockState.dispatchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['checkout_required', 'suspended'] as const)(
+    'terminally no-ops a %s workspace under the builder lock',
+    async (accessState) => {
+      mockState.setLockedEntitlementResolution({
+        ok: true,
+        entitlement: {
+          plan: null,
+          access_state: accessState,
+          entitlement_source: accessState === 'suspended' ? 'stripe' : null,
+          has_product_access: false,
+          legacy_free: false,
+        },
+      });
+
+      const res = await postWebhook();
+
+      expect(res.status).toBe(200);
+      expect(mockState.dispatchSpy).not.toHaveBeenCalled();
+      expect(mockState.getEventRow('evt_default')?.handled_at).toBeInstanceOf(
+        Date,
+      );
+    },
+  );
+
+  it.each([null, { ok: false, reason: 'invalid_combination' }])(
+    'returns retryable 503 for a missing or invalid locked entitlement',
+    async (resolution) => {
+      mockState.setLockedEntitlementResolution(resolution);
+
+      const res = await postWebhook();
+
+      expect(res.status).toBe(503);
+      expect(res.headers?.['Retry-After']).toBe('30');
+      expect(mockState.dispatchSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it('delivers an alert only after the terminal marker is committed', async () => {
+    mockState.dispatchSpy.mockResolvedValueOnce({
+      builderId: mockState.BUILDER_ID,
+      payload: {
+        id: 'evt_default',
+        type: 'billing.dispute_created',
+        builder_id: mockState.BUILDER_ID,
+        timestamp: new Date(0).toISOString(),
+        data: {},
+      },
+    });
+
+    const first = await postWebhook();
+    const second = await postWebhook();
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(mockState.dispatchSpy).toHaveBeenCalledTimes(1);
+    expect(mockState.deliverBuilderAlertSpy).toHaveBeenCalledTimes(1);
+    expect(mockState.getEventRow('evt_default')?.handled_at).toBeInstanceOf(
+      Date,
     );
   });
 });

@@ -5,10 +5,7 @@ import { ErrorCode, PortalLinkStatus, PortalLinkType } from '@pylva/shared';
 const mocks = vi.hoisted(() => ({
   auditLog: vi.fn(),
   checkDashboardFeatureGate: vi.fn(),
-  checkFeatureGate: vi.fn(),
-  getBuilderTierGate: vi.fn(),
   checkPortalEntitlement: vi.fn(),
-  checkPortalEntitlementForTier: vi.fn(),
   signJwt: vi.fn(),
   withRLS: vi.fn(),
   ctx: {
@@ -27,15 +24,9 @@ vi.mock('@/lib/auth/builder-context', () => ({
 
 vi.mock('../../src/lib/auth/dashboard-feature-gate.js', () => ({
   checkDashboardFeatureGate: mocks.checkDashboardFeatureGate,
-  getBuilderTierGate: mocks.getBuilderTierGate,
 }));
 vi.mock('@/lib/auth/dashboard-feature-gate', () => ({
   checkDashboardFeatureGate: mocks.checkDashboardFeatureGate,
-  getBuilderTierGate: mocks.getBuilderTierGate,
-}));
-
-vi.mock('@/lib/auth/tier-enforcement', () => ({
-  checkFeatureGate: mocks.checkFeatureGate,
 }));
 
 vi.mock('../../src/lib/auth/middleware.js', () => ({
@@ -70,11 +61,9 @@ vi.mock('@/lib/db/rls', () => ({
 
 vi.mock('../../src/lib/portal/entitlement.js', () => ({
   checkPortalEntitlement: mocks.checkPortalEntitlement,
-  checkPortalEntitlementForTier: mocks.checkPortalEntitlementForTier,
 }));
 vi.mock('@/lib/portal/entitlement', () => ({
   checkPortalEntitlement: mocks.checkPortalEntitlement,
-  checkPortalEntitlementForTier: mocks.checkPortalEntitlementForTier,
 }));
 
 const configRoute = await import('../../src/app/api/v1/portal/config/route.js');
@@ -94,7 +83,7 @@ function featureUnavailable(): NextResponse {
     {
       error: {
         code: ErrorCode.FEATURE_NOT_AVAILABLE,
-        message: 'portal is not available on the free tier',
+        message: 'Workspace access is suspended; reactivate billing to continue',
       },
     },
     { status: 403 },
@@ -151,23 +140,11 @@ describe('portal entitlement routes', () => {
     updateRows = [];
     mocks.auditLog.mockReset();
     mocks.checkDashboardFeatureGate.mockReset();
-    mocks.checkFeatureGate.mockReset();
-    mocks.getBuilderTierGate.mockReset();
     mocks.checkPortalEntitlement.mockReset();
-    mocks.checkPortalEntitlementForTier.mockReset();
     mocks.signJwt.mockReset();
     mocks.withRLS.mockReset();
     mocks.checkDashboardFeatureGate.mockResolvedValue(null);
-    mocks.getBuilderTierGate.mockResolvedValue('scale');
     mocks.checkPortalEntitlement.mockResolvedValue(null);
-    mocks.checkPortalEntitlementForTier.mockImplementation((tier: string) =>
-      tier === 'free' ? featureUnavailable() : null,
-    );
-    mocks.checkFeatureGate.mockImplementation((tier: string, feature: string) =>
-      feature === 'white_label_portal' && (tier === 'free' || tier === 'pro')
-        ? featureUnavailable()
-        : null,
-    );
     mocks.signJwt.mockResolvedValue(`h.${makeJwtPayload({ jti: 'jti-1' })}.s`);
     mocks.withRLS.mockImplementation(async (_builderId: string, cb: (arg: unknown) => unknown) =>
       cb(tx()),
@@ -176,7 +153,7 @@ describe('portal entitlement routes', () => {
 
   it('rejects builder-facing portal routes when the workspace is not entitled', async () => {
     mocks.checkPortalEntitlement.mockImplementation(async () => featureUnavailable());
-    mocks.getBuilderTierGate.mockResolvedValue('free');
+    mocks.checkDashboardFeatureGate.mockImplementation(async () => featureUnavailable());
 
     const cases = [
       () => configRoute.GET(makeRequest('/api/v1/portal/config')),
@@ -240,9 +217,11 @@ describe('portal entitlement routes', () => {
   });
 
   it('gates visual branding fields behind the white-label portal feature', async () => {
-    mocks.getBuilderTierGate.mockResolvedValueOnce('pro');
+    mocks.checkDashboardFeatureGate
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(featureUnavailable());
 
-    const proResponse = await configRoute.PUT(
+    const restrictedResponse = await configRoute.PUT(
       makeRequest('/api/v1/portal/config', {
         method: 'PUT',
         body: {
@@ -254,13 +233,22 @@ describe('portal entitlement routes', () => {
       }),
     );
 
-    expect(proResponse.status).toBe(403);
-    await expect(proResponse.json()).resolves.toMatchObject({
+    expect(restrictedResponse.status).toBe(403);
+    await expect(restrictedResponse.json()).resolves.toMatchObject({
       error: { code: ErrorCode.FEATURE_NOT_AVAILABLE },
     });
-    expect(mocks.getBuilderTierGate).toHaveBeenCalledWith(mocks.ctx.builderId);
+    expect(mocks.checkDashboardFeatureGate).toHaveBeenNthCalledWith(
+      1,
+      mocks.ctx.builderId,
+      'portal',
+    );
+    expect(mocks.checkDashboardFeatureGate).toHaveBeenNthCalledWith(
+      2,
+      mocks.ctx.builderId,
+      'white_label_portal',
+    );
 
-    mocks.getBuilderTierGate.mockResolvedValueOnce('scale');
+    mocks.checkDashboardFeatureGate.mockResolvedValue(null);
     insertRows = [
       {
         id: 'cfg-1',
@@ -271,7 +259,7 @@ describe('portal entitlement routes', () => {
       },
     ];
 
-    const scaleResponse = await configRoute.PUT(
+    const activeResponse = await configRoute.PUT(
       makeRequest('/api/v1/portal/config', {
         method: 'PUT',
         body: {
@@ -283,14 +271,13 @@ describe('portal entitlement routes', () => {
       }),
     );
 
-    expect(scaleResponse.status).toBe(200);
-    await expect(scaleResponse.json()).resolves.toMatchObject({
+    expect(activeResponse.status).toBe(200);
+    await expect(activeResponse.json()).resolves.toMatchObject({
       config: { logo_url: 'https://cdn.example.com/logo.png' },
     });
   });
 
   it('does not white-label gate company_name or non-branding portal fields', async () => {
-    mocks.checkDashboardFeatureGate.mockImplementation(async () => featureUnavailable());
     insertRows = [{ id: 'cfg-1', company_name: 'Acme', show_invoices: false }];
 
     const response = await configRoute.PUT(
@@ -308,7 +295,8 @@ describe('portal entitlement routes', () => {
     await expect(response.json()).resolves.toMatchObject({
       config: { company_name: 'Acme', show_invoices: false },
     });
-    expect(mocks.checkDashboardFeatureGate).not.toHaveBeenCalled();
+    expect(mocks.checkDashboardFeatureGate).toHaveBeenCalledTimes(1);
+    expect(mocks.checkDashboardFeatureGate).toHaveBeenCalledWith(mocks.ctx.builderId, 'portal');
   });
 
   it('allows entitled workspaces to list, mint, and revoke portal links', async () => {

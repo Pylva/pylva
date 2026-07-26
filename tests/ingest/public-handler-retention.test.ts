@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { forShareEntitlementTxExecuteImpl } from '../_helpers/drizzle-mock.js';
 
 const mocks = vi.hoisted(() => ({
   aggregateSpendForRule: vi.fn(),
@@ -7,13 +8,15 @@ const mocks = vi.hoisted(() => ({
   filterDuplicates: vi.fn(),
   checkEventCap: vi.fn(),
   formatTierUsage: vi.fn(),
-  getCapContext: vi.fn(),
   insertCostEventsWithRetry: vi.fn(),
   lookupPricing: vi.fn(),
   listActiveRulesForCustomer: vi.fn(),
   publishFeedMessage: vi.fn(),
   recordAcceptedEvents: vi.fn(),
   recordSourceSighting: vi.fn(),
+  freshTier: 'pro' as string | null,
+  freshAccessState: 'active' as string | null,
+  freshEntitlementSource: 'admin' as string | null,
   txExecute: vi.fn(),
   txInsert: vi.fn(),
   txInsertValues: vi.fn(),
@@ -21,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   undoFilterDuplicates: vi.fn(),
   withRLS: vi.fn(),
   logWarn: vi.fn(),
+  logError: vi.fn(),
 }));
 
 vi.mock('../../src/lib/budget/aggregate.js', () => ({
@@ -28,7 +32,14 @@ vi.mock('../../src/lib/budget/aggregate.js', () => ({
 }));
 
 vi.mock('../../src/lib/config.js', () => ({
-  env: { PUBLIC_SITE_URL: 'https://pylva.test' },
+  env: {
+    PUBLIC_SITE_URL: 'https://pylva.test',
+    PYLVA_DEPLOYMENT_MODE: 'self_hosted',
+    SELF_HOSTED_MONTHLY_EVENTS_LIMIT: 10_000_000,
+    SELF_HOSTED_MAX_CUSTOMERS: 500,
+    SELF_HOSTED_TELEMETRY_RETENTION_DAYS: 120,
+    SELF_HOSTED_BILLING_RETENTION_DAYS: 730,
+  },
 }));
 
 vi.mock('../../src/lib/cost-calculator.js', () => ({
@@ -51,7 +62,6 @@ vi.mock('../../src/lib/ingest/dedup.js', () => ({
 vi.mock('../../src/lib/ingest/event-cap.js', () => ({
   checkEventCap: mocks.checkEventCap,
   formatTierUsage: mocks.formatTierUsage,
-  getCapContext: mocks.getCapContext,
   recordAcceptedEvents: mocks.recordAcceptedEvents,
 }));
 
@@ -72,7 +82,7 @@ vi.mock('../../src/lib/logger.js', () => ({
     child: () => ({
       warn: mocks.logWarn,
       info: vi.fn(),
-      error: vi.fn(),
+      error: mocks.logError,
       debug: vi.fn(),
     }),
   },
@@ -131,6 +141,7 @@ async function ingestPayload(payload: Record<string, unknown>) {
   return handleTelemetryIngest({
     builderId: 'builder-a',
     keyId: 'key-a',
+    productAccessVerified: true,
     rawBody: JSON.stringify(payload),
   });
 }
@@ -174,8 +185,11 @@ describe('handleTelemetryIngest retention stamping', () => {
         source: 'calendar_month',
       },
     });
+    mocks.filterDuplicates.mockImplementation(
+      async (_builderId: string, items: Array<{ span_id: string }>) =>
+        new Set(items.map((item) => item.span_id)),
+    );
     mocks.formatTierUsage.mockImplementation((used: number, cap: number) => `${used}/${cap}`);
-    mocks.getCapContext.mockResolvedValue({ tier: 'pro' });
     mocks.insertCostEventsWithRetry.mockResolvedValue(undefined);
     mocks.lookupPricing.mockResolvedValue({
       llm: new Map(),
@@ -188,7 +202,20 @@ describe('handleTelemetryIngest retention stamping', () => {
         decision.used === null ? null : decision.used + count,
     );
     mocks.recordSourceSighting.mockResolvedValue(undefined);
-    mocks.txExecute.mockResolvedValue([]);
+    mocks.freshTier = 'pro';
+    mocks.freshAccessState = 'active';
+    mocks.freshEntitlementSource = 'admin';
+    mocks.txExecute.mockImplementation(
+      forShareEntitlementTxExecuteImpl(() =>
+        mocks.freshAccessState === null
+          ? null
+          : {
+              plan: mocks.freshTier,
+              access_state: mocks.freshAccessState,
+              entitlement_source: mocks.freshEntitlementSource,
+            },
+      ),
+    );
     mocks.txOnConflictDoNothing.mockResolvedValue(undefined);
     mocks.txInsertValues.mockReturnValue({ onConflictDoNothing: mocks.txOnConflictDoNothing });
     mocks.txInsert.mockReturnValue({ values: mocks.txInsertValues });
@@ -211,7 +238,6 @@ describe('handleTelemetryIngest retention stamping', () => {
   });
 
   it.each([
-    ['free', 30, 90, '00000000-0000-4000-8000-000000000021'],
     ['pro', 90, 365, '00000000-0000-4000-8000-000000000022'],
     ['scale', 365, 18_250, '00000000-0000-4000-8000-000000000023'],
     ['enterprise', 18_250, 18_250, '00000000-0000-4000-8000-000000000024'],
@@ -230,6 +256,9 @@ describe('handleTelemetryIngest retention stamping', () => {
           source: 'calendar_month',
         },
       });
+      mocks.freshTier = tier;
+      mocks.freshEntitlementSource =
+        tier === 'enterprise' ? 'enterprise_contract' : 'admin';
 
       const row = await ingestOne(spanId);
 
@@ -242,7 +271,7 @@ describe('handleTelemetryIngest retention stamping', () => {
     },
   );
 
-  it('falls back to 365/365 when the builder tier cannot be resolved', async () => {
+  it('stamps explicit self-host retention without assigning a plan', async () => {
     mocks.checkEventCap.mockResolvedValueOnce({
       enabled: true,
       blocked: false,
@@ -251,16 +280,19 @@ describe('handleTelemetryIngest retention stamping', () => {
       used: null,
       window: null,
     });
+    mocks.freshTier = null;
+    mocks.freshAccessState = 'active';
+    mocks.freshEntitlementSource = 'self_hosted';
 
     const row = await ingestOne('00000000-0000-4000-8000-000000000025');
 
     expect(row).toMatchObject({
-      retention_days: 365,
-      billing_retention_days: 365,
+      retention_days: 120,
+      billing_retention_days: 730,
     });
   });
 
-  it('falls back to 365/365 when getCapContext throws', async () => {
+  it('fails closed without writing when the locked entitlement lookup throws', async () => {
     mocks.checkEventCap.mockResolvedValueOnce({
       enabled: false,
       blocked: false,
@@ -269,17 +301,21 @@ describe('handleTelemetryIngest retention stamping', () => {
       used: null,
       window: null,
     });
-    mocks.getCapContext.mockRejectedValueOnce(new Error('db unavailable'));
-
-    const row = await ingestOne('00000000-0000-4000-8000-000000000026');
-
-    expect(row).toMatchObject({
-      retention_days: 365,
-      billing_retention_days: 365,
+    mocks.txExecute.mockImplementationOnce(async () => {
+      throw new Error('db unavailable');
     });
-    expect(mocks.logWarn).toHaveBeenCalledWith(
+
+    const response = await ingestPayload({
+      batch_id: '00000000-0000-4000-8000-000000000003',
+      sdk_version: '1.0.0',
+      events: [event('00000000-0000-4000-8000-000000000026')],
+    });
+
+    expect(response.status).toBe(500);
+    expect(mocks.insertCostEventsWithRetry).not.toHaveBeenCalled();
+    expect(mocks.logError).toHaveBeenCalledWith(
       expect.objectContaining({ error: 'db unavailable' }),
-      'event cap context threw; using fallback retention',
+      'ingest persistence entitlement fence failed',
     );
   });
 

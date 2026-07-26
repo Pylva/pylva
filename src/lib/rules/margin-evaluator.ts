@@ -45,7 +45,11 @@ import { and, eq, gte, sql as drizzleSql } from 'drizzle-orm';
 import { withRLS } from '../db/rls.js';
 import { alertHistory } from '../db/schema.js';
 import { logger } from '../logger.js';
-import { listRules, listAlertChannelEntriesForRule, markRuleTriggered } from './repository.js';
+import {
+  listRules,
+  listAlertChannelEntriesForRule,
+  markRuleTriggeredWithProductAccess,
+} from './repository.js';
 import { periodStartFor, periodEndFor } from '../budget/period-utils.js';
 import { aggregateSpendForRule } from '../budget/aggregate.js';
 import { getActiveVersion, rowToCustomerPricing } from '../billing/pricing-versioning.js';
@@ -54,7 +58,10 @@ import { applyFormula } from '../billing/formulas.js';
 import { detectMarginRisk, type DetectorResult } from '../anomaly/detector.js';
 import { diagnoseMargin } from './margin-diagnosis.js';
 import { recommendFromDiagnosis, type RecommendationContext } from './recommendations.js';
-import { insertAnomalyEvent } from '../anomaly/repository.js';
+import {
+  insertAnomalyEvent,
+  type InsertAnomalyEventInput,
+} from '../anomaly/repository.js';
 import {
   fetchPeriodAggregates,
   type PeriodAggregates,
@@ -65,6 +72,8 @@ import { toCompositeCustomerId } from '../clickhouse/customer-id.js';
 import { deliverAlert } from '../alerts/delivery.js';
 import { buildMarginAlertPayload } from '../alerts/payloads.js';
 import { buildAnomalyDetectedPayload } from '../alerts/anomaly-payloads.js';
+import { authorizeBuilderCapability } from '../auth/builder-entitlement.js';
+import { isProductAccessMutationDeniedError } from '../auth/product-access-mutation-error.js';
 import {
   countCustomers,
   listCustomersWithOpenPricing,
@@ -99,6 +108,56 @@ interface MemberMeasurement {
   member: PricedCustomerRef;
   cost_usd: number;
   revenue_usd: number;
+}
+
+type MarginLifecycleCheckpoint =
+  | 'before_anomaly_persist'
+  | 'before_alert_delivery'
+  | 'before_rule_trigger';
+
+class MarginEvaluationAccessInterrupted extends Error {
+  constructor(readonly checkpoint: MarginLifecycleCheckpoint) {
+    super(`Margin evaluation stopped at ${checkpoint}`);
+    this.name = 'MarginEvaluationAccessInterrupted';
+  }
+}
+
+async function requireProductAccess(
+  builderId: string,
+  checkpoint: MarginLifecycleCheckpoint,
+): Promise<void> {
+  try {
+    const entitlement = await authorizeBuilderCapability(builderId, 'product');
+    if (entitlement.allowed) return;
+
+    log.info(
+      { builder_id: builderId, checkpoint },
+      'margin evaluation stopped without product access',
+    );
+  } catch (error) {
+    log.warn(
+      {
+        builder_id: builderId,
+        checkpoint,
+        error_type: error instanceof Error ? error.name : 'UnknownError',
+      },
+      'margin entitlement checkpoint failed closed',
+    );
+  }
+  throw new MarginEvaluationAccessInterrupted(checkpoint);
+}
+
+async function insertLifecycleLockedAnomaly(
+  input: InsertAnomalyEventInput,
+): ReturnType<typeof insertAnomalyEvent> {
+  try {
+    return await insertAnomalyEvent(input);
+  } catch (error) {
+    if (isProductAccessMutationDeniedError(error)) {
+      throw new MarginEvaluationAccessInterrupted('before_anomaly_persist');
+    }
+    throw error;
+  }
 }
 
 /** Defensive narrowing — margin rows can predate the validator. */
@@ -208,6 +267,7 @@ export async function evaluateMarginRules(opts: {
         summary,
       });
     } catch (err) {
+      if (err instanceof MarginEvaluationAccessInterrupted) return summary;
       log.warn(
         {
           builder_id: opts.builderId,
@@ -476,7 +536,8 @@ async function fireMarginAlert(input: {
       : {}),
   });
 
-  const inserted = await insertAnomalyEvent({
+  await requireProductAccess(builderId, 'before_anomaly_persist');
+  const inserted = await insertLifecycleLockedAnomaly({
     builder_id: builderId,
     customer_id: input.externalCustomerId,
     source_type: AnomalySourceType.MARGIN_RISK,
@@ -505,7 +566,8 @@ async function fireMarginAlert(input: {
   if (alreadyAlerted) return;
 
   const channels = await listAlertChannelEntriesForRule(builderId, rule.id);
-  await deliverAlert({
+  await requireProductAccess(builderId, 'before_alert_delivery');
+  const delivery = await deliverAlert({
     builder_id: builderId,
     rule_id: rule.id,
     payload: {
@@ -523,7 +585,28 @@ async function fireMarginAlert(input: {
     },
     channels,
   });
-  await markRuleTriggered(builderId, rule.id);
+  if (delivery.kind === 'access_denied') {
+    throw new MarginEvaluationAccessInterrupted('before_alert_delivery');
+  }
+  if (delivery.kind === 'failed') {
+    log.warn(
+      { builder_id: builderId, rule_id: rule.id },
+      'margin alert delivery failed; trigger state was not advanced',
+    );
+    return;
+  }
+
+  const trigger = await markRuleTriggeredWithProductAccess(builderId, rule.id);
+  if (trigger.kind === 'access_denied') {
+    throw new MarginEvaluationAccessInterrupted('before_rule_trigger');
+  }
+  if (trigger.kind === 'rule_not_found') {
+    log.warn(
+      { builder_id: builderId, rule_id: rule.id },
+      'margin trigger state was not advanced because the rule no longer exists',
+    );
+    return;
+  }
   summary.alerts_fired += 1;
   log.info(
     {
@@ -562,7 +645,8 @@ async function fireInsufficientDataAlert(input: {
     customer_id: customerId,
   });
 
-  const inserted = await insertAnomalyEvent({
+  await requireProductAccess(builderId, 'before_anomaly_persist');
+  const inserted = await insertLifecycleLockedAnomaly({
     builder_id: builderId,
     customer_id: customerId,
     source_type: AnomalySourceType.MARGIN_RISK,
@@ -592,7 +676,8 @@ async function fireInsufficientDataAlert(input: {
   if (alreadyAlerted) return;
 
   const channels = await listAlertChannelEntriesForRule(builderId, rule.id);
-  await deliverAlert({
+  await requireProductAccess(builderId, 'before_alert_delivery');
+  const delivery = await deliverAlert({
     builder_id: builderId,
     rule_id: rule.id,
     payload: {
@@ -605,6 +690,16 @@ async function fireInsufficientDataAlert(input: {
     },
     channels,
   });
+  if (delivery.kind === 'access_denied') {
+    throw new MarginEvaluationAccessInterrupted('before_alert_delivery');
+  }
+  if (delivery.kind === 'failed') {
+    log.warn(
+      { builder_id: builderId, rule_id: rule.id },
+      'insufficient-data alert delivery failed',
+    );
+    return;
+  }
   summary.alerts_fired += 1;
   log.info(
     {

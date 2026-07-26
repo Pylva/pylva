@@ -3,7 +3,7 @@
 //
 // db/seed.ts randomizes token counts/costs (Math.random), which is unusable
 // for e2e/visual assertions — this script inserts FIXED values against the
-// seeded `alice-free` builder: ClickHouse cost_events timestamped a few hours
+// seeded `alice-self-hosted` builder: ClickHouse cost_events timestamped a few hours
 // ago (so the default 30-day dashboard window always includes them, via the
 // raw-events boundary-day branch of the union queries) and Postgres invoices
 // with pinned UUIDs. Customer ids deliberately include a very long id (from
@@ -53,7 +53,7 @@ async function main(): Promise<void> {
 
     // --- ClickHouse: fixed-value events, a few hours old ---
     // Wipe ALL of the builder's events first (db/seed.ts inserts Math.random
-    // ones for alice-free) so totals AND row order are fully deterministic —
+    // ones for alice-self-hosted) so totals AND row order are fully deterministic —
     // the visual-regression screenshots depend on that. The dashboard union
     // queries read the daily AGGREGATE tables for mid-window days, so those
     // must be wiped too, not just the raw table.

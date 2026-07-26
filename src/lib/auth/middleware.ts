@@ -2,7 +2,14 @@
 // Decision #17: Stripe-style error responses.
 
 import { type NextRequest, NextResponse } from 'next/server.js';
-import { ErrorCode, JwtAudience, Role, type Role as RoleType } from '@pylva/shared';
+import {
+  ErrorCode,
+  JwtAudience,
+  Role,
+  type BuilderAccessState as BuilderAccessStateValue,
+  type BuilderPlan,
+  type Role as RoleType,
+} from '@pylva/shared';
 import { validateApiKey } from './api-key.js';
 import { assertSameOrigin } from './csrf.js';
 import { verifyJwt, refreshJwtIfNeeded } from './jwt.js';
@@ -11,6 +18,7 @@ import type { MembershipContext } from './org.js';
 import {
   authError,
   forbiddenError,
+  internalError,
   rateLimitError as rateLimitErrorResponse,
   notFoundError,
 } from '../errors.js';
@@ -23,12 +31,19 @@ import {
   encodeActiveSessionValue,
   sessionFingerprint,
 } from './session-fingerprint.js';
+import {
+  accessDeniedMessage,
+  authorizeBuilderCapability,
+  type BuilderCapabilityDecision,
+  type WorkspaceCapability,
+} from './builder-entitlement.js';
 
 export interface ApiKeyAuthContext {
   builderId: string;
   /** Persisted scope value — display/audit only; every valid key has universal access. */
   scope: string;
   keyId: string;
+  productAccessVerified: true;
 }
 
 const MISSING_API_KEY_MESSAGE =
@@ -54,7 +69,25 @@ export async function withApiKeyAuth(
   if (!key) return authError(ErrorCode.INVALID_API_KEY, MISSING_API_KEY_MESSAGE);
   const result = await validateApiKey(key);
   if (!result) return authError(ErrorCode.INVALID_API_KEY, 'Invalid API key');
-  return { builderId: result.builderId, scope: result.scope, keyId: result.keyId };
+
+  // A valid key proves identity only. Entitlement is loaded authoritatively on
+  // every request so a cached key cannot outlive workspace suspension.
+  const capability = await authorizeBuilderCapability(result.builderId, 'product');
+  if (!capability.allowed) return capabilityError(capability);
+
+  return {
+    builderId: result.builderId,
+    scope: result.scope,
+    keyId: result.keyId,
+    productAccessVerified: true,
+  };
+}
+
+function capabilityError(decision: BuilderCapabilityDecision): NextResponse {
+  if (decision.lookup.kind !== 'resolved' || !decision.lookup.resolution.ok) {
+    return internalError('Workspace entitlement could not be verified');
+  }
+  return forbiddenError(ErrorCode.FEATURE_NOT_AVAILABLE, accessDeniedMessage(decision));
 }
 
 // --- JWT Auth Middleware ---
@@ -64,6 +97,9 @@ export interface JwtAuthContext {
   userId: string | null;
   orgSlug: string | null;
   role: RoleType | null;
+  plan: BuilderPlan | null;
+  accessState: BuilderAccessStateValue | null;
+  /** @deprecated Informational compatibility claim; never authorize from it. */
   tier: string | null;
   jti: string;
   revocationId: string;
@@ -103,6 +139,8 @@ export async function withJwtAuth(
         userId: (payload.user_id as string) ?? null,
         orgSlug: (payload.org_slug as string) ?? null,
         role: (payload.role as RoleType) ?? null,
+        plan: (payload.plan as BuilderPlan | null | undefined) ?? null,
+        accessState: (payload.access_state as BuilderAccessStateValue | undefined) ?? null,
         tier: (payload.tier as string) ?? null,
         jti: payload.jti,
         // Logout and org switching revoke the stable session family, not only
@@ -193,9 +231,27 @@ export function clearSessionCookie(response: NextResponse): void {
 export async function withMembership(params: {
   slug: string;
   userId: string;
+  capability?: WorkspaceCapability;
+  /** Browser-only recovery destination for a valid restricted workspace. */
+  deniedRedirect?: string;
 }): Promise<MembershipContext | NextResponse> {
   const ctx = await resolveSlugForUserCached({ slug: params.slug, userId: params.userId });
   if (!ctx) return notFoundError(ErrorCode.NOT_FOUND, 'Resource not found');
+
+  if (params.capability) {
+    const capability = await authorizeBuilderCapability(ctx.builderId, params.capability);
+    if (!capability.allowed) {
+      if (
+        params.deniedRedirect &&
+        capability.lookup.kind === 'resolved' &&
+        capability.lookup.resolution.ok
+      ) {
+        return NextResponse.redirect(params.deniedRedirect);
+      }
+      return capabilityError(capability);
+    }
+  }
+
   return ctx;
 }
 

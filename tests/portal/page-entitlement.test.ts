@@ -111,7 +111,7 @@ describe('/portal entitlement', () => {
         {
           error: {
             code: ErrorCode.FEATURE_NOT_AVAILABLE,
-            message: 'portal is not available on the free tier',
+            message: 'Workspace access is suspended; reactivate billing to continue',
           },
         },
         { status: 403 },
@@ -121,7 +121,7 @@ describe('/portal entitlement', () => {
     const element = await PortalPage(pageProps());
 
     expect(textContent(element)).toContain('Portal unavailable');
-    expect(textContent(element)).toContain("builder's current plan");
+    expect(textContent(element)).toContain("builder's workspace access is restricted");
     expect(rangeMock).not.toHaveBeenCalled();
     expect(overviewMock).not.toHaveBeenCalled();
   });
@@ -144,7 +144,7 @@ describe('/portal entitlement', () => {
 
     expect(text).toContain('Portal unavailable');
     expect(text).toContain('This portal is currently unavailable.');
-    expect(text).not.toContain("builder's current plan");
+    expect(text).not.toContain("builder's workspace access is restricted");
     expect(rangeMock).not.toHaveBeenCalled();
     expect(overviewMock).not.toHaveBeenCalled();
   });

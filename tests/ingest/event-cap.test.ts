@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { BuilderTier, TIER_LIMITS } from '@pylva/shared';
+import { BuilderPlan, PLAN_LIMITS } from '@pylva/shared';
 
-type MutableTierLimits = Record<string, (typeof TIER_LIMITS)[keyof typeof TIER_LIMITS] | undefined>;
+type MutablePlanLimits = Record<string, (typeof PLAN_LIMITS)[keyof typeof PLAN_LIMITS] | undefined>;
 
 type DbRow = {
-  tier: string;
+  tier: string | null;
+  access_state?: string | null;
+  entitlement_source?: string | null;
 };
 
 type RedisOp =
@@ -20,7 +22,15 @@ interface RedisMulti {
 }
 
 const h = vi.hoisted(() => ({
-  env: { ENABLE_EVENT_LIMITS: true, PUBLIC_SITE_URL: 'https://pylva.test' },
+  env: {
+    ENABLE_EVENT_LIMITS: true,
+    PUBLIC_SITE_URL: 'https://pylva.test',
+    PYLVA_DEPLOYMENT_MODE: 'self_hosted',
+    SELF_HOSTED_MONTHLY_EVENTS_LIMIT: 10_000_000,
+    SELF_HOSTED_MAX_CUSTOMERS: 500,
+    SELF_HOSTED_TELEMETRY_RETENTION_DAYS: 365,
+    SELF_HOSTED_BILLING_RETENTION_DAYS: 365,
+  },
   rows: [] as DbRow[],
   dbError: null as Error | null,
   selectCalls: 0,
@@ -49,7 +59,12 @@ vi.mock('../../src/lib/config.js', () => ({
 }));
 
 vi.mock('../../src/lib/db/schema.js', () => ({
-  builders: { id: 'builders.id', tier: 'builders.tier' },
+  builders: {
+    id: 'builders.id',
+    tier: 'builders.tier',
+    access_state: 'builders.access_state',
+    entitlement_source: 'builders.entitlement_source',
+  },
 }));
 
 vi.mock('../../src/lib/db/client.js', () => ({
@@ -62,7 +77,19 @@ vi.mock('../../src/lib/db/client.js', () => ({
             limit: (limit: number) => {
               h.limitCalls.push(limit);
               if (h.dbError) return Promise.reject(h.dbError);
-              return Promise.resolve(h.rows.map((row) => ({ tier: row.tier })));
+              return Promise.resolve(
+                h.rows.map((row) => ({
+                  tier: row.tier,
+                  access_state: row.access_state ?? 'active',
+                  entitlement_source:
+                    row.entitlement_source ??
+                    (row.tier === null
+                      ? 'self_hosted'
+                      : row.tier === 'enterprise'
+                        ? 'enterprise_contract'
+                        : 'admin'),
+                })),
+              );
             },
           }),
         }),
@@ -166,6 +193,8 @@ const {
 function resetHarness(): void {
   __resetEventCapMemoForTests();
   h.env.ENABLE_EVENT_LIMITS = true;
+  h.env.PYLVA_DEPLOYMENT_MODE = 'self_hosted';
+  h.env.SELF_HOSTED_MONTHLY_EVENTS_LIMIT = 10_000_000;
   h.rows = [];
   h.dbError = null;
   h.selectCalls = 0;
@@ -202,10 +231,10 @@ function thresholdInfoKinds(): string[] {
 }
 
 describe('resolveEventCapWindow', () => {
-  it('uses calendar month UTC for free', () => {
+  it('uses calendar month UTC when no valid billing period is available', () => {
     const window = resolveEventCapWindow(
       new Date('2026-07-15T12:34:56.000Z'),
-      BuilderTier.FREE,
+      BuilderPlan.PRO,
       null,
     );
 
@@ -226,7 +255,7 @@ describe('resolveEventCapWindow', () => {
     ['28 day period', '2026-07-01T00:00:00.000Z', '2026-07-29T00:00:00.000Z', 'billing_period'],
   ] as const)('resolves %s', (_name, start, end, source) => {
     const now = new Date('2026-07-15T12:00:00.000Z');
-    const window = resolveEventCapWindow(now, BuilderTier.PRO, {
+    const window = resolveEventCapWindow(now, BuilderPlan.PRO, {
       start: start ? new Date(start) : null,
       end: end ? new Date(end) : null,
     });
@@ -249,10 +278,12 @@ describe('event cap enforcement', () => {
 
     await expect(getCapContext('builder-a')).resolves.toEqual({
       tier: 'pro',
+      limits: PLAN_LIMITS.pro,
       period: null,
     });
     await expect(getCapContext('builder-a')).resolves.toEqual({
       tier: 'pro',
+      limits: PLAN_LIMITS.pro,
       period: null,
     });
 
@@ -262,7 +293,7 @@ describe('event cap enforcement', () => {
 
   it('uses the expected key shape', async () => {
     const { key } = julyWindow();
-    h.rows = [{ tier: 'free' }];
+    h.rows = [{ tier: 'pro' }];
     h.redis.set(key, '42');
 
     const decision = await checkEventCap('builder-a', new Date('2026-07-02T00:00:00.000Z'));
@@ -273,25 +304,25 @@ describe('event cap enforcement', () => {
 
   it('blocks at exact cap and allows cap minus one', async () => {
     const { key } = julyWindow();
-    h.rows = [{ tier: 'free' }];
-    h.redis.set(key, '100000');
+    h.rows = [{ tier: 'pro' }];
+    h.redis.set(key, '1000000');
     await expect(
       checkEventCap('builder-a', new Date('2026-07-02T00:00:00.000Z')),
     ).resolves.toMatchObject({
       blocked: true,
-      used: 100000,
-      cap: 100000,
+      used: 1000000,
+      cap: 1000000,
     });
 
     resetHarness();
-    h.rows = [{ tier: 'free' }];
-    h.redis.set(key, '99999');
+    h.rows = [{ tier: 'pro' }];
+    h.redis.set(key, '999999');
     await expect(
       checkEventCap('builder-a', new Date('2026-07-02T00:00:00.000Z')),
     ).resolves.toMatchObject({
       blocked: false,
-      used: 99999,
-      cap: 100000,
+      used: 999999,
+      cap: 1000000,
     });
   });
 
@@ -316,6 +347,38 @@ describe('event cap enforcement', () => {
     expect(h.queryCalls).toHaveLength(0);
   });
 
+  it('enforces the explicit self-host event policy without assigning a commercial plan', async () => {
+    const { key } = julyWindow();
+    h.env.SELF_HOSTED_MONTHLY_EVENTS_LIMIT = 37;
+    h.rows = [
+      {
+        tier: null,
+        access_state: 'active',
+        entitlement_source: 'self_hosted',
+      },
+    ];
+    h.redis.set(key, '37');
+
+    await expect(
+      checkEventCap('builder-a', new Date('2026-07-02T00:00:00.000Z')),
+    ).resolves.toMatchObject({
+      enabled: true,
+      blocked: true,
+      tier: null,
+      cap: 37,
+      used: 37,
+    });
+    await expect(getCapContext('builder-a')).resolves.toMatchObject({
+      tier: null,
+      limits: {
+        monthly_events: 37,
+        max_customers: 500,
+        telemetry_retention_days: 365,
+        billing_retention_days: 365,
+      },
+    });
+  });
+
   it('fails open on PG, Redis breaker-null, and ClickHouse seed errors', async () => {
     h.dbError = new Error('pg unavailable');
     await expect(checkEventCap('builder-a')).resolves.toMatchObject({ blocked: false, used: null });
@@ -325,7 +388,7 @@ describe('event cap enforcement', () => {
     );
 
     resetHarness();
-    h.rows = [{ tier: 'free' }];
+    h.rows = [{ tier: 'pro' }];
     h.breakerNull = true;
     await expect(checkEventCap('builder-a')).resolves.toMatchObject({ blocked: false, used: null });
     expect(h.warn).toHaveBeenCalledWith(
@@ -334,7 +397,7 @@ describe('event cap enforcement', () => {
     );
 
     resetHarness();
-    h.rows = [{ tier: 'free' }];
+    h.rows = [{ tier: 'pro' }];
     h.queryError = new Error('clickhouse unavailable');
     await expect(checkEventCap('builder-a')).resolves.toMatchObject({ blocked: false, used: null });
     expect(h.redisSetCalls).toHaveLength(0);
@@ -346,7 +409,7 @@ describe('event cap enforcement', () => {
 
   it('seeds a Redis miss from ClickHouse with SET NX, expiry, and read-back', async () => {
     const { key } = julyWindow();
-    h.rows = [{ tier: 'free' }];
+    h.rows = [{ tier: 'pro' }];
     h.queryRows = [{ event_count: '12' }];
 
     const decision = await checkEventCap('builder-a', new Date('2026-07-02T00:00:00.000Z'));
@@ -363,15 +426,15 @@ describe('event cap enforcement', () => {
   });
 
   it('counts authoritative projected commits when gating a later legacy ingest request', async () => {
-    h.rows = [{ tier: 'free' }];
+    h.rows = [{ tier: 'pro' }];
     // The canonical ClickHouse result includes both legacy rows and already
     // committed authoritative rows. Projection itself never calls this gate;
     // only a subsequent legacy /events admission is refused at the cap.
-    h.queryRows = [{ event_count: '100000' }];
+    h.queryRows = [{ event_count: '1000000' }];
 
     await expect(
       checkEventCap('builder-a', new Date('2026-07-02T00:00:00.000Z')),
-    ).resolves.toMatchObject({ blocked: true, used: 100000, cap: 100000 });
+    ).resolves.toMatchObject({ blocked: true, used: 1000000, cap: 1000000 });
     expect(h.queryCalls[0]?.query).toContain('FROM cost_events_with_control');
   });
 
@@ -389,7 +452,7 @@ describe('event cap enforcement', () => {
         {
           enabled: true,
           blocked: false,
-          tier: BuilderTier.FREE,
+          tier: BuilderPlan.PRO,
           cap: 100,
           used: initial,
           window: { start, end, source: 'calendar_month' },
@@ -404,7 +467,7 @@ describe('event cap enforcement', () => {
         event: 'threshold_crossed',
         kind: expected[0],
         builder_id: 'builder-a',
-        tier: BuilderTier.FREE,
+        tier: BuilderPlan.PRO,
         used: initial + count,
         cap: 100,
         window: expect.objectContaining({
@@ -428,7 +491,7 @@ describe('event cap enforcement', () => {
         {
           enabled: true,
           blocked: false,
-          tier: BuilderTier.FREE,
+          tier: BuilderPlan.PRO,
           cap: 100,
           used: 10,
           window: { start, end, source: 'calendar_month' },
@@ -452,7 +515,7 @@ describe('event cap enforcement', () => {
         {
           enabled: true,
           blocked: false,
-          tier: BuilderTier.FREE,
+          tier: BuilderPlan.PRO,
           cap: 100,
           used: null,
           window: { start, end, source: 'calendar_month' },
@@ -469,11 +532,11 @@ describe('event cap enforcement', () => {
   it('retries a ClickHouse seed after an untrusted-count batch is accepted', async () => {
     const { key, start, end } = julyWindow();
     const now = new Date('2026-07-02T00:00:00.000Z');
-    h.rows = [{ tier: 'free' }];
+    h.rows = [{ tier: 'pro' }];
     h.queryError = new Error('clickhouse unavailable');
 
     const failOpen = await checkEventCap('builder-a', now);
-    expect(failOpen).toMatchObject({ blocked: false, used: null, cap: 100000 });
+    expect(failOpen).toMatchObject({ blocked: false, used: null, cap: 1000000 });
 
     await expect(recordAcceptedEvents('builder-a', failOpen, 2)).resolves.toBeNull();
     expect(h.redis.has(key)).toBe(false);
@@ -485,7 +548,7 @@ describe('event cap enforcement', () => {
     await expect(checkEventCap('builder-a', now)).resolves.toMatchObject({
       blocked: false,
       used: 14,
-      cap: 100000,
+      cap: 1000000,
     });
     expect(h.redisSetCalls).toContainEqual({ key, value: '14', nx: true });
     expect(h.redis.get(key)).toBe('14');
@@ -495,8 +558,8 @@ describe('event cap enforcement', () => {
 
   it('emits blocked-path exceeded only once per builder window in-process', async () => {
     const { key } = julyWindow();
-    h.rows = [{ tier: 'free' }];
-    h.redis.set(key, '100000');
+    h.rows = [{ tier: 'pro' }];
+    h.redis.set(key, '1000000');
 
     await checkEventCap('builder-a', new Date('2026-07-02T00:00:00.000Z'));
     await checkEventCap('builder-a', new Date('2026-07-02T00:00:00.000Z'));
@@ -504,65 +567,76 @@ describe('event cap enforcement', () => {
     expect(thresholdInfoKinds()).toEqual(['exceeded']);
   });
 
-  it('makes tier changes visible after memo expiry', async () => {
+  it('makes plan changes visible after memo expiry', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-07-02T00:00:00.000Z'));
-    h.rows = [{ tier: 'free' }];
-    await expect(getCapContext('builder-a')).resolves.toMatchObject({ tier: 'free' });
-
     h.rows = [{ tier: 'pro' }];
-    await expect(getCapContext('builder-a')).resolves.toMatchObject({ tier: 'free' });
+    await expect(getCapContext('builder-a')).resolves.toMatchObject({ tier: 'pro' });
+
+    h.rows = [{ tier: 'scale' }];
+    await expect(getCapContext('builder-a')).resolves.toMatchObject({ tier: 'pro' });
 
     vi.advanceTimersByTime(30_001);
-    await expect(getCapContext('builder-a')).resolves.toMatchObject({ tier: 'pro' });
+    await expect(getCapContext('builder-a')).resolves.toMatchObject({ tier: 'scale' });
   });
 
   it('getEventCapUsage seeds and reads without incrementing', async () => {
-    h.rows = [{ tier: 'free' }];
+    h.rows = [{ tier: 'pro' }];
     h.queryRows = [{ event_count: 5 }];
 
     const usage = await getEventCapUsage('builder-a');
 
     expect(usage).toMatchObject({
       monthly_events_used: 5,
-      monthly_events_limit: 100000,
+      monthly_events_limit: 1000000,
       window_source: 'calendar_month',
     });
     expect(h.redisIncrCalls).toHaveLength(0);
   });
 
-  it('getEventCapUsage returns null and warns when state loading throws', async () => {
-    h.rows = [{ tier: 'free' }];
-    const mutableLimits = TIER_LIMITS as unknown as MutableTierLimits;
-    const originalFreeLimits = mutableLimits[BuilderTier.FREE];
-    mutableLimits[BuilderTier.FREE] = undefined;
+  it('blocks instead of granting unlimited ingest when a known plan mapping is deleted', async () => {
+    h.rows = [{ tier: 'pro' }];
+    const mutableLimits = PLAN_LIMITS as unknown as MutablePlanLimits;
+    const originalProLimits = mutableLimits[BuilderPlan.PRO];
+    mutableLimits[BuilderPlan.PRO] = undefined;
 
     try {
+      await expect(checkEventCap('builder-a')).resolves.toMatchObject({
+        enabled: true,
+        blocked: true,
+        configuration_error: true,
+        tier: null,
+        cap: 0,
+        used: 0,
+        window: null,
+      });
       await expect(getEventCapUsage('builder-a')).resolves.toBeNull();
     } finally {
-      mutableLimits[BuilderTier.FREE] = originalFreeLimits;
+      mutableLimits[BuilderPlan.PRO] = originalProLimits;
     }
 
     expect(h.warn).toHaveBeenCalledWith(
       expect.objectContaining({
-        event: 'usage_lookup_failed',
+        event: 'fail_closed',
+        reason: 'missing_plan_limits',
         builder_id: 'builder-a',
-        error: expect.stringContaining('monthly_events'),
       }),
-      'event cap usage lookup failed',
+      'event cap configuration invalid; blocking ingest',
     );
+    expect(h.redisGetCalls).toHaveLength(0);
+    expect(h.queryCalls).toHaveLength(0);
   });
 
   it('allows two batches racing near cap, then blocks the next request with one exceeded emit', async () => {
     const { start, end, key } = julyWindow();
-    h.rows = [{ tier: 'free' }];
-    h.redis.set(key, '99999');
+    h.rows = [{ tier: 'pro' }];
+    h.redis.set(key, '999999');
     const decision = {
       enabled: true,
       blocked: false,
-      tier: BuilderTier.FREE,
-      cap: 100000,
-      used: 99999,
+      tier: BuilderPlan.PRO,
+      cap: 1000000,
+      used: 999999,
       window: { start, end, source: 'calendar_month' as const },
     };
 
@@ -572,7 +646,7 @@ describe('event cap enforcement', () => {
     ]);
     const blocked = await checkEventCap('builder-a', new Date('2026-07-02T00:00:00.000Z'));
 
-    expect(Number(h.redis.get(key))).toBe(100199);
+    expect(Number(h.redis.get(key))).toBe(1000199);
     expect(blocked.blocked).toBe(true);
     expect(thresholdInfoKinds()).toEqual(['exceeded']);
   });

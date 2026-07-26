@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
   deliverWebhook: vi.fn(),
   deliverEmail: vi.fn(),
   deliverSlack: vi.fn(),
+  scheduleBatch: vi.fn(),
+  authorizeBuilderCapability: vi.fn(),
   withRLS: vi.fn(),
   historyRows: [] as Array<{ rlsBuilderId: string; values: Record<string, unknown> }>,
 }));
@@ -25,6 +27,32 @@ vi.mock('../../src/lib/alerts/channels/email.js', () => ({
 
 vi.mock('../../src/lib/alerts/channels/slack.js', () => ({
   deliverSlack: mocks.deliverSlack,
+}));
+
+vi.mock('../../src/lib/auth/builder-entitlement.js', () => ({
+  authorizeBuilderCapability: mocks.authorizeBuilderCapability,
+}));
+
+vi.mock('../../src/lib/auth/product-access-mutation.js', () => ({
+  isProductAccessMutationDeniedError: (error: unknown) =>
+    error instanceof Error &&
+    (error as Error & { code?: unknown }).code === 'product_access_mutation_denied',
+  withProductAccessMutation: async (
+    builderId: string,
+    callback: (tx: unknown) => Promise<unknown>,
+  ) => {
+    const decision = await mocks.authorizeBuilderCapability(builderId, 'product');
+    if (!decision.allowed) {
+      const error = new Error('product access denied') as Error & { code: string };
+      error.code = 'product_access_mutation_denied';
+      throw error;
+    }
+    return mocks.withRLS(builderId, callback);
+  },
+}));
+
+vi.mock('../../src/lib/alerts/batcher.js', () => ({
+  schedule: mocks.scheduleBatch,
 }));
 
 vi.mock('../../src/lib/db/rls.js', () => ({
@@ -46,7 +74,7 @@ vi.mock('../../src/lib/logger.js', () => ({
   },
 }));
 
-const { deliverCoalescedAlert } = await import('../../src/lib/alerts/delivery.js');
+const { deliverAlert, deliverCoalescedAlert } = await import('../../src/lib/alerts/delivery.js');
 
 function webhookEntry(ruleId: string): AlertChannelEntry {
   return {
@@ -93,12 +121,21 @@ function costPayload(builderId: string, ruleId: string): AlertPayload {
   };
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.historyRows.length = 0;
   mocks.deliverWebhook.mockResolvedValue({ ok: true, attempts: 1 });
   mocks.deliverEmail.mockResolvedValue({ ok: true, attempts: 1 });
   mocks.deliverSlack.mockResolvedValue({ ok: true, attempts: 1 });
+  mocks.authorizeBuilderCapability.mockResolvedValue({ allowed: true });
   mocks.withRLS.mockImplementation(
     async (builderId: string, cb: (tx: unknown) => Promise<unknown>) =>
       cb({
@@ -112,6 +149,21 @@ beforeEach(() => {
 });
 
 describe('coalesced alert delivery', () => {
+  it('does not schedule a batch or write history without product access', async () => {
+    mocks.authorizeBuilderCapability.mockResolvedValueOnce({ allowed: false });
+    const payload = costPayload('builder-a', 'rule-a');
+
+    await deliverAlert({
+      builder_id: 'builder-a',
+      rule_id: 'rule-a',
+      payload,
+      channels: [webhookEntry('rule-a')],
+    });
+
+    expect(mocks.scheduleBatch).not.toHaveBeenCalled();
+    expect(mocks.withRLS).not.toHaveBeenCalled();
+  });
+
   it('uses the payload builder_id for webhook flush delivery and alert_history', async () => {
     const payload = costPayload('builder-a', 'rule-a');
     const entry = webhookEntry('rule-a');
@@ -164,5 +216,49 @@ describe('coalesced alert delivery', () => {
       'builder-a',
       'builder-b',
     ]);
+  });
+
+  it('drops a pending batch when product access was revoked before flush', async () => {
+    mocks.authorizeBuilderCapability.mockResolvedValueOnce({ allowed: false });
+    const payload = costPayload('builder-a', 'rule-a');
+
+    await deliverCoalescedAlert(webhookEntry('rule-a'), payload);
+
+    expect(mocks.deliverWebhook).not.toHaveBeenCalled();
+    expect(mocks.withRLS).not.toHaveBeenCalled();
+  });
+
+  it('does not write alert history when access is revoked during channel delivery', async () => {
+    const channel = deferred<{ ok: true; attempts: number }>();
+    mocks.deliverWebhook.mockImplementationOnce(() => channel.promise);
+    const payload = costPayload('builder-a', 'rule-a');
+
+    const delivery = deliverCoalescedAlert(webhookEntry('rule-a'), payload);
+    await vi.waitFor(() => expect(mocks.deliverWebhook).toHaveBeenCalledTimes(1));
+
+    mocks.authorizeBuilderCapability.mockResolvedValue({ allowed: false });
+    channel.resolve({ ok: true, attempts: 1 });
+    await delivery;
+
+    expect(mocks.withRLS).not.toHaveBeenCalled();
+    expect(mocks.historyRows).toHaveLength(0);
+  });
+
+  it('returns access_denied when a silent-rule history write loses access', async () => {
+    mocks.authorizeBuilderCapability
+      .mockResolvedValueOnce({ allowed: true })
+      .mockResolvedValueOnce({ allowed: false });
+    const payload = costPayload('builder-a', 'rule-a');
+
+    await expect(
+      deliverAlert({
+        builder_id: 'builder-a',
+        rule_id: 'rule-a',
+        payload,
+        channels: [],
+      }),
+    ).resolves.toEqual({ kind: 'access_denied' });
+
+    expect(mocks.withRLS).not.toHaveBeenCalled();
   });
 });

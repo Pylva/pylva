@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { forShareTierTxExecuteImpl } from '../_helpers/drizzle-mock.js';
+import { forShareEntitlementTxExecuteImpl } from '../_helpers/drizzle-mock.js';
 import {
+  PLAN_LIMITS,
   RuleEnforcement,
   RulePeriod,
   RuleScope,
@@ -12,6 +13,7 @@ import {
 
 const mocks = vi.hoisted(() => ({
   aggregateSpendForRule: vi.fn(),
+  authorizeBuilderCapability: vi.fn(),
   calculateCostUsd: vi.fn(),
   deliverAlert: vi.fn(),
   filterDuplicates: vi.fn(),
@@ -38,6 +40,10 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('../../src/lib/budget/aggregate.js', () => ({
   aggregateSpendForRule: mocks.aggregateSpendForRule,
+}));
+
+vi.mock('../../src/lib/auth/builder-entitlement.js', () => ({
+  authorizeBuilderCapability: mocks.authorizeBuilderCapability,
 }));
 
 vi.mock('../../src/lib/config.js', () => ({
@@ -105,7 +111,7 @@ vi.mock('../../src/lib/rules/repository.js', () => ({
   getRule: mocks.getRule,
   listActiveRulesForCustomer: mocks.listActiveRulesForCustomer,
   listAlertChannelEntriesForRule: mocks.listChannelsForRule,
-  markRuleTriggered: vi.fn(async () => undefined),
+  markRuleTriggeredWithProductAccess: vi.fn(async () => ({ kind: 'updated' })),
 }));
 
 function budgetRule(overrides: Partial<Rule> = {}): Rule {
@@ -166,12 +172,13 @@ describe('budget customer_id boundaries', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     mocks.aggregateSpendForRule.mockResolvedValue(12);
+    mocks.authorizeBuilderCapability.mockResolvedValue({ allowed: true });
     mocks.calculateCostUsd.mockReturnValue({
       cost_usd: 12,
       pricing_status: 'priced',
       cost_source: 'configured',
     });
-    mocks.deliverAlert.mockResolvedValue({ ok: true, attempts: 1 });
+    mocks.deliverAlert.mockResolvedValue({ kind: 'accepted' });
     mocks.filterDuplicates.mockResolvedValue(new Set(['00000000-0000-4000-8000-000000000002']));
     mocks.checkEventCap.mockResolvedValue({
       enabled: true,
@@ -186,7 +193,11 @@ describe('budget customer_id boundaries', () => {
       },
     });
     mocks.formatTierUsage.mockImplementation((used: number, cap: number) => `${used}/${cap}`);
-    mocks.getCapContext.mockResolvedValue({ tier: 'pro' });
+    mocks.getCapContext.mockResolvedValue({
+      tier: 'pro',
+      limits: PLAN_LIMITS.pro,
+      period: null,
+    });
     mocks.insertCostEventsWithRetry.mockResolvedValue(undefined);
     mocks.lookupPricing.mockResolvedValue({
       llm: new Map(),
@@ -202,7 +213,18 @@ describe('budget customer_id boundaries', () => {
     );
     mocks.recordSourceSighting.mockResolvedValue(undefined);
     mocks.freshTier = 'pro';
-    mocks.txExecute.mockImplementation(forShareTierTxExecuteImpl(() => mocks.freshTier));
+    mocks.txExecute.mockImplementation(
+      forShareEntitlementTxExecuteImpl(() =>
+        mocks.freshTier === null
+          ? null
+          : {
+              plan: mocks.freshTier,
+              access_state: 'active',
+              entitlement_source:
+                mocks.freshTier === 'enterprise' ? 'enterprise_contract' : 'admin',
+            },
+      ),
+    );
     mocks.txOnConflictDoNothing.mockResolvedValue(undefined);
     mocks.txInsertValues.mockReturnValue({ onConflictDoNothing: mocks.txOnConflictDoNothing });
     mocks.txInsert.mockReturnValue({ values: mocks.txInsertValues });
@@ -245,6 +267,7 @@ describe('budget customer_id boundaries', () => {
     const response = await handleTelemetryIngest({
       builderId: 'builder-a',
       keyId: 'key-a',
+      productAccessVerified: true,
       rawBody: JSON.stringify({
         batch_id: '00000000-0000-4000-8000-000000000001',
         sdk_version: '1.0.0',
@@ -292,6 +315,7 @@ describe('budget customer_id boundaries', () => {
     const response = await handleTelemetryIngest({
       builderId: 'builder-a',
       keyId: 'key-a',
+      productAccessVerified: true,
       rawBody: JSON.stringify({
         batch_id: '00000000-0000-4000-8000-000000000001',
         sdk_version: '1.0.0',
@@ -329,6 +353,7 @@ describe('budget customer_id boundaries', () => {
     const responsePromise = handleTelemetryIngest({
       builderId: 'builder-a',
       keyId: 'key-a',
+      productAccessVerified: true,
       rawBody: JSON.stringify({
         batch_id: '00000000-0000-4000-8000-000000000001',
         sdk_version: '1.0.0',
@@ -360,6 +385,7 @@ describe('budget customer_id boundaries', () => {
     const response = await handleTelemetryIngest({
       builderId: 'builder-a',
       keyId: 'key-a',
+      productAccessVerified: true,
       rawBody: JSON.stringify({
         batch_id: '00000000-0000-4000-8000-000000000001',
         sdk_version: '1.0.0',
@@ -416,6 +442,7 @@ describe('budget customer_id boundaries', () => {
     const response = await handleTelemetryIngest({
       builderId: 'builder-a',
       keyId: 'key-a',
+      productAccessVerified: true,
       rawBody,
     });
     const body = JSON.parse(response.body) as {

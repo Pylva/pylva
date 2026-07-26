@@ -6,6 +6,11 @@ const testEnv = vi.hoisted(() => ({
   ENABLE_EVENT_LIMITS: false,
   NODE_ENV: 'test',
   LOG_LEVEL: 'silent',
+  PYLVA_DEPLOYMENT_MODE: 'self_hosted',
+  SELF_HOSTED_MONTHLY_EVENTS_LIMIT: 10_000_000,
+  SELF_HOSTED_MAX_CUSTOMERS: 500,
+  SELF_HOSTED_TELEMETRY_RETENTION_DAYS: 365,
+  SELF_HOSTED_BILLING_RETENTION_DAYS: 365,
 }));
 
 const routeMocks = vi.hoisted(() => ({
@@ -33,9 +38,10 @@ vi.mock('@/lib/ingest/event-cap', () => ({
 
 const { GET } = await import('../../src/app/api/v1/whoami/route.js');
 
-function whoamiRequest() {
-  return new Request('http://localhost/api/v1/whoami') as unknown as
-    import('next/server.js').NextRequest;
+function whoamiRequest(headers?: HeadersInit) {
+  return new Request('http://localhost/api/v1/whoami', {
+    headers,
+  }) as unknown as import('next/server.js').NextRequest;
 }
 
 function selectTx(rows: unknown[]) {
@@ -52,9 +58,18 @@ function selectTx(rows: unknown[]) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
   testEnv.ENABLE_EVENT_LIMITS = false;
+  testEnv.PYLVA_DEPLOYMENT_MODE = 'self_hosted';
   routeMocks.builderRows = [
-    { slug: 'acme', name: 'Acme Inc', display_name: 'Acme', tier: 'pro' },
+    {
+      slug: 'acme',
+      name: 'Acme Inc',
+      display_name: 'Acme',
+      tier: 'pro',
+      access_state: 'active',
+      entitlement_source: 'stripe',
+    },
   ];
   routeMocks.withRLS.mockImplementation(
     async (_builderId: string, cb: (tx: unknown) => Promise<unknown>) =>
@@ -64,7 +79,7 @@ beforeEach(() => {
 });
 
 describe('GET /api/v1/whoami', () => {
-  it('returns org, tier, key, limits, usage, and setup URLs when limits are enforced', async () => {
+  it('returns plan, access state, deprecated tier alias, limits, and setup URLs when active', async () => {
     testEnv.ENABLE_EVENT_LIMITS = true;
     routeMocks.getEventCapUsage.mockResolvedValue({
       monthly_events_used: 1234,
@@ -79,10 +94,13 @@ describe('GET /api/v1/whoami', () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('x-pylva-contract-version')).toBe('2');
     expect(body).toEqual({
       org: { slug: 'acme', name: 'Acme' },
+      plan: 'pro',
+      access_state: 'active',
       tier: 'pro',
-      key: { id: 'key-1', scope: 'agent_sdk' },
+      key: { id: 'key-1', scope: 'universal' },
       limits: { monthly_events: 1_000_000, enforced: true },
       usage: {
         monthly_events_used: 1234,
@@ -94,26 +112,103 @@ describe('GET /api/v1/whoami', () => {
       docs_url: 'https://docs.pylva.com',
       agent_setup_url: 'https://docs.pylva.com/setup-with-ai.md',
     });
-    expect(routeMocks.withRLS).toHaveBeenCalledWith(
-      routeMocks.ctx.builderId,
-      expect.any(Function),
+    expect(routeMocks.withRLS).toHaveBeenCalledWith(routeMocks.ctx.builderId, expect.any(Function));
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining('deprecated_tier_alias_consumer'),
     );
   });
 
-  it('reports usage null with enforced false on the self-host default', async () => {
-    routeMocks.builderRows = [{ slug: 'acme', name: 'Acme Inc', display_name: null, tier: 'free' }];
+  it.each(['2', '3'])(
+    'observes canonical contract declaration %s without counting legacy alias usage',
+    async (contractVersion) => {
+      const response = await GET(
+        whoamiRequest({ 'X-Pylva-Contract-Version': contractVersion }),
+      );
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body).toMatchObject({
+        plan: 'pro',
+        access_state: 'active',
+      });
+      expect(body).not.toHaveProperty('tier');
+      expect(console.warn).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps an older numeric declaration on the measured compatibility path', async () => {
+    const response = await GET(whoamiRequest({ 'X-Pylva-Contract-Version': '1' }));
+    const body = await response.json();
+
+    expect(body.tier).toBe('pro');
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining('contract_version=1'),
+    );
+  });
+
+  it('bounds malformed legacy contract declarations before logging them', async () => {
+    const response = await GET(
+      whoamiRequest({ 'X-Pylva-Contract-Version': 'customer@example.com' }),
+    );
+    const body = await response.json();
+
+    expect(body.tier).toBe('pro');
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('contract_version=other'));
+    expect(console.warn).not.toHaveBeenCalledWith(expect.stringContaining('customer@example.com'));
+  });
+
+  it('reports an active no-plan self-hosted workspace without a deprecated tier alias', async () => {
+    routeMocks.builderRows = [
+      {
+        slug: 'acme',
+        name: 'Acme Inc',
+        display_name: null,
+        tier: null,
+        access_state: 'active',
+        entitlement_source: 'self_hosted',
+      },
+    ];
 
     const response = await GET(whoamiRequest());
     const body = await response.json();
 
+    expect(body.plan).toBeNull();
+    expect(body.access_state).toBe('active');
+    expect(body).not.toHaveProperty('tier');
     expect(body.usage).toBeNull();
-    expect(body.limits).toEqual({ monthly_events: 100_000, enforced: false });
+    expect(body.limits).toEqual({ monthly_events: 10_000_000, enforced: false });
     expect(body.org.name).toBe('Acme Inc');
+  });
+
+  it('never applies self-host policy to a hosted process', async () => {
+    testEnv.PYLVA_DEPLOYMENT_MODE = 'hosted';
+    routeMocks.builderRows = [
+      {
+        slug: 'corrupt',
+        name: 'Corrupt',
+        display_name: null,
+        tier: null,
+        access_state: 'active',
+        entitlement_source: 'self_hosted',
+      },
+    ];
+
+    const response = await GET(whoamiRequest());
+
+    expect(response.status).toBe(500);
+    expect(routeMocks.getEventCapUsage).not.toHaveBeenCalled();
   });
 
   it('maps the unlimited enterprise cap to null instead of Infinity', async () => {
     routeMocks.builderRows = [
-      { slug: 'bigco', name: 'BigCo', display_name: 'BigCo', tier: 'enterprise' },
+      {
+        slug: 'bigco',
+        name: 'BigCo',
+        display_name: 'BigCo',
+        tier: 'enterprise',
+        access_state: 'active',
+        entitlement_source: 'enterprise_contract',
+      },
     ];
 
     const body = await (await GET(whoamiRequest())).json();
@@ -122,19 +217,109 @@ describe('GET /api/v1/whoami', () => {
     expect(body.limits.monthly_events).toBeNull();
   });
 
-  it('falls back to free-tier limits when the persisted tier is unknown', async () => {
+  it('fails closed when the persisted plan is unknown', async () => {
     routeMocks.builderRows = [
-      { slug: 'acme', name: 'Acme Inc', display_name: 'Acme', tier: 'mystery' },
+      {
+        slug: 'acme',
+        name: 'Acme Inc',
+        display_name: 'Acme',
+        tier: 'mystery',
+        access_state: 'active',
+        entitlement_source: 'stripe',
+      },
     ];
 
-    const body = await (await GET(whoamiRequest())).json();
+    const response = await GET(whoamiRequest());
+    const body = await response.json();
 
-    expect(body.tier).toBe('free');
-    expect(body.limits.monthly_events).toBe(100_000);
+    expect(response.status).toBe(500);
+    expect(body.error.code).toBe('INTERNAL_ERROR');
+    expect(routeMocks.getEventCapUsage).not.toHaveBeenCalled();
+  });
+
+  it('maps only the exact legacy Free tuple to checkout-required with no paid alias', async () => {
+    routeMocks.builderRows = [
+      {
+        slug: 'legacy',
+        name: 'Legacy',
+        display_name: null,
+        tier: 'free',
+        access_state: null,
+        entitlement_source: null,
+      },
+    ];
+
+    const response = await GET(whoamiRequest());
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      plan: null,
+      access_state: 'checkout_required',
+      limits: { monthly_events: null, enforced: false },
+      usage: null,
+    });
+    expect(body).not.toHaveProperty('tier');
+    expect(routeMocks.getEventCapUsage).not.toHaveBeenCalled();
+    expect(console.warn).not.toHaveBeenCalled();
+  });
+
+  it('returns suspended lifecycle state without a paid plan or deprecated alias', async () => {
+    routeMocks.builderRows = [
+      {
+        slug: 'acme',
+        name: 'Acme Inc',
+        display_name: 'Acme',
+        tier: null,
+        access_state: 'suspended',
+        entitlement_source: 'stripe',
+      },
+    ];
+
+    const response = await GET(whoamiRequest());
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      plan: null,
+      access_state: 'suspended',
+      limits: { monthly_events: null, enforced: false },
+      usage: null,
+    });
+    expect(body).not.toHaveProperty('tier');
+    expect(routeMocks.getEventCapUsage).not.toHaveBeenCalled();
+    expect(console.warn).not.toHaveBeenCalled();
+  });
+
+  it('fails closed for a paid plan paired with suspended access', async () => {
+    routeMocks.builderRows = [
+      {
+        slug: 'acme',
+        name: 'Acme Inc',
+        display_name: 'Acme',
+        tier: 'pro',
+        access_state: 'suspended',
+        entitlement_source: 'stripe',
+      },
+    ];
+
+    const response = await GET(whoamiRequest());
+
+    expect(response.status).toBe(500);
+    expect(routeMocks.getEventCapUsage).not.toHaveBeenCalled();
   });
 
   it('falls back through display_name and name to the slug', async () => {
-    routeMocks.builderRows = [{ slug: 'acme', name: null, display_name: null, tier: 'free' }];
+    routeMocks.builderRows = [
+      {
+        slug: 'acme',
+        name: null,
+        display_name: null,
+        tier: null,
+        access_state: 'checkout_required',
+        entitlement_source: null,
+      },
+    ];
 
     const body = await (await GET(whoamiRequest())).json();
 

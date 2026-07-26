@@ -83,4 +83,18 @@ describe('POST /api/v1/alerts/dlq/[id]/retry', () => {
       },
     });
   });
+
+  it('returns 403 when the defense-in-depth replay gate denies product access', async () => {
+    mocks.retryDlqEntry.mockResolvedValueOnce({ kind: 'access_denied' });
+
+    const response = await retryRoute.POST(request('owner'), params);
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        code: ErrorCode.FEATURE_NOT_AVAILABLE,
+        message: 'Workspace access is unavailable',
+      },
+    });
+  });
 });

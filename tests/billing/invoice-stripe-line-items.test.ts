@@ -3,6 +3,11 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+const entitlementMocks = vi.hoisted(() => ({
+  authorizeBuilderCapability: vi.fn(),
+  getBuilderEntitlementForShare: vi.fn(),
+}));
+
 const BUILDER_ID = '00000000-0000-0000-0000-000000000001';
 const STRIPE_ACCOUNT = 'acct_test_1';
 const PERIOD = { start: new Date('2026-04-01T00:00:00Z'), end: new Date('2026-05-01T00:00:00Z') };
@@ -70,6 +75,15 @@ vi.mock('../../src/lib/logger.js', () => ({
 
 vi.mock('../../src/lib/auth/audit-log.js', () => ({ auditLog: () => Promise.resolve() }));
 
+vi.mock('../../src/lib/auth/builder-entitlement.js', () => ({
+  authorizeBuilderCapability: entitlementMocks.authorizeBuilderCapability,
+}));
+
+vi.mock('../../src/lib/db/advisory-locks.js', () => ({
+  getBuilderEntitlementForShare:
+    entitlementMocks.getBuilderEntitlementForShare,
+}));
+
 vi.mock('../../src/lib/clickhouse/customer-id.js', () => ({
   resolveCustomerComposite: () => Promise.resolve(`${BUILDER_ID}:ext-1`),
 }));
@@ -91,8 +105,12 @@ vi.mock('../../src/lib/billing/clickhouse-usage.js', () => ({
   },
 }));
 
+let ensureStripeCustomerCalls = 0;
 vi.mock('../../src/lib/stripe/ensure-customer.js', () => ({
-  ensureStripeCustomer: () => Promise.resolve({ stripe_customer_id: 'cus_1', created: false }),
+  ensureStripeCustomer: () => {
+    ensureStripeCustomerCalls += 1;
+    return Promise.resolve({ stripe_customer_id: 'cus_1', created: false });
+  },
 }));
 
 interface ItemCall {
@@ -253,9 +271,84 @@ beforeEach(() => {
   usageCalls = [];
   projectionReadyCalls = [];
   perUnitRates = { credits: 0.01 };
+  ensureStripeCustomerCalls = 0;
+  entitlementMocks.authorizeBuilderCapability.mockReset();
+  entitlementMocks.authorizeBuilderCapability.mockResolvedValue({ allowed: true });
+  entitlementMocks.getBuilderEntitlementForShare.mockReset();
+  entitlementMocks.getBuilderEntitlementForShare.mockResolvedValue({
+    ok: true,
+    entitlement: {
+      plan: null,
+      access_state: 'active',
+      entitlement_source: 'self_hosted',
+      has_product_access: true,
+      legacy_free: false,
+    },
+  });
 });
 
 describe('generateInvoice — pushes computed line items onto the Stripe invoice', () => {
+  it('does no invoice preflight or Stripe work without product access', async () => {
+    entitlementMocks.authorizeBuilderCapability.mockResolvedValueOnce({ allowed: false });
+
+    await expect(
+      generateInvoice({ builderId: BUILDER_ID, customerId: 'cust-1', period: PERIOD }),
+    ).rejects.toMatchObject({ code: 'workspace_access_unavailable' });
+
+    expect(projectionReadyCalls).toHaveLength(0);
+    expect(ensureStripeCustomerCalls).toBe(0);
+    expect(invoiceCreateCalls).toHaveLength(0);
+    expect(store).toHaveLength(0);
+  });
+
+  it('stops before customer or invoice creation when suspension wins the locked entitlement read', async () => {
+    let signalLockedRead!: () => void;
+    const lockedReadStarted = new Promise<void>((resolve) => {
+      signalLockedRead = resolve;
+    });
+    let releaseLockedRead!: () => void;
+    const lockedReadRelease = new Promise<void>((resolve) => {
+      releaseLockedRead = resolve;
+    });
+    entitlementMocks.getBuilderEntitlementForShare.mockImplementationOnce(
+      async () => {
+        signalLockedRead();
+        await lockedReadRelease;
+        return {
+          ok: true,
+          entitlement: {
+            plan: null,
+            access_state: 'suspended',
+            entitlement_source: null,
+            has_product_access: false,
+            legacy_free: false,
+          },
+        };
+      },
+    );
+
+    const generation = generateInvoice({
+      builderId: BUILDER_ID,
+      customerId: 'cust-1',
+      period: PERIOD,
+    });
+    await lockedReadStarted;
+    // The early preflight passed, but no connected Stripe side effect may run
+    // before the authoritative row-share read linearizes the operation.
+    expect(projectionReadyCalls).toHaveLength(1);
+    expect(ensureStripeCustomerCalls).toBe(0);
+    expect(invoiceCreateCalls).toHaveLength(0);
+
+    releaseLockedRead();
+    await expect(generation).rejects.toMatchObject({
+      code: 'workspace_access_unavailable',
+    });
+
+    expect(ensureStripeCustomerCalls).toBe(0);
+    expect(invoiceCreateCalls).toHaveLength(0);
+    expect(store).toHaveLength(0);
+  });
+
   it('attaches one Stripe invoice item per formula line, in USD cents', async () => {
     const results = await generateInvoice({
       builderId: BUILDER_ID,

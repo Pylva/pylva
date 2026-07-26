@@ -1,6 +1,7 @@
 // Apply one reviewed Postgres migration file to an existing database.
 // This is for targeted production remediation; fresh DB bootstrap still uses
-// `pnpm db:setup`, which applies the full migration directory.
+// `pnpm db:setup --fresh-install`, which applies the full migration directory
+// only after proving the database is empty and the principal is scoped.
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -11,6 +12,7 @@ import {
   buildersTableExists,
   computeChecksum,
   ensureLedger,
+  isRemoveFreeReservedMigration,
   ledgerExists,
   onlineMigrationLockTimeout,
   prepareOnlineMigration,
@@ -95,19 +97,25 @@ export async function applyPostgresMigration(
 ): Promise<{ relativePath: string }> {
   const rootDir = options.rootDir ?? DEFAULT_ROOT_DIR;
   const { absolutePath, relativePath } = resolveMigrationPath(options.migrationPath, rootDir);
+  const filename = path.basename(relativePath);
+  if (isRemoveFreeReservedMigration(filename)) {
+    throw new Error(
+      `Refusing to apply reserved staged migration ${filename} with db:apply:migration; ` +
+        'use the receipt-verified, phase-specific db:migrate rollout path',
+    );
+  }
   if (!options.sqlClient && !options.databaseUrl) {
     throw new Error('DATABASE_URL environment variable is required when no sqlClient is provided');
   }
   const content = await fs.readFile(absolutePath, 'utf8');
   const client = options.sqlClient ?? postgres(options.databaseUrl!);
-  const filename = path.basename(relativePath);
 
   try {
     await withMigrationAdvisoryLock(client, async (lockedClient) => {
       const hasLedger = await ledgerExists(lockedClient);
       if (!hasLedger && (await buildersTableExists(lockedClient))) {
         throw new Error(
-          'database predates migration tracking; run pnpm db:migrate --baseline --yes once before applying manual migrations',
+          'database predates migration tracking; inspect the physical schema, then run pnpm db:migrate --baseline --through <verified-historical-head-before-056> --yes',
         );
       }
 

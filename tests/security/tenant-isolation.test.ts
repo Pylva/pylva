@@ -25,17 +25,41 @@ beforeAll(async () => {
 
   // Create test builders
   const [a] = await adminSql!`
-    INSERT INTO builders (email, name, tier, slug)
-    VALUES ('test-isolation-a@test.com', 'Isolation Test A', 'free', 'isolation-test-a')
-    ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, tier = EXCLUDED.tier, slug = EXCLUDED.slug
+    INSERT INTO builders (email, name, tier, access_state, entitlement_source, slug)
+    VALUES (
+      'test-isolation-a@test.com',
+      'Isolation Test A',
+      'pro',
+      'active',
+      'admin',
+      'isolation-test-a'
+    )
+    ON CONFLICT (email) DO UPDATE SET
+      name = EXCLUDED.name,
+      tier = EXCLUDED.tier,
+      access_state = EXCLUDED.access_state,
+      entitlement_source = EXCLUDED.entitlement_source,
+      slug = EXCLUDED.slug
     RETURNING id
   `;
   builderAId = a!.id as string;
 
   const [b] = await adminSql!`
-    INSERT INTO builders (email, name, tier, slug)
-    VALUES ('test-isolation-b@test.com', 'Isolation Test B', 'free', 'isolation-test-b')
-    ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, tier = EXCLUDED.tier, slug = EXCLUDED.slug
+    INSERT INTO builders (email, name, tier, access_state, entitlement_source, slug)
+    VALUES (
+      'test-isolation-b@test.com',
+      'Isolation Test B',
+      'pro',
+      'active',
+      'admin',
+      'isolation-test-b'
+    )
+    ON CONFLICT (email) DO UPDATE SET
+      name = EXCLUDED.name,
+      tier = EXCLUDED.tier,
+      access_state = EXCLUDED.access_state,
+      entitlement_source = EXCLUDED.entitlement_source,
+      slug = EXCLUDED.slug
     RETURNING id
   `;
   builderBId = b!.id as string;

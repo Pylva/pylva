@@ -6,6 +6,10 @@
 import { logger } from '../../logger.js';
 import { retryWithBackoff, isRetryableHttpError } from '../retry.js';
 import { writeToDlq } from '../dlq.js';
+import {
+  isAlertDeliveryAccessDeniedError,
+  withAlertDeliveryAccessMutation,
+} from '../entitlement-fence.js';
 import { buildAlertBlocks } from '../templates/slack/block-builder.js';
 import { externalFetch } from '../../external-egress.js';
 import type { ChannelDeliverFn } from './channel.interface.ts';
@@ -26,23 +30,31 @@ export const deliverSlack: ChannelDeliverFn = async (payloads, entry, ctx) => {
   const body = JSON.stringify({ blocks });
 
   const result = await retryWithBackoff(
-    async () => {
-      const res = await externalFetch({
-        target: 'slack',
-        url: slackEntry.slack_webhook_url,
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body,
-        timeoutMs: SLACK_FETCH_TIMEOUT_MS,
-      });
-      if (res.status < 200 || res.status >= 300) {
-        throw new Error(`slack POST failed: ${res.status} ${res.statusText}`);
-      }
+    () =>
+      withAlertDeliveryAccessMutation(ctx.builder_id, async () => {
+        // Hold the builder lifecycle lock through one Slack attempt only.
+        // Any backoff runs after the transaction has released that lock.
+        const res = await externalFetch({
+          target: 'slack',
+          url: slackEntry.slack_webhook_url,
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+          timeoutMs: SLACK_FETCH_TIMEOUT_MS,
+        });
+        if (res.status < 200 || res.status >= 300) {
+          throw new Error(`slack POST failed: ${res.status} ${res.statusText}`);
+        }
+      }),
+    {
+      retryable: (error) => !isAlertDeliveryAccessDeniedError(error) && isRetryableHttpError(error),
     },
-    { retryable: isRetryableHttpError },
   );
 
   if (!result.ok) {
+    if (isAlertDeliveryAccessDeniedError(result.cause)) {
+      throw result.cause;
+    }
     await writeToDlq({
       builder_id: ctx.builder_id,
       channel: 'slack',

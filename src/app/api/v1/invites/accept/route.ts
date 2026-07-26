@@ -6,6 +6,7 @@ import { NextResponse, type NextRequest } from 'next/server.js';
 import { and, eq, gt, isNull } from 'drizzle-orm';
 import { setDashboardSessionCookies, withJwtAuth } from '@/lib/auth/middleware';
 import { invalidateMembershipCache } from '@/lib/auth/membership-cache';
+import { requireEntitlementContext } from '@/lib/auth/entitlement-context';
 import { revokeJwt, signJwt } from '@/lib/auth/jwt';
 import {
   clearPendingInviteCookie,
@@ -18,7 +19,12 @@ import { db } from '@/lib/db/client';
 import { builders, invites, userBuilderMemberships, users } from '@/lib/db/schema';
 import { auditLog } from '@/lib/auth/audit-log';
 import { AuditAction } from '@/lib/audit/actions';
-import { ErrorCode, JwtAudience, type Role as RoleType } from '@pylva/shared';
+import {
+  BuilderAccessState,
+  ErrorCode,
+  JwtAudience,
+  type Role as RoleType,
+} from '@pylva/shared';
 import { goneError, validationError } from '@/lib/errors';
 import { env } from '@/lib/config';
 import { logger } from '@/lib/logger';
@@ -119,7 +125,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       .select({
         role: userBuilderMemberships.role,
         slug: builders.slug,
-        tier: builders.tier,
+        plan: builders.tier,
+        access_state: builders.access_state,
+        entitlement_source: builders.entitlement_source,
       })
       .from(userBuilderMemberships)
       .innerJoin(builders, eq(builders.id, userBuilderMemberships.builder_id))
@@ -132,6 +140,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       .limit(1);
     const membership = memberships[0];
     if (!membership) throw new Error('Invite claim did not produce a membership');
+    const entitlement = requireEntitlementContext({
+      plan: membership.plan,
+      access_state: membership.access_state,
+      entitlement_source: membership.entitlement_source,
+    });
 
     await auditLog(tx, {
       builder_id: invite.builder_id,
@@ -146,7 +159,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return {
       role: membership.role as RoleType,
       slug: membership.slug,
-      tier: membership.tier,
+      ...entitlement,
     };
   });
 
@@ -162,7 +175,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     user_id: userId,
     org_slug: accepted.slug,
     role: accepted.role,
-    tier: accepted.tier,
+    plan: accepted.plan,
+    access_state: accepted.accessState,
+    ...(accepted.plan !== null && accepted.accessState === BuilderAccessState.ACTIVE
+      ? { tier: accepted.plan }
+      : {}),
   });
 
   try {
@@ -174,7 +191,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   log.info({ builder_id: invite.builder_id, user_id: userId }, 'invite accepted');
 
   const response = NextResponse.redirect(
-    `${env.OAUTH_REDIRECT_BASE_URL}/o/${accepted.slug}/dashboard`,
+    `${env.OAUTH_REDIRECT_BASE_URL}/o/${accepted.slug}/${
+      accepted.accessState === BuilderAccessState.ACTIVE ? 'dashboard' : 'subscription'
+    }`,
   );
   setDashboardSessionCookies(response, {
     token: jwt,

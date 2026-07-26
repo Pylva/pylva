@@ -9,7 +9,7 @@ import { extractExternalCustomerId } from '../clickhouse/customer-id.js';
 import {
   listActiveRulesForCustomer,
   listAlertChannelEntriesForRule,
-  markRuleTriggered,
+  markRuleTriggeredWithProductAccess,
 } from './repository.js';
 import { periodStartFor, periodEndFor } from '../budget/period-utils.js';
 import { aggregateSpendForRule } from '../budget/aggregate.js';
@@ -22,6 +22,7 @@ import {
   type RulePeriod,
   type RuleScope,
 } from '@pylva/shared';
+import { authorizeBuilderCapability } from '../auth/builder-entitlement.js';
 
 const log = logger.child({ module: 'rules.post-call-evaluator' });
 
@@ -64,6 +65,12 @@ export async function evaluatePostCall(
   // Gather the distinct set of customer_ids that just had events.
   const touchedCustomers = new Set(insertedEvents.map((e) => e.customer_id));
   if (touchedCustomers.size === 0) return;
+
+  const entitlement = await authorizeBuilderCapability(builderId, 'product');
+  if (!entitlement.allowed) {
+    log.info({ builder_id: builderId }, 'rule evaluation skipped without product access');
+    return;
+  }
 
   // For each touched customer, fetch rules that apply + run each at most once
   // per period.
@@ -120,6 +127,18 @@ async function evalOneRule(
   // Compute the aggregate — scoped or pooled. Shared with the ingest
   // route's budget_exceeded flag path and the /budget/sync handler.
   const total = await aggregateSpendForRule(builderId, rule, scopedCompositeCustomerId);
+
+  // Aggregation can be a long ClickHouse query. Do not reserve the in-memory
+  // dedup key after a workspace was suspended while that query was running.
+  const postAggregateEntitlement = await authorizeBuilderCapability(builderId, 'product');
+  if (!postAggregateEntitlement.allowed) {
+    log.info(
+      { builder_id: builderId, rule_id: rule.id },
+      'rule fire stopped after aggregation by workspace lifecycle fence',
+    );
+    return;
+  }
+
   const periodStartIso = periodStartFor(cfg.period).toISOString();
   const key = dedupKey(rule.id, scopeToken(scope, externalCustomerId), periodStartIso);
 
@@ -181,15 +200,50 @@ async function evalOneRule(
             ),
           };
 
-    await deliverAlert({
+    const delivery = await deliverAlert({
       builder_id: builderId,
       rule_id: rule.id,
       payload,
       channels,
     });
-    // Dashboard freshness signal (B4-4c) — best-effort; a failed stamp
-    // must not release the dedup reservation and re-page the builder.
-    await markRuleTriggered(builderId, rule.id).catch(() => undefined);
+
+    if (delivery.kind !== 'accepted') {
+      firedThisPeriod.delete(key);
+      log.info(
+        {
+          builder_id: builderId,
+          rule_id: rule.id,
+          delivery_outcome: delivery.kind,
+        },
+        'rule fire did not advance durable state; dedup released',
+      );
+      return;
+    }
+
+    // Linearize the trigger stamp with checkout/suspension transitions. The
+    // repository locks the authoritative builder row and mutates the rule in
+    // the same transaction, closing the final check-to-write race.
+    const markOutcome = await markRuleTriggeredWithProductAccess(builderId, rule.id).catch(
+      (error) => {
+        log.warn(
+          {
+            builder_id: builderId,
+            rule_id: rule.id,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'rule trigger freshness stamp failed after accepted delivery',
+        );
+        return { kind: 'stamp_failed' } as const;
+      },
+    );
+    if (markOutcome.kind === 'access_denied') {
+      firedThisPeriod.delete(key);
+      log.info(
+        { builder_id: builderId, rule_id: rule.id },
+        'rule trigger stamp skipped by workspace lifecycle fence; dedup released',
+      );
+      return;
+    }
 
     log.info(
       {

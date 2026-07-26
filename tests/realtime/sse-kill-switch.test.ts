@@ -9,6 +9,11 @@ vi.mock('../../src/lib/config.js', () => ({
   },
 }));
 
+vi.mock('../../src/lib/auth/builder-entitlement.js', () => ({
+  authorizeBuilderCapability: vi.fn(async () => ({ allowed: true })),
+  accessDeniedMessage: vi.fn(() => 'Workspace access is unavailable'),
+}));
+
 // The route short-circuits on the kill switch before touching Redis or
 // ClickHouse, but module-level imports still resolve those clients eagerly —
 // stub them so the test harness doesn't open real sockets.

@@ -1,7 +1,7 @@
 // F6 (B6/B14) — activation gates. Promotion is the moment a rule starts
 // affecting live traffic, so the route re-validates the full rule against
 // the create schema (drafts store free-form config), enforces the operator
-// kill switch / tier gate / failover consent, requires confirm-by-typing
+// kill switch / workspace access / failover consent, requires confirm-by-typing
 // the rule name (trimmed on BOTH sides), and heals the legacy post_call
 // enforcement default on pre_call-only types so an activated rule is
 // actually served to the SDK.
@@ -13,7 +13,7 @@ import { POOLED_TARGETING_MESSAGE } from '../../src/lib/rules/validator.js';
 
 const mocks = vi.hoisted(() => ({
   auditLog: vi.fn(),
-  checkFeatureGate: vi.fn(),
+  checkDashboardFeatureGate: vi.fn(),
   getRule: vi.fn(),
   isFeatureEnabled: vi.fn(),
   previewRule: vi.fn(),
@@ -42,8 +42,8 @@ vi.mock('../../src/lib/auth/middleware.js', () => ({
         ),
 }));
 
-vi.mock('../../src/lib/auth/tier-enforcement.js', () => ({
-  checkFeatureGate: mocks.checkFeatureGate,
+vi.mock('../../src/lib/auth/dashboard-feature-gate.js', () => ({
+  checkDashboardFeatureGate: mocks.checkDashboardFeatureGate,
 }));
 vi.mock('../../src/lib/auth/audit-log.js', () => ({ auditLog: mocks.auditLog }));
 vi.mock('../../src/lib/db/rls.js', () => ({ withRLS: mocks.withRLS }));
@@ -56,17 +56,6 @@ vi.mock('../../src/lib/rules/repository.js', () => ({
   getRule: mocks.getRule,
   promoteRuleStatus: mocks.promoteRuleStatus,
   updateRule: mocks.updateRule,
-}));
-vi.mock('../../src/lib/db/client.js', () => ({
-  db: {
-    select: () => ({
-      from: () => ({
-        where: () => ({
-          limit: () => Promise.resolve([{ tier: 'pro' }]),
-        }),
-      }),
-    }),
-  },
 }));
 vi.mock('../../src/lib/logger.js', () => ({
   logger: {
@@ -136,7 +125,7 @@ const VALID_FAILOVER_CONFIG = {
 describe('POST /api/v1/rules/[id]/activate — F6 gates', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.checkFeatureGate.mockReturnValue(null);
+    mocks.checkDashboardFeatureGate.mockResolvedValue(null);
     mocks.isFeatureEnabled.mockResolvedValue(true);
     mocks.snapshotBackupPrice.mockResolvedValue(null);
     mocks.previewRule.mockResolvedValue({
@@ -280,8 +269,8 @@ describe('POST /api/v1/rules/[id]/activate — F6 gates', () => {
     expect(mocks.promoteRuleStatus).not.toHaveBeenCalled();
   });
 
-  it('returns the tier gate response when checkFeatureGate blocks advanced rules', async () => {
-    mocks.checkFeatureGate.mockReturnValue(
+  it('returns the access gate response when the workspace is restricted', async () => {
+    mocks.checkDashboardFeatureGate.mockResolvedValue(
       Response.json(
         { error: { type: 'invalid_request_error', code: ErrorCode.FEATURE_NOT_AVAILABLE } },
         { status: 403 },
@@ -297,7 +286,7 @@ describe('POST /api/v1/rules/[id]/activate — F6 gates', () => {
     );
 
     expect(response.status).toBe(403);
-    expect(mocks.checkFeatureGate).toHaveBeenCalledWith('pro', 'advanced_rules');
+    expect(mocks.checkDashboardFeatureGate).toHaveBeenCalledWith(BUILDER_ID, 'advanced_rules');
     expect(mocks.promoteRuleStatus).not.toHaveBeenCalled();
   });
 

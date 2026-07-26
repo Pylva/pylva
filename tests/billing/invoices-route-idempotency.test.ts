@@ -29,6 +29,10 @@ vi.mock('@/lib/auth/tier-enforcement', () => ({
   checkBuilderFeatureGate: () => Promise.resolve(null),
 }));
 
+vi.mock('@/lib/auth/dashboard-feature-gate', () => ({
+  checkDashboardCapabilityGate: () => Promise.resolve(null),
+}));
+
 vi.mock('@/lib/billing/idempotency', () => ({
   checkOrClaim: mocks.checkOrClaim,
   commitClaim: mocks.commitClaim,

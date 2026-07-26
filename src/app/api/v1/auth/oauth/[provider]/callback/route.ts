@@ -9,15 +9,14 @@ import {
   OAUTH_STATE_COOKIE,
   exchangeOAuthCode,
   oauthCookieNames,
-  upsertUserFromOAuth,
   verifyOAuthState,
 } from '@/lib/auth/oauth';
-import { findOrCreateBuilderForUser, resolveSlugForUser } from '@/lib/auth/org';
+import { provisionOAuthUserAndBuilder, resolveSlugForUser } from '@/lib/auth/org';
 import { signJwt } from '@/lib/auth/jwt';
 import { setDashboardSessionCookies } from '@/lib/auth/middleware';
 import { env } from '@/lib/config';
 import { validationError } from '@/lib/errors';
-import { JwtAudience, OAuthProvider } from '@pylva/shared';
+import { BuilderAccessState, JwtAudience, OAuthProvider } from '@pylva/shared';
 import { logger } from '@/lib/logger';
 import { auditLog } from '@/lib/auth/audit-log';
 import { AuditAction } from '@/lib/audit/actions';
@@ -31,7 +30,10 @@ import {
   type AllowedAuthNextPath,
 } from '@/lib/auth/post-auth-redirect';
 import { safeErrorMetadata } from '@/lib/safe-error-metadata';
-import { readPendingInviteToken } from '@/lib/auth/pending-invite';
+import {
+  clearPendingInviteCookie,
+  readPendingInviteToken,
+} from '@/lib/auth/pending-invite';
 
 const log = logger.child({ module: 'auth.oauth.callback' });
 const GITHUB_REST_HEADERS = {
@@ -240,36 +242,39 @@ async function continueOAuthCallback(
     return failOAuth(stateRaw, provider, 'profile_fetch', err);
   }
 
-  let upsert;
+  let provisioned;
   try {
-    upsert = await upsertUserFromOAuth({
+    provisioned = await provisionOAuthUserAndBuilder({
       email: profile.email,
       displayName: profile.name,
       avatarUrl: profile.avatar,
       provider,
+      pendingInviteToken,
     });
   } catch (err) {
-    return failOAuth(stateRaw, provider, 'user_upsert', err);
+    const stage =
+      typeof err === 'object' &&
+      err !== null &&
+      'stage' in err &&
+      (err as { stage?: unknown }).stage === 'user_upsert'
+        ? 'user_upsert'
+        : 'org_create';
+    return failOAuth(stateRaw, provider, stage, err);
   }
-
-  let org;
-  try {
-    org = await findOrCreateBuilderForUser({
-      userId: upsert.userId,
-      email: profile.email,
-      displayName: profile.name,
-      avatarUrl: profile.avatar,
-    });
-  } catch (err) {
-    return failOAuth(stateRaw, provider, 'org_create', err);
-  }
+  const { user: upsert, org } = provisioned;
 
   // `next` restore: if the user was bounced off a page in an org other than
   // their default, and they hold membership there, mint the session for THAT
   // org so the redirect lands where they left off. Non-members silently fall
   // back to the default org (buildPostAuthRedirectUrl drops the mismatched
   // next), so this can't be used to probe org membership.
-  let target = { builderId: org.builderId, slug: org.slug, role: org.role, tier: org.tier };
+  let target = {
+    builderId: org.builderId,
+    slug: org.slug,
+    role: org.role,
+    plan: org.plan,
+    accessState: org.accessState,
+  };
   if (next && isDashboardAuthNext(next)) {
     const nextSlug = nextPathOrgSlug(next);
     if (nextSlug !== org.slug) {
@@ -280,7 +285,8 @@ async function continueOAuthCallback(
             builderId: membership.builderId,
             slug: nextSlug,
             role: membership.role,
-            tier: membership.tier,
+            plan: membership.plan,
+            accessState: membership.accessState,
           };
         }
       } catch (err) {
@@ -298,7 +304,11 @@ async function continueOAuthCallback(
       user_id: upsert.userId,
       org_slug: target.slug,
       role: target.role,
-      tier: target.tier,
+      plan: target.plan,
+      access_state: target.accessState,
+      ...(target.plan !== null && target.accessState === BuilderAccessState.ACTIVE
+        ? { tier: target.plan }
+        : {}),
     });
   } catch (err) {
     return failOAuth(stateRaw, provider, 'jwt_sign', err);
@@ -327,24 +337,43 @@ async function continueOAuthCallback(
           details: { provider, previous: upsert.previousAuthProvider },
         });
       }
+      if (org.acceptedInviteId) {
+        await auditLog(tx, {
+          builder_id: target.builderId,
+          actor_type: 'user',
+          actor_id: upsert.userId,
+          action: AuditAction.ORG_MEMBER_JOINED,
+          resource_type: 'invite',
+          resource_id: org.acceptedInviteId,
+          details: { role: org.role },
+        });
+      }
     });
   } catch (err) {
     logOAuthAuditFailure(provider, err);
   }
 
-  const redirectUrl = pendingInviteToken
+  const postAuthUrl = buildPostAuthRedirectUrl({
+    baseUrl: env.OAUTH_REDIRECT_BASE_URL,
+    orgSlug: target.slug,
+    next,
+    accessState: target.accessState,
+  });
+  const mustUseSubscription =
+    target.accessState !== BuilderAccessState.ACTIVE &&
+    (!next || isDashboardAuthNext(next));
+  const redirectUrl = pendingInviteToken && !org.acceptedInviteId
     ? `${env.OAUTH_REDIRECT_BASE_URL}/api/v1/invites/accept`
-    : buildPostAuthRedirectUrl({
-        baseUrl: env.OAUTH_REDIRECT_BASE_URL,
-        orgSlug: target.slug,
-        next,
-      });
+    : mustUseSubscription
+      ? `${env.OAUTH_REDIRECT_BASE_URL}/o/${target.slug}/subscription`
+      : postAuthUrl;
   const response = NextResponse.redirect(redirectUrl);
   setDashboardSessionCookies(response, {
     token: jwt,
     userId: upsert.userId,
     orgSlug: target.slug,
   });
+  if (org.acceptedInviteId) clearPendingInviteCookie(response);
   clearOAuthCookies(response, stateRaw);
   return response;
 }

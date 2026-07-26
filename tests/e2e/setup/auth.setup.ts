@@ -2,12 +2,14 @@
 //
 // There is no login-form path in CI (magic links go out via Resend email), so
 // this setup project mints a REAL session JWT with the same private key the
-// server verifies against (CI generates a throwaway RSA pair; locally .keys/
-// from `pnpm db:setup`). No product code is bypassed: the middleware performs
-// its normal RS256 + membership checks. Anyone able to run this already holds
-// the private key file, so this adds no attack surface.
+// server verifies against (CI generates a throwaway RSA pair; locally
+// `pnpm exec tsx scripts/generate-dev-keys.ts` creates .keys/ before the
+// explicit `pnpm db:setup --fresh-install` bootstrap). No product code is
+// bypassed: the middleware performs its normal RS256 + membership checks.
+// Anyone able to run this already holds the private key file, so this adds no
+// attack surface.
 //
-// Steps: upsert an e2e user + owner membership on the seeded `alice-free`
+// Steps: upsert an e2e user + owner membership on the seeded `alice-self-hosted`
 // builder (db/seed.ts), sign the dashboard JWT (mirrors signJwt in
 // src/lib/auth/jwt.ts), then persist a storageState cookie for the dashboard
 // specs to consume via test.use({ storageState: DASHBOARD_STORAGE_STATE }).
@@ -35,7 +37,10 @@ setup('mint dashboard session', async ({ browser, baseURL }) => {
   const sql = postgres(databaseUrl);
   try {
     const builders = await sql`
-      SELECT id, tier FROM builders WHERE slug = ${DASHBOARD_ORG_SLUG} LIMIT 1
+      SELECT id, tier, access_state
+      FROM builders
+      WHERE slug = ${DASHBOARD_ORG_SLUG}
+      LIMIT 1
     `;
     if (builders.length === 0) {
       throw new Error(
@@ -43,6 +48,7 @@ setup('mint dashboard session', async ({ browser, baseURL }) => {
       );
     }
     const builder = builders[0]!;
+    const plan = typeof builder.tier === 'string' ? builder.tier : null;
 
     const users = await sql`
       INSERT INTO users (email, display_name)
@@ -64,7 +70,9 @@ setup('mint dashboard session', async ({ browser, baseURL }) => {
       builder_id: builder.id as string,
       user_id: userId,
       role: 'owner',
-      tier: (builder.tier as string | null) ?? 'free',
+      plan,
+      access_state: builder.access_state as string,
+      ...(plan === null ? {} : { tier: plan }),
     })
       .setProtectedHeader({ alg: 'RS256' })
       .setJti(crypto.randomUUID())

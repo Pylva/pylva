@@ -5,7 +5,7 @@ import { ErrorCode, type Role as RoleType } from '@pylva/shared';
 import { readBuilderContextFromDashboard } from '@/lib/auth/builder-context';
 import { withRole, Role } from '@/lib/auth/middleware';
 import { retryDlqEntry } from '@/lib/alerts/dlq-retry';
-import { authError, notFoundError } from '@/lib/errors';
+import { authError, forbiddenError, notFoundError } from '@/lib/errors';
 
 export async function POST(
   request: NextRequest,
@@ -27,6 +27,9 @@ export async function POST(
   if (outcome.kind === 'not_found') {
     // Concurrent retry returns 404 by design (per O3).
     return notFoundError(ErrorCode.NOT_FOUND, 'DLQ entry not found or already handled');
+  }
+  if (outcome.kind === 'access_denied') {
+    return forbiddenError(ErrorCode.FEATURE_NOT_AVAILABLE, 'Workspace access is unavailable');
   }
   if (outcome.kind === 'success') {
     return NextResponse.json({ ok: true, channel: outcome.channel });

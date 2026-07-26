@@ -15,8 +15,11 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-const sendMock = vi.fn();
-const renderAlertEmailMock = vi.fn();
+const mocks = vi.hoisted(() => ({
+  renderAlertEmail: vi.fn(),
+  send: vi.fn(),
+  withProductAccessMutation: vi.fn(),
+}));
 
 // dlq-retry transitively imports logger + db/client (via db/rls), which read
 // the validated env at module load. Stub config so the module graph loads
@@ -35,14 +38,25 @@ vi.mock('../../src/lib/config.js', () => ({
 // Mock the Resend SDK so getResend() returns a client without a network call.
 vi.mock('resend', () => ({
   Resend: class {
-    emails = { send: sendMock };
+    emails = { send: mocks.send };
   },
 }));
 
 // Mock the renderer so the assertion isolates the coercion wiring (does it
 // pass the RAW array, not a double-wrapped `[ [..] ]`?) from HTML rendering.
 vi.mock('../../src/lib/alerts/templates/email/alert.js', () => ({
-  renderAlertEmail: renderAlertEmailMock,
+  renderAlertEmail: mocks.renderAlertEmail,
+}));
+
+vi.mock('../../src/lib/auth/builder-entitlement.js', () => ({
+  authorizeBuilderCapability: vi.fn(async () => ({ allowed: true })),
+}));
+
+vi.mock('../../src/lib/auth/product-access-mutation.js', () => ({
+  isProductAccessMutationDeniedError: (error: unknown) =>
+    error instanceof Error &&
+    (error as Error & { code?: unknown }).code === 'product_access_mutation_denied',
+  withProductAccessMutation: mocks.withProductAccessMutation,
 }));
 
 const { deliverFromSnapshot } = await import('../../src/lib/alerts/dlq-retry.js');
@@ -82,43 +96,88 @@ function emailRow(overrides: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
-  sendMock.mockReset();
-  renderAlertEmailMock.mockReset();
-  renderAlertEmailMock.mockReturnValue({ subject: 'rendered', html: '<p>rendered</p>' });
-  sendMock.mockResolvedValue({ data: { id: 'resend-1' }, error: null });
+  vi.clearAllMocks();
+  mocks.renderAlertEmail.mockReturnValue({ subject: 'rendered', html: '<p>rendered</p>' });
+  mocks.send.mockResolvedValue({ data: { id: 'resend-1' }, error: null });
+  mocks.withProductAccessMutation.mockImplementation(
+    async (_builderId: string, callback: (tx: unknown) => Promise<unknown>) => callback({}),
+  );
 });
 
 describe('DLQ email retry — payload shape', () => {
   it('renders the RAW AlertPayload[] (never a double-wrapped array) and sends', async () => {
-    const result = await deliverFromSnapshot(emailRow());
+    const result = await deliverFromSnapshot('b1', emailRow());
 
     expect(result).toEqual({ ok: true });
     // The bug: renderAlertEmail was called with `[ [AlertPayload, …] ]`.
     // The fix: it receives the array exactly as stored.
-    expect(renderAlertEmailMock).toHaveBeenCalledTimes(1);
-    expect(renderAlertEmailMock).toHaveBeenCalledWith(RAW_PAYLOADS);
+    expect(mocks.renderAlertEmail).toHaveBeenCalledTimes(1);
+    expect(mocks.renderAlertEmail).toHaveBeenCalledWith(RAW_PAYLOADS);
 
-    const passed = renderAlertEmailMock.mock.calls[0]![0] as unknown[];
+    const passed = mocks.renderAlertEmail.mock.calls[0]![0] as unknown[];
     expect(Array.isArray(passed[0])).toBe(false); // not double-wrapped
     expect((passed[0] as { payload: { type: string } }).payload.type).toBe(
       'cost_threshold_exceeded',
     );
 
-    expect(sendMock).toHaveBeenCalledTimes(1);
-    const sendArg = sendMock.mock.calls[0]![0] as { to: string[]; subject: string };
+    expect(mocks.send).toHaveBeenCalledTimes(1);
+    expect(mocks.withProductAccessMutation).toHaveBeenCalledTimes(1);
+    const sendArg = mocks.send.mock.calls[0]![0] as { to: string[]; subject: string };
     expect(sendArg.to).toEqual(['ops@example.com']);
     expect(sendArg.subject).toBe('rendered');
   });
 
   it('surfaces a resend error as a retry failure', async () => {
-    sendMock.mockResolvedValue({ data: null, error: { message: 'rate_limited' } });
-    const result = await deliverFromSnapshot(emailRow());
+    mocks.send.mockResolvedValue({ data: null, error: { message: 'rate_limited' } });
+    const result = await deliverFromSnapshot('b1', emailRow());
     expect(result).toEqual({ ok: false, error: 'rate_limited' });
   });
 
   it('fails closed when the frozen snapshot is missing recipients', async () => {
-    const result = await deliverFromSnapshot(emailRow({ snapshot: {} }));
+    const result = await deliverFromSnapshot('b1', emailRow({ snapshot: {} }));
     expect(result).toEqual({ ok: false, error: 'snapshot_missing_email_recipients' });
-    expect(sendMock).not.toHaveBeenCalled();
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.withProductAccessMutation).not.toHaveBeenCalled();
+  });
+
+  it('holds lifecycle access through the frozen-snapshot Resend call', async () => {
+    let releaseSend!: (value: { data: { id: string }; error: null }) => void;
+    const sendPaused = new Promise<{ data: { id: string }; error: null }>((resolve) => {
+      releaseSend = resolve;
+    });
+    let releaseLock!: () => void;
+    const lockReleased = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    let lockHeld = false;
+
+    mocks.withProductAccessMutation.mockImplementationOnce(
+      async (_builderId: string, callback: (tx: unknown) => Promise<unknown>) => {
+        lockHeld = true;
+        try {
+          return await callback({});
+        } finally {
+          lockHeld = false;
+          releaseLock();
+        }
+      },
+    );
+    mocks.send.mockImplementationOnce(() => sendPaused);
+
+    const replay = deliverFromSnapshot('b1', emailRow());
+    await vi.waitFor(() => expect(mocks.send).toHaveBeenCalledTimes(1));
+
+    let suspensionCommitted = false;
+    const suspension = (async () => {
+      if (lockHeld) await lockReleased;
+      suspensionCommitted = true;
+    })();
+    await Promise.resolve();
+
+    expect(suspensionCommitted).toBe(false);
+    releaseSend({ data: { id: 'resend-1' }, error: null });
+    await expect(replay).resolves.toEqual({ ok: true });
+    await suspension;
+    expect(suspensionCommitted).toBe(true);
   });
 });

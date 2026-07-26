@@ -3,7 +3,7 @@
 // and /o/{slug}/* membership-check + header injection.
 
 import { NextResponse, type NextRequest } from 'next/server.js';
-import { ErrorCode, JwtAudience } from '@pylva/shared';
+import { BuilderAccessState, ErrorCode, JwtAudience } from '@pylva/shared';
 import {
   withApiKeyAuth,
   withJwtAuth,
@@ -26,6 +26,8 @@ import { env } from './lib/config.js';
 import { apiError, forbiddenError } from './lib/errors.js';
 import { logger } from './lib/logger.js';
 import { isAuthoritativeBudgetControlPath } from './lib/budget-control/public-paths.js';
+import type { WorkspaceCapability } from './lib/auth/builder-entitlement.js';
+import { PRODUCT_ACCESS_VERIFIED_HEADER } from './lib/auth/builder-context.js';
 
 const log = logger.child({ module: 'middleware.dashboard' });
 
@@ -41,6 +43,7 @@ const TRUSTED_CONTEXT_HEADERS = [
   'x-pathname',
   ORG_HEADER,
   PAGE_SESSION_HEADER,
+  PRODUCT_ACCESS_VERIFIED_HEADER,
 ] as const;
 
 type JwtAuthSuccess = Exclude<Awaited<ReturnType<typeof withJwtAuth>>, NextResponse>;
@@ -99,7 +102,8 @@ async function synchronizeDashboardSession(
   resolved: {
     builderId: string;
     role: (typeof authResult.context)['role'];
-    tier: string;
+    plan: (typeof authResult.context)['plan'];
+    accessState: NonNullable<(typeof authResult.context)['accessState']>;
     slug: string;
   },
 ): Promise<void> {
@@ -119,7 +123,11 @@ async function synchronizeDashboardSession(
       user_id: userId,
       org_slug: orgSlug,
       ...(resolved.role ? { role: resolved.role } : {}),
-      tier: resolved.tier,
+      plan: resolved.plan,
+      access_state: resolved.accessState,
+      ...(resolved.plan !== null && resolved.accessState === BuilderAccessState.ACTIVE
+        ? { tier: resolved.plan }
+        : {}),
     });
   }
 
@@ -161,6 +169,45 @@ function nextWithContext(
   return NextResponse.next({ request: { headers: requestHeaders } });
 }
 
+function capabilityForDashboardApi(
+  pathname: string,
+  method: string,
+): WorkspaceCapability {
+  if (pathname === '/api/v1/auth/switch-org') return 'account_recovery';
+  if (pathname.startsWith('/api/v1/billing/subscription')) return 'platform_billing';
+  if (
+    method === 'GET' &&
+    (pathname === '/api/v1/billing/invoices' ||
+      /^\/api\/v1\/billing\/invoices\/[^/]+$/.test(pathname))
+  ) {
+    return 'invoices';
+  }
+  if (pathname === '/api/v1/export/csv') return 'export';
+  return 'product';
+}
+
+function capabilityForDashboardPage(pathname: string, slug: string): WorkspaceCapability {
+  const orgRoot = `/o/${slug}`;
+  const invoiceRoot = `${orgRoot}/dashboard/billing`;
+  if (
+    pathname === `${orgRoot}/subscription` ||
+    pathname.startsWith(`${orgRoot}/subscription/`)
+  ) {
+    return 'platform_billing';
+  }
+  if (
+    pathname === invoiceRoot ||
+    pathname.startsWith(`${invoiceRoot}/invoices/`) ||
+    pathname.startsWith(`${invoiceRoot}/cycles/`)
+  ) {
+    return 'invoices';
+  }
+  if (pathname === `${orgRoot}/export` || pathname.startsWith(`${orgRoot}/export/`)) {
+    return 'export';
+  }
+  return 'product';
+}
+
 // One universal key (migration 048): every machine endpoint accepts any valid
 // key. Route groups differ only by rate-limit bucket — prefixes are kept
 // distinct so control-plane spam can't starve ingest for the same key.
@@ -185,6 +232,7 @@ async function handleApiKeyAuth(
   const response = nextWithContext(request, {
     'x-builder-id': authResult.builderId,
     'x-key-id': authResult.keyId,
+    [PRODUCT_ACCESS_VERIFIED_HEADER]: authResult.productAccessVerified ? '1' : undefined,
   });
   if (noStoreResponse) response.headers.set('Cache-Control', 'no-store');
   return response;
@@ -296,9 +344,20 @@ export async function middleware(request: NextRequest) {
     const pageContext = readDashboardPageContext(request, authResult.context.userId);
     if (pageContext instanceof NextResponse) return pageContext;
     const membership = authResult.context.userId
-      ? await withMembership({ slug: pageContext.orgSlug, userId: authResult.context.userId })
+      ? await withMembership({
+          slug: pageContext.orgSlug,
+          userId: authResult.context.userId,
+          capability: capabilityForDashboardApi(pathname, request.method),
+        })
       : null;
-    if (membership === null || membership instanceof NextResponse) {
+    if (membership instanceof NextResponse) {
+      if (membership.status !== 404) return membership;
+      return forbiddenError(
+        ErrorCode.ORG_MISMATCH,
+        'The active session does not have access to this organization',
+      );
+    }
+    if (membership === null) {
       return forbiddenError(
         ErrorCode.ORG_MISMATCH,
         'The active session does not have access to this organization',
@@ -340,13 +399,21 @@ export async function middleware(request: NextRequest) {
     }
 
     const membershipStart = performance.now();
-    const membership = await withMembership({ slug, userId: context.userId });
+    const membership = await withMembership({
+      slug,
+      userId: context.userId,
+      capability: capabilityForDashboardPage(pathname, slug),
+      deniedRedirect: new URL(`/o/${slug}/subscription`, env.OAUTH_REDIRECT_BASE_URL).toString(),
+    });
     const membershipMs = performance.now() - membershipStart;
     if (membership instanceof NextResponse) {
-      // I-T1-9: 404 on miss (don't leak org existence).
-      return NextResponse.rewrite(new URL('/404', request.url), {
-        status: 404,
-      });
+      if (membership.status === 404) {
+        // I-T1-9: 404 on membership miss (don't leak org existence).
+        return NextResponse.rewrite(new URL('/404', request.url), {
+          status: 404,
+        });
+      }
+      return membership;
     }
 
     const response = nextWithContext(request, {

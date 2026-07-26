@@ -5,6 +5,7 @@
 // B2a §4.7: adds OAuth / Resend / Sentry / Session / Cron env keys.
 
 import { createEnv } from '@t3-oss/env-core';
+import { SELF_HOSTED_LIMIT_DEFAULTS } from '@pylva/shared';
 import * as v from 'valibot';
 
 const boolEnv = v.pipe(
@@ -12,6 +13,20 @@ const boolEnv = v.pipe(
   v.transform((x) => (typeof x === 'string' ? x === 'true' : Boolean(x))),
   v.boolean(),
 );
+
+function positiveIntegerEnv(defaultValue: number, maxValue: number) {
+  return v.optional(
+    v.pipe(
+      v.unknown(),
+      v.transform((value) => (typeof value === 'string' ? Number(value) : value)),
+      v.number(),
+      v.integer(),
+      v.minValue(1),
+      v.maxValue(maxValue),
+    ),
+    defaultValue,
+  );
+}
 
 export const env = createEnv({
   server: {
@@ -52,6 +67,28 @@ export const env = createEnv({
 
     // --- Node env ---
     NODE_ENV: v.optional(v.picklist(['development', 'production', 'test']), 'development'),
+    // The public distribution is self-hosted by default. Pylva Cloud's private
+    // overlay must set (and itself default) this to `hosted` so an omitted
+    // deployment variable can never grant hosted workspaces self-host access.
+    PYLVA_DEPLOYMENT_MODE: v.optional(v.picklist(['hosted', 'self_hosted']), 'self_hosted'),
+    // Deployment-level self-host policy. These are not aliases for a
+    // commercial plan and are ignored when PYLVA_DEPLOYMENT_MODE=hosted.
+    SELF_HOSTED_MONTHLY_EVENTS_LIMIT: positiveIntegerEnv(
+      SELF_HOSTED_LIMIT_DEFAULTS.monthly_events,
+      2_147_483_647,
+    ),
+    SELF_HOSTED_MAX_CUSTOMERS: positiveIntegerEnv(
+      SELF_HOSTED_LIMIT_DEFAULTS.max_customers,
+      10_000_000,
+    ),
+    SELF_HOSTED_TELEMETRY_RETENTION_DAYS: positiveIntegerEnv(
+      SELF_HOSTED_LIMIT_DEFAULTS.telemetry_retention_days,
+      18_250,
+    ),
+    SELF_HOSTED_BILLING_RETENTION_DAYS: positiveIntegerEnv(
+      SELF_HOSTED_LIMIT_DEFAULTS.billing_retention_days,
+      18_250,
+    ),
 
     // --- Stripe (B2b) ---
     STRIPE_SECRET_KEY: v.optional(v.string()),
@@ -149,10 +186,10 @@ export const env = createEnv({
     ENABLE_SIMULATOR: v.optional(boolEnv, true),
     ENABLE_SSE_FEED: v.optional(boolEnv, false),
     ENABLE_COST_SOURCES: v.optional(boolEnv, true),
-    // Optional self-host event cap enforcement. Default OFF so local/self-host
-    // builders are not limited by Pylva Cloud plan tiers.
+    // Self-host cap enforcement defaults ON and uses the explicit deployment
+    // policy above, never a Pylva Cloud commercial plan.
     // Retention stamping is not behind this flag.
-    ENABLE_EVENT_LIMITS: v.optional(boolEnv, false),
+    ENABLE_EVENT_LIMITS: v.optional(boolEnv, true),
 
     // --- Authoritative budget control (pre-roll) ---
     // Fail-safe rollout default: schema and edge authentication may deploy
@@ -171,5 +208,11 @@ export const env = createEnv({
   },
   runtimeEnv: process.env,
 });
+
+if (env.SELF_HOSTED_BILLING_RETENTION_DAYS < env.SELF_HOSTED_TELEMETRY_RETENTION_DAYS) {
+  throw new Error(
+    'SELF_HOSTED_BILLING_RETENTION_DAYS must be greater than or equal to SELF_HOSTED_TELEMETRY_RETENTION_DAYS',
+  );
+}
 
 export type Env = typeof env;

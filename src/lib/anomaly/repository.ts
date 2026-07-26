@@ -19,6 +19,7 @@ import {
 import { anomalyEvents } from '../db/schema.js';
 import { withRLS } from '../db/rls.js';
 import { unwrapRows } from '../db/query-utils.js';
+import { withProductAccessMutation } from '../auth/product-access-mutation.js';
 import { isSeverityCooledDown } from './cooldown-severity.js';
 
 export interface InsertAnomalyEventInput {
@@ -43,7 +44,7 @@ export interface InsertAnomalyEventInput {
 export async function insertAnomalyEvent(
   input: InsertAnomalyEventInput,
 ): Promise<AnomalyEvent | null> {
-  const inserted = await withRLS(input.builder_id, async (tx) => {
+  const inserted = await withProductAccessMutation(input.builder_id, async (tx) => {
     const rows = await tx
       .insert(anomalyEvents)
       .values({

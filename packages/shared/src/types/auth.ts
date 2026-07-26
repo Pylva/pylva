@@ -3,7 +3,7 @@
 // Decision #18: API key format pv_live_{keyId}_{randomPart}
 // Decision D5 (B2a): builder = org; users attach via user_builder_memberships
 
-import type { BuilderTier } from './tier.js';
+import type { BuilderAccessState, BuilderPlan } from './tier.js';
 
 export const ApiKeyScope = {
   /** The only scope minted since migration 048: one key covers the SDK, admin, and import surfaces. */
@@ -111,7 +111,10 @@ export interface JwtPayload {
   user_id: string;
   builder_id: string;
   role: Role;
-  tier: BuilderTier;
+  plan: BuilderPlan | null;
+  access_state: BuilderAccessState;
+  /** @deprecated Compatibility alias emitted only for an active paid plan. */
+  tier?: BuilderPlan;
   aud: typeof JwtAudience.DASHBOARD;
   jti: string;
   iat: number;

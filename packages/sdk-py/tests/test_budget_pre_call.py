@@ -14,6 +14,7 @@ from pylva.wrappers._budget import _period_start_utc, maybe_enforce_pre_call
 
 def setup_function(_fn: object) -> None:
     rules_cache._reset_rules_cache_for_tests()  # type: ignore[attr-defined]
+    rules_cache._mark_rules_cache_fresh_for_tests()  # type: ignore[attr-defined]
     ba._reset_accumulator_for_tests()  # type: ignore[attr-defined]
 
 

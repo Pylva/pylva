@@ -16,12 +16,18 @@ import { AuditAction } from '../audit/actions.js';
 import { logger } from '../logger.js';
 import { externalFetch } from '../external-egress.js';
 import type { AlertPayload } from '@pylva/shared';
+import {
+  isAlertDeliveryAccessDeniedError,
+  withAlertDeliveryAccessMutation,
+} from './entitlement-fence.js';
+import { getBuilderEntitlementForShare } from '../db/advisory-locks.js';
 
 const log = logger.child({ module: 'alerts.dlq-retry' });
 const RETRY_FETCH_TIMEOUT_MS = 15_000;
 
 export type RetryOutcome =
   | { kind: 'not_found' }
+  | { kind: 'access_denied' }
   | { kind: 'success'; channel: string }
   | { kind: 'failure'; channel: string; attempts: number; error: string };
 
@@ -41,8 +47,21 @@ export interface DlqRow {
   attempts: number;
 }
 
+export type SnapshotDeliveryResult =
+  | { ok: true }
+  | { ok: false; error: string; access_denied?: false }
+  | { ok: false; error: 'access_denied'; access_denied: true };
+
 export async function retryDlqEntry(input: RetryInput): Promise<RetryOutcome> {
   return withRLS(input.builderId, async (tx) => {
+    // Lock the authoritative lifecycle row before the DLQ row. A concurrent
+    // suspension either commits first and denies this replay, or waits until
+    // the already-authorized replay and its audit mutation commit.
+    const entitlement = await getBuilderEntitlementForShare(tx, input.builderId);
+    if (entitlement === null || !entitlement.ok || !entitlement.entitlement.has_product_access) {
+      return { kind: 'access_denied' } as const;
+    }
+
     const lockedRows = await tx.execute(sql`
       SELECT id, channel, webhook_config_id, event_type, payload,
              channel_config_snapshot AS snapshot, attempts
@@ -55,7 +74,12 @@ export async function retryDlqEntry(input: RetryInput): Promise<RetryOutcome> {
     const row = unwrapRows<DlqRow>(lockedRows)[0];
     if (!row) return { kind: 'not_found' } as const;
 
-    const result = await deliverFromSnapshot(row);
+    const result = await deliverFromSnapshot(input.builderId, row, {
+      productAccessLocked: true,
+    });
+    if (!result.ok && result.access_denied) {
+      return { kind: 'access_denied' } as const;
+    }
 
     if (result.ok) {
       await tx.execute(sql`DELETE FROM webhook_dlq WHERE id = ${row.id}::uuid`);
@@ -93,8 +117,10 @@ export async function retryDlqEntry(input: RetryInput): Promise<RetryOutcome> {
 }
 
 export async function deliverFromSnapshot(
+  builderId: string,
   row: DlqRow,
-): Promise<{ ok: true } | { ok: false; error: string }> {
+  options: { productAccessLocked?: boolean } = {},
+): Promise<SnapshotDeliveryResult> {
   try {
     if (row.channel === 'webhook') {
       const snap = row.snapshot as { url?: string; secret?: string };
@@ -102,18 +128,22 @@ export async function deliverFromSnapshot(
       const body = JSON.stringify(row.payload);
       const ts = String(Math.floor(Date.now() / 1000));
       const sig = createHmac('sha256', snap.secret).update(`${ts}.${body}`).digest('hex');
-      const res = await externalFetch({
-        target: 'custom_webhook',
-        url: snap.url,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Pylva-Signature': `sha256=${sig}`,
-          'X-Pylva-Timestamp': ts,
-        },
-        body,
-        timeoutMs: RETRY_FETCH_TIMEOUT_MS,
-      });
+      const send = () =>
+        externalFetch({
+          target: 'custom_webhook',
+          url: snap.url!,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Pylva-Signature': `sha256=${sig}`,
+            'X-Pylva-Timestamp': ts,
+          },
+          body,
+          timeoutMs: RETRY_FETCH_TIMEOUT_MS,
+        });
+      const res = options.productAccessLocked
+        ? await send()
+        : await withAlertDeliveryAccessMutation(builderId, async () => send());
       if (res.status < 200 || res.status >= 300)
         return { ok: false, error: `webhook ${res.status}` };
       return { ok: true };
@@ -130,14 +160,18 @@ export async function deliverFromSnapshot(
       // as the live deliverSlack path does, mirroring how email re-renders.
       const { buildAlertBlocks } = await import('./templates/slack/block-builder.js');
       const blocks = buildAlertBlocks(row.payload as unknown as AlertPayload[]);
-      const res = await externalFetch({
-        target: 'slack',
-        url: snap.slack_webhook_url,
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ blocks }),
-        timeoutMs: RETRY_FETCH_TIMEOUT_MS,
-      });
+      const send = () =>
+        externalFetch({
+          target: 'slack',
+          url: snap.slack_webhook_url!,
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ blocks }),
+          timeoutMs: RETRY_FETCH_TIMEOUT_MS,
+        });
+      const res = options.productAccessLocked
+        ? await send()
+        : await withAlertDeliveryAccessMutation(builderId, async () => send());
       if (res.status < 200 || res.status >= 300) return { ok: false, error: `slack ${res.status}` };
       return { ok: true };
     }
@@ -146,11 +180,19 @@ export async function deliverFromSnapshot(
       // v1.1: replay against the frozen recipients via the email
       // channel's sendEmailFromSnapshot helper.
       const { sendEmailFromSnapshot } = await import('./channels/email.js');
-      return sendEmailFromSnapshot(row.snapshot as { email_recipients?: string[] }, row.payload);
+      return sendEmailFromSnapshot(
+        builderId,
+        row.snapshot as { email_recipients?: string[] },
+        row.payload,
+        options,
+      );
     }
 
     return { ok: false, error: `unknown_channel:${row.channel}` };
   } catch (err) {
+    if (isAlertDeliveryAccessDeniedError(err)) {
+      return { ok: false, error: 'access_denied', access_denied: true };
+    }
     const message = err instanceof Error ? err.message : String(err);
     log.error({ dlq_id: row.id, channel: row.channel, error: message }, 'dlq retry threw');
     return { ok: false, error: message };

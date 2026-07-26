@@ -4,17 +4,14 @@
 
 import { NextResponse, type NextRequest } from 'next/server.js';
 import * as v from 'valibot';
-import { eq } from 'drizzle-orm';
 import { readBuilderContextFromDashboard } from '@/lib/auth/builder-context';
 import { deleteRule, getRule, toggleRule, updateRule } from '@/lib/rules/repository';
 import { isAdvancedRuleType } from '@/lib/rules/categories';
 import { POOLED_TARGETING_MESSAGE, ruleUpdateSchema } from '@/lib/rules/validator';
 import { withRole, Role } from '@/lib/auth/middleware';
-import { checkFeatureGate } from '@/lib/auth/tier-enforcement';
+import { checkDashboardFeatureGate } from '@/lib/auth/dashboard-feature-gate';
 import { auditLog } from '@/lib/auth/audit-log';
 import { AuditAction } from '@/lib/audit/actions';
-import { db } from '@/lib/db/client';
-import { builders } from '@/lib/db/schema';
 import { withRLS } from '@/lib/db/rls';
 import { customerExternalIdExists } from '@/lib/customers/lookup';
 import { authError, forbiddenError, notFoundError, validationError } from '@/lib/errors';
@@ -24,7 +21,6 @@ import {
   RuleScope,
   RuleStatus,
   RuleType,
-  type BuilderTier,
   type ReliabilityFailoverConfig,
   type Role as RoleType,
 } from '@pylva/shared';
@@ -130,19 +126,13 @@ export async function PATCH(
       }
     }
 
-    // Advanced-type config edits re-run the same gates as activation: tier
-    // gate (pro+) and failover-consent on enable. Otherwise an Owner could
+    // Advanced-type config edits re-run the same gates as activation: workspace
+    // access and failover-consent on enable. Otherwise an Owner could
     // mutate a model_routing or reliability_failover rule's config after
-    // their tier downgraded, or flip consent_to_cost_shift while enabled.
+    // access is restricted, or flip consent_to_cost_shift while enabled.
     if (parsed.output.config !== undefined && isAdvancedRuleType(existing.type)) {
-      const [builder] = await db
-        .select({ tier: builders.tier })
-        .from(builders)
-        .where(eq(builders.id, ctx.builderId))
-        .limit(1);
-      if (!builder) return notFoundError(ErrorCode.RESOURCE_NOT_FOUND, 'Builder not found');
-      const tierGate = checkFeatureGate(builder.tier as BuilderTier, 'advanced_rules');
-      if (tierGate) return tierGate;
+      const accessGate = await checkDashboardFeatureGate(ctx.builderId, 'advanced_rules');
+      if (accessGate) return accessGate;
     }
     if (parsed.output.config !== undefined && existing.type === RuleType.RELIABILITY_FAILOVER) {
       const cfg = parsed.output.config as Partial<ReliabilityFailoverConfig>;

@@ -62,6 +62,8 @@ describe('static security greps under src/', () => {
       // Lightweight analytics beacon. Endpoint is restricted to known PostHog hosts and dynamic
       // values are JSON stringified with HTML-script delimiter characters escaped.
       'src/lib/analytics/page-view-beacon.tsx',
+      // Marketing structured data. JsonLd escapes '<' before embedding JSON in a script element.
+      'src/components/marketing/JsonLd.tsx',
     ]);
     const violations = hits.filter((h) => !allowed.has(h.file));
     expect(violations, JSON.stringify(violations, null, 2)).toEqual([]);

@@ -149,9 +149,9 @@ def _resolve_control_config(
             timeout_ms = value.timeout_ms
             _validate_control_values(mode, on_unavailable, timeout_ms)
             return ResolvedControlConfig(
-                mode=cast(ControlMode, mode),
-                on_unavailable=cast(ControlUnavailablePolicy, on_unavailable),
-                timeout_ms=cast(int, timeout_ms),
+                mode=mode,
+                on_unavailable=on_unavailable,
+                timeout_ms=timeout_ms,
             )
         if not isinstance(value, Mapping):
             raise InvalidControlConfigError("control must be a mapping or ControlConfig")

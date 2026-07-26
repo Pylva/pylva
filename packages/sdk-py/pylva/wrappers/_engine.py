@@ -16,7 +16,7 @@ from ..core.client_registry import has_registered_client
 from ..core.context import current_context
 from ..core.failover import ReliabilityFailoverConfig, is_active, record_outcome
 from ..core.model_routing import attempt_with_fallback, attempt_with_fallback_sync
-from ..core.rules_cache import get_cached_rules
+from ..core.rules_cache import get_rules_for_evaluation
 from ..core.rules_engine import (
     EngineEvaluation,
     PreCallContext,
@@ -112,7 +112,7 @@ class _EngineSetup:
 def _setup_engine(ctx: PreCallContext, provider_id: str) -> _EngineSetup:
     """Pre-call setup shared by sync + async paths."""
     maybe_enforce_pre_call(customer_id=ctx.customer_id, estimated_usd=0)
-    evaluation = evaluate_pre_call(get_cached_rules(), ctx)
+    evaluation = evaluate_pre_call(get_rules_for_evaluation(), ctx)
     failover_cfg = evaluation.failover.cfg if evaluation.failover else None
     failover_active = is_active(failover_cfg) if failover_cfg else False
 

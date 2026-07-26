@@ -8,7 +8,7 @@ import * as v from 'valibot';
 import { setDashboardSessionCookies, withJwtAuth } from '@/lib/auth/middleware';
 import { revokeJwt, signJwt } from '@/lib/auth/jwt';
 import { switchActiveOrg } from '@/lib/auth/org';
-import { JwtAudience } from '@pylva/shared';
+import { BuilderAccessState, JwtAudience } from '@pylva/shared';
 import { authError, notFoundError, validationError } from '@/lib/errors';
 import { ErrorCode } from '@pylva/shared';
 
@@ -46,7 +46,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     user_id: context.userId,
     org_slug: target.slug,
     role: target.role,
-    tier: target.tier,
+    plan: target.plan,
+    access_state: target.accessState,
+    ...(target.plan !== null && target.accessState === BuilderAccessState.ACTIVE
+      ? { tier: target.plan }
+      : {}),
   });
 
   // Revoke the old session family so every sliding-refresh branch dies.
@@ -59,7 +63,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const response = NextResponse.json({
     ok: true,
     slug: target.slug,
-    redirect_to: `/o/${target.slug}/dashboard`,
+    redirect_to:
+      target.accessState === BuilderAccessState.ACTIVE
+        ? `/o/${target.slug}/dashboard`
+        : `/o/${target.slug}/subscription`,
   });
   setDashboardSessionCookies(response, {
     token: jwt,

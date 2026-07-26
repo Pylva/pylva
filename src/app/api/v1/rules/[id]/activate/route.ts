@@ -1,30 +1,26 @@
 // POST /api/v1/rules/{id}/activate — promote a draft rule to active (or
 // flip an active rule back to draft). Re-validates the config against the
-// tier gate (advanced rules require pro+) and the failover consent flag
+// workspace access gate and the failover consent flag
 // before mutating status. Returns the impact preview so the dashboard
 // confirmation card can render the affected customer count + model change
 // summary alongside the success state.
 
 import { NextResponse, type NextRequest } from 'next/server.js';
 import * as v from 'valibot';
-import { eq } from 'drizzle-orm';
 import {
   ErrorCode,
   RuleEnforcement,
   RuleStatus,
   RuleType,
-  type BuilderTier,
   type ReliabilityFailoverConfig,
   type Role as RoleType,
   type RuleEnforcement as RuleEnforcementT,
 } from '@pylva/shared';
 import { readBuilderContextFromDashboard } from '../../../../../../lib/auth/builder-context.js';
 import { Role, withRole } from '../../../../../../lib/auth/middleware.js';
-import { checkFeatureGate } from '../../../../../../lib/auth/tier-enforcement.js';
+import { checkDashboardFeatureGate } from '../../../../../../lib/auth/dashboard-feature-gate.js';
 import { auditLog } from '../../../../../../lib/auth/audit-log.js';
 import { AuditAction } from '../../../../../../lib/audit/actions.js';
-import { db } from '../../../../../../lib/db/client.js';
-import { builders } from '../../../../../../lib/db/schema.js';
 import { withRLS } from '../../../../../../lib/db/rls.js';
 import { isAdvancedRuleType } from '../../../../../../lib/rules/categories.js';
 import { isFeatureEnabled } from '../../../../../../lib/feature-flags.js';
@@ -153,7 +149,7 @@ export async function POST(
   if (nextStatus === RuleStatus.ACTIVE) {
     if (isAdvancedRuleType(rule.type)) {
       // Track 3 PR 3.2 — operator kill switch (O29). Both env default
-      // and per-builder override are honored. Order: flag, then tier,
+      // and per-builder override are honored. Order: flag, then access,
       // then per-config consent. Without this gate, a builder could
       // activate advanced rules even when ops disabled the feature
       // globally for an outage.
@@ -165,16 +161,8 @@ export async function POST(
           'Advanced rules feature disabled',
         );
       }
-      const [builder] = await db
-        .select({ tier: builders.tier })
-        .from(builders)
-        .where(eq(builders.id, ctx.builderId))
-        .limit(1);
-      if (!builder) {
-        return notFoundError(ErrorCode.RESOURCE_NOT_FOUND, 'Builder not found');
-      }
-      const tierGate = checkFeatureGate(builder.tier as BuilderTier, 'advanced_rules');
-      if (tierGate) return tierGate;
+      const accessGate = await checkDashboardFeatureGate(ctx.builderId, 'advanced_rules');
+      if (accessGate) return accessGate;
     }
 
     if (rule.type === RuleType.RELIABILITY_FAILOVER) {

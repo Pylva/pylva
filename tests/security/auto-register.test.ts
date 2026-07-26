@@ -44,8 +44,15 @@ beforeAll(async () => {
   sql = postgres(DATABASE_URL);
   const slug = `auto-register-${crypto.randomBytes(4).toString('hex')}`;
   const [b] = await sql<{ id: string }[]>`
-    INSERT INTO builders (email, name, tier, slug)
-    VALUES (${`test-auto-register-${crypto.randomBytes(4).toString('hex')}@test.com`}, 'Auto Register Test', 'free', ${slug})
+    INSERT INTO builders (email, name, tier, access_state, entitlement_source, slug)
+    VALUES (
+      ${`test-auto-register-${crypto.randomBytes(4).toString('hex')}@test.com`},
+      'Auto Register Test',
+      'pro',
+      'active',
+      'admin',
+      ${slug}
+    )
     RETURNING id
   `;
   builderId = b!.id;

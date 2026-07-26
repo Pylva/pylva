@@ -24,7 +24,12 @@ const mocks = vi.hoisted(() => ({
   deliverAlert: vi.fn(),
   listActiveRulesForCustomer: vi.fn(),
   listChannelsForRule: vi.fn(),
-  markRuleTriggered: vi.fn(async () => undefined),
+  markRuleTriggered: vi.fn(
+    async (): Promise<{
+      kind: 'updated' | 'rule_not_found' | 'access_denied';
+    }> => ({ kind: 'updated' }),
+  ),
+  authorizeBuilderCapability: vi.fn(),
 }));
 
 vi.mock('../../src/lib/budget/aggregate.js', () => ({
@@ -40,7 +45,11 @@ vi.mock('../../src/lib/rules/repository.js', () => ({
   // The evaluator consumes the mapped-entries helper; raw rows of [] map
   // to [], so one mock serves both shapes.
   listAlertChannelEntriesForRule: mocks.listChannelsForRule,
-  markRuleTriggered: mocks.markRuleTriggered,
+  markRuleTriggeredWithProductAccess: mocks.markRuleTriggered,
+}));
+
+vi.mock('../../src/lib/auth/builder-entitlement.js', () => ({
+  authorizeBuilderCapability: mocks.authorizeBuilderCapability,
 }));
 
 vi.mock('../../src/lib/logger.js', () => ({
@@ -54,9 +63,8 @@ vi.mock('../../src/lib/logger.js', () => ({
   },
 }));
 
-const { evaluatePostCall, _resetPostCallEvalForTests } = await import(
-  '../../src/lib/rules/post-call-evaluator'
-);
+const { evaluatePostCall, _resetPostCallEvalForTests } =
+  await import('../../src/lib/rules/post-call-evaluator');
 
 function budgetRule(overrides: Partial<Rule> = {}): Rule {
   return {
@@ -96,13 +104,26 @@ function deliveredAction(callIndex = 0): unknown {
   return payload.data?.action_taken;
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 describe('post-call dispatch failure releases the dedup reservation (B7)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.aggregateSpendForRule.mockResolvedValue(12);
-    mocks.deliverAlert.mockResolvedValue(undefined);
+    mocks.deliverAlert.mockResolvedValue({ kind: 'accepted' });
     mocks.listActiveRulesForCustomer.mockResolvedValue([budgetRule()]);
     mocks.listChannelsForRule.mockResolvedValue([]);
+    mocks.authorizeBuilderCapability.mockResolvedValue({ allowed: true });
+    mocks.markRuleTriggered.mockResolvedValue({ kind: 'updated' });
     _resetPostCallEvalForTests();
   });
 
@@ -150,12 +171,76 @@ describe('post-call dispatch failure releases the dedup reservation (B7)', () =>
   });
 });
 
+describe('post-call workspace lifecycle races', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.aggregateSpendForRule.mockResolvedValue(12);
+    mocks.deliverAlert.mockResolvedValue({ kind: 'accepted' });
+    mocks.listActiveRulesForCustomer.mockResolvedValue([budgetRule()]);
+    mocks.listChannelsForRule.mockResolvedValue([]);
+    mocks.authorizeBuilderCapability.mockResolvedValue({ allowed: true });
+    mocks.markRuleTriggered.mockResolvedValue({ kind: 'updated' });
+    _resetPostCallEvalForTests();
+  });
+
+  it('does not reserve dedup or dispatch when access is revoked during aggregation', async () => {
+    const aggregate = deferred<number>();
+    mocks.aggregateSpendForRule.mockImplementationOnce(() => aggregate.promise);
+
+    const evaluation = evaluatePostCall('builder-a', [event]);
+    await vi.waitFor(() => expect(mocks.aggregateSpendForRule).toHaveBeenCalledTimes(1));
+
+    mocks.authorizeBuilderCapability.mockResolvedValue({ allowed: false });
+    aggregate.resolve(12);
+    await evaluation;
+
+    expect(mocks.deliverAlert).not.toHaveBeenCalled();
+    expect(mocks.markRuleTriggered).not.toHaveBeenCalled();
+
+    // Reactivation must be able to evaluate the same rule immediately. This
+    // proves the suspended run did not leave a hidden in-memory reservation.
+    mocks.authorizeBuilderCapability.mockResolvedValue({ allowed: true });
+    await evaluatePostCall('builder-a', [event]);
+
+    expect(mocks.deliverAlert).toHaveBeenCalledTimes(1);
+    expect(mocks.markRuleTriggered).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not stamp or retain dedup when delivery reports access denied', async () => {
+    mocks.deliverAlert
+      .mockResolvedValueOnce({ kind: 'access_denied' })
+      .mockResolvedValueOnce({ kind: 'accepted' });
+
+    await evaluatePostCall('builder-a', [event]);
+    expect(mocks.markRuleTriggered).not.toHaveBeenCalled();
+
+    await evaluatePostCall('builder-a', [event]);
+    expect(mocks.deliverAlert).toHaveBeenCalledTimes(2);
+    expect(mocks.markRuleTriggered).toHaveBeenCalledTimes(1);
+  });
+
+  it('rechecks access after accepted delivery before advancing durable rule state', async () => {
+    mocks.markRuleTriggered.mockResolvedValueOnce({ kind: 'access_denied' });
+
+    await evaluatePostCall('builder-a', [event]);
+
+    expect(mocks.deliverAlert).toHaveBeenCalledTimes(1);
+    expect(mocks.markRuleTriggered).toHaveBeenCalledTimes(1);
+
+    await evaluatePostCall('builder-a', [event]);
+    expect(mocks.deliverAlert).toHaveBeenCalledTimes(2);
+    expect(mocks.markRuleTriggered).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("post-call 'blocked' claim accuracy (B10)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.aggregateSpendForRule.mockResolvedValue(12);
-    mocks.deliverAlert.mockResolvedValue(undefined);
+    mocks.deliverAlert.mockResolvedValue({ kind: 'accepted' });
     mocks.listChannelsForRule.mockResolvedValue([]);
+    mocks.authorizeBuilderCapability.mockResolvedValue({ allowed: true });
+    mocks.markRuleTriggered.mockResolvedValue({ kind: 'updated' });
     _resetPostCallEvalForTests();
   });
 

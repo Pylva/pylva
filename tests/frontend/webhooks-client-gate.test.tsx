@@ -25,15 +25,15 @@ describe('<WebhooksClient> feature gate denial UX', () => {
     vi.unstubAllGlobals();
   });
 
-  it('keeps the settings surface visible and shows upgrade copy when creation is denied for Free', async () => {
+  it('keeps the settings surface visible when workspace access is restricted', async () => {
+    const deniedMessage = 'Workspace access is suspended; reactivate billing to continue';
     fetchMock.mockResolvedValue(
       new Response(
         JSON.stringify({
           error: {
             type: 'invalid_request_error',
             code: ErrorCode.FEATURE_NOT_AVAILABLE,
-            message:
-              "'webhooks' is not available on the free tier. Upgrade to access this feature.",
+            message: deniedMessage,
           },
         }),
         { status: 403, headers: { 'Content-Type': 'application/json' } },
@@ -53,11 +53,7 @@ describe('<WebhooksClient> feature gate denial UX', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Add' }));
 
-    expect(
-      await screen.findByText(
-        "'webhooks' is not available on the free tier. Upgrade to access this feature.",
-      ),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(deniedMessage)).toBeInTheDocument();
     expect(screen.getByText('Webhooks (0)')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('https://hooks.example.com/pylva')).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
