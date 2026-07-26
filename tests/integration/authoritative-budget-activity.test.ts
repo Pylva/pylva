@@ -23,7 +23,12 @@ import {
   listBudgetActivityInTransaction,
 } from '../../src/lib/budget-activity/read-model.js';
 import { parseBudgetActivityQuery } from '../../src/lib/budget-activity/query.js';
-import { applyMigrationsThrough, createScratchDb, type ScratchDb } from '../helpers/scratch-db.js';
+import {
+  applyMigrationsThrough,
+  createScratchDb,
+  installWorkspaceLifecycleFixtureColumns,
+  type ScratchDb,
+} from '../helpers/scratch-db.js';
 
 type LedgerSql = Sql | TransactionSql;
 type JsonObject = Record<string, postgres.JSONValue | undefined>;
@@ -64,10 +69,12 @@ async function jsonHash(client: LedgerSql, input: JsonObject): Promise<string> {
 async function createBuilder(label: string): Promise<string> {
   const suffix = crypto.randomBytes(5).toString('hex');
   const rows = await db()<{ id: string }[]>`
-    INSERT INTO public.builders (email, name, tier, slug)
+    INSERT INTO public.builders (
+      email, name, tier, slug, access_state, entitlement_source
+    )
     VALUES (
       ${`${label}-${suffix}@example.com`}, ${label}, 'pro',
-      ${`${label}-${suffix}`.toLowerCase()}
+      ${`${label}-${suffix}`.toLowerCase()}, 'active', 'admin'
     )
     RETURNING id
   `;
@@ -252,6 +259,7 @@ beforeAll(async () => {
   scratch = await createScratchDb({ prefix: 'authoritative_budget_activity' });
   try {
     await applyMigrationsThrough(scratch, '051');
+    await installWorkspaceLifecycleFixtureColumns(scratch);
     pool = postgres(scratch.url, { max: 8, onnotice: () => undefined });
     dashboardPool = postgres(scratch.url, { max: 4, onnotice: () => undefined });
   } catch (error) {

@@ -18,12 +18,16 @@ beforeAll(async () => {
   general = postgres(DATABASE_URL, { max: 2, onnotice: () => undefined });
   const suffix = crypto.randomBytes(6).toString('hex');
   const rows = await general<{ id: string }[]>`
-    INSERT INTO public.builders (email, name, tier, slug)
+    INSERT INTO public.builders (
+      email, name, tier, slug, access_state, entitlement_source
+    )
     VALUES (
       ${`budget-activity-boundary-${suffix}@example.com`},
       'Budget activity runtime boundary',
       'pro',
-      ${`budget-activity-boundary-${suffix}`}
+      ${`budget-activity-boundary-${suffix}`},
+      'active',
+      'admin'
     )
     RETURNING id::TEXT AS id
   `;

@@ -1798,7 +1798,13 @@ describe('authoritative budget-control runtime roles through migration 053 with 
         AND runtime.rolname = ${RUNTIME_ROLE}
       ORDER BY relation.relname, attribute.attnum, privilege.privilege_type
     `;
-    expect(runtimeColumnGrants).toEqual([]);
+    expect(runtimeColumnGrants).toEqual([
+      { column_name: 'id', privilege: 'SELECT', table_name: 'builders' },
+      { column_name: 'id', privilege: 'UPDATE', table_name: 'builders' },
+      { column_name: 'tier', privilege: 'SELECT', table_name: 'builders' },
+      { column_name: 'access_state', privilege: 'SELECT', table_name: 'builders' },
+      { column_name: 'entitlement_source', privilege: 'SELECT', table_name: 'builders' },
+    ]);
 
     const relationPrivileges = await db()<Array<{ privileges: string[]; table_name: string }>>`
       SELECT grants.table_name,
@@ -1822,7 +1828,6 @@ describe('authoritative budget-control runtime roles through migration 053 with 
       { privileges: ['INSERT', 'SELECT', 'UPDATE'], table_name: 'budget_reservations' },
       { privileges: ['INSERT', 'SELECT', 'UPDATE'], table_name: 'budget_rule_revisions' },
       { privileges: ['INSERT', 'SELECT'], table_name: 'budget_usage_ledger' },
-      { privileges: ['SELECT'], table_name: 'builders' },
       { privileges: ['SELECT'], table_name: 'cost_sources' },
       { privileges: ['SELECT'], table_name: 'custom_pricing' },
       { privileges: ['SELECT'], table_name: 'llm_pricing' },

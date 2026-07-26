@@ -106,9 +106,7 @@ export async function createScratchDb(opts?: { prefix?: string }): Promise<Scrat
  * fail the role-graph contract, so cleanup drops only the disposable database
  * and deliberately preserves the fixed migration principal.
  */
-export async function createFreshInstallScratchDb(opts?: {
-  prefix?: string;
-}): Promise<ScratchDb> {
+export async function createFreshInstallScratchDb(opts?: { prefix?: string }): Promise<ScratchDb> {
   const scratch = await createScratchDb(opts);
   try {
     const rows = (await scratch.sql.unsafe(`
@@ -173,4 +171,18 @@ export async function applyMigrationsThrough(
   }
 
   return filenames;
+}
+
+/**
+ * Add the workspace lifecycle columns to a deliberately pre-056 scratch
+ * schema. Runtime integration suites use this narrow compatibility fixture
+ * when they must exercise current lifecycle code while preserving an older
+ * migration boundary for the rest of the database contract.
+ */
+export async function installWorkspaceLifecycleFixtureColumns(scratch: ScratchDb): Promise<void> {
+  await scratch.sql`
+    ALTER TABLE public.builders
+      ADD COLUMN IF NOT EXISTS access_state VARCHAR(32),
+      ADD COLUMN IF NOT EXISTS entitlement_source VARCHAR(32)
+  `;
 }
