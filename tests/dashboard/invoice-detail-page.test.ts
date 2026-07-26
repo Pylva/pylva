@@ -20,6 +20,7 @@ import {
 
 const mocks = vi.hoisted(() => ({
   withRLS: vi.fn(),
+  loadBuilderEntitlement: vi.fn(),
   invoice: null as Record<string, unknown> | null,
   role: 'owner',
   UnpricedBanner: ({ children }: { children: ReactNode }) => children,
@@ -50,6 +51,10 @@ vi.mock('@/lib/db/schema', () => ({
 
 vi.mock('@/lib/db/rls', () => ({
   withRLS: mocks.withRLS,
+}));
+
+vi.mock('@/lib/auth/builder-entitlement', () => ({
+  loadBuilderEntitlement: mocks.loadBuilderEntitlement,
 }));
 
 vi.mock('@/components/billing/UnpricedBanner', () => ({
@@ -84,6 +89,20 @@ describe('/o/[slug]/dashboard/billing/invoices/[id] happy path', () => {
     mocks.role = 'owner';
     mocks.notFound.mockClear();
     mocks.withRLS.mockReset();
+    mocks.loadBuilderEntitlement.mockReset();
+    mocks.loadBuilderEntitlement.mockResolvedValue({
+      kind: 'resolved',
+      resolution: {
+        ok: true,
+        entitlement: {
+          plan: null,
+          access_state: 'active',
+          entitlement_source: 'self_hosted',
+          has_product_access: true,
+          legacy_free: false,
+        },
+      },
+    });
     mocks.withRLS.mockImplementation(async (_builderId: string, cb: (tx: unknown) => unknown) =>
       cb(makeTx()),
     );
@@ -130,6 +149,27 @@ describe('/o/[slug]/dashboard/billing/invoices/[id] happy path', () => {
     element = await InvoiceDetailPage(pageProps());
     actions = findAll(element, byType(DashboardActionButton));
     expect(actions).toHaveLength(0);
+  });
+
+  it('hides mutating actions when the workspace has no product access', async () => {
+    mocks.invoice = invoiceRow({ status: 'draft' }) as unknown as Record<string, unknown>;
+    mocks.loadBuilderEntitlement.mockResolvedValue({
+      kind: 'resolved',
+      resolution: {
+        ok: true,
+        entitlement: {
+          plan: null,
+          access_state: 'suspended',
+          entitlement_source: null,
+          has_product_access: false,
+          legacy_free: false,
+        },
+      },
+    });
+
+    const element = await InvoiceDetailPage(pageProps());
+
+    expect(findAll(element, byType(DashboardActionButton))).toHaveLength(0);
   });
 
   it('404s for a malformed invoice id without querying', async () => {

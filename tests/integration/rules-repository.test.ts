@@ -47,8 +47,22 @@ let builderB = '';
 async function createBuilder(label: string): Promise<string> {
   const suffix = crypto.randomBytes(6).toString('hex');
   const [row] = await sql<{ id: string }[]>`
-    INSERT INTO builders (email, name, tier, slug)
-    VALUES (${`${label}-${suffix}@example.com`}, ${label}, 'pro', ${`${label}-${suffix}`})
+    INSERT INTO builders (
+      email,
+      name,
+      tier,
+      slug,
+      access_state,
+      entitlement_source
+    )
+    VALUES (
+      ${`${label}-${suffix}@example.com`},
+      ${label},
+      NULL,
+      ${`${label}-${suffix}`},
+      'active',
+      'self_hosted'
+    )
     RETURNING id
   `;
   return row!.id;
@@ -71,7 +85,7 @@ function budgetConfig(limit = 5): Record<string, unknown> {
 beforeAll(async () => {
   const candidate = await createScratchDb({ prefix: 'rules_repository' });
   try {
-    await applyMigrationsThrough(candidate, '051');
+    await applyMigrationsThrough(candidate, '058');
     process.env['DATABASE_URL'] = candidate.url;
     process.env['ALLOW_BUDGET_CONTROL_DATABASE_URL_FALLBACK'] = 'true';
     // Keep this disposable local integration suite pinned to its scratch

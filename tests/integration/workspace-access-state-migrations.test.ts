@@ -35,11 +35,18 @@ function identity(label: string): { email: string; slug: string } {
   };
 }
 
+function databaseUrlForName(baseUrl: string, databaseName: string): string {
+  const url = new URL(baseUrl);
+  url.pathname = `/${databaseName}`;
+  return url.toString();
+}
+
 describe('workspace access-state migrations', () => {
   it(
     'narrows budget runtime builder access while preserving tenant-scoped lifecycle row locks',
     async () => {
       const scratch = await createScratchDb({ prefix: 'access_state_budget_acl' });
+      let budgetRuntimeSql: Sql | null = null;
       try {
         await ensureLedger(scratch.sql as unknown as MigrateSqlClient);
         await applyMigrationsThrough(scratch, '055');
@@ -102,8 +109,19 @@ describe('workspace access-state migrations', () => {
           has_table_update: false,
         });
 
-        const visible = await scratch.sql.begin(async (transaction) => {
-          await transaction.unsafe('SET LOCAL ROLE pylva_budget_control_runtime');
+        const runtimeBaseUrl = process.env['BUDGET_CONTROL_DATABASE_URL'];
+        if (!runtimeBaseUrl) {
+          throw new Error(
+            'BUDGET_CONTROL_DATABASE_URL is required to verify the dedicated runtime login',
+          );
+        }
+        const runtimeSql = postgres(databaseUrlForName(runtimeBaseUrl, scratch.name), {
+          max: 1,
+          onnotice: () => undefined,
+        });
+        budgetRuntimeSql = runtimeSql;
+
+        const visible = await runtimeSql.begin(async (transaction) => {
           await transaction`
             SELECT pg_catalog.set_config(
               'app.builder_id', ${selectedId}::UUID::TEXT, TRUE
@@ -127,8 +145,7 @@ describe('workspace access-state migrations', () => {
         expect(visible[0]).toMatchObject({ id: selectedId });
 
         await expect(
-          scratch.sql.begin(async (transaction) => {
-            await transaction.unsafe('SET LOCAL ROLE pylva_budget_control_runtime');
+          runtimeSql.begin(async (transaction) => {
             await transaction`
               SELECT pg_catalog.set_config(
                 'app.builder_id', ${selectedId}::UUID::TEXT, TRUE
@@ -143,8 +160,7 @@ describe('workspace access-state migrations', () => {
         ).rejects.toMatchObject({ code: '42501' });
 
         await expect(
-          scratch.sql.begin(async (transaction) => {
-            await transaction.unsafe('SET LOCAL ROLE pylva_budget_control_runtime');
+          runtimeSql.begin(async (transaction) => {
             await transaction`
               SELECT pg_catalog.set_config(
                 'app.builder_id', ${selectedId}::UUID::TEXT, TRUE
@@ -158,6 +174,7 @@ describe('workspace access-state migrations', () => {
           }),
         ).rejects.toMatchObject({ code: '42501' });
       } finally {
+        await budgetRuntimeSql?.end().catch(() => undefined);
         await scratch.sql.unsafe('RESET ROLE').catch(() => undefined);
         await scratch.drop();
       }
@@ -183,9 +200,7 @@ describe('workspace access-state migrations', () => {
           RETURNING id
         `;
 
-        const expandError = await applyMigration(scratch, EXPAND).catch(
-          (error: unknown) => error,
-        );
+        const expandError = await applyMigration(scratch, EXPAND).catch((error: unknown) => error);
         expect(expandError).toBeInstanceOf(Error);
         expect(expandError).toMatchObject({
           message: expect.stringMatching(/1 Free workspace\(s\) remain/),
@@ -284,9 +299,7 @@ describe('workspace access-state migrations', () => {
         await ensureLedger(scratch.sql as unknown as MigrateSqlClient);
         await applyMigrationsThrough(scratch, '055');
         await assumeRuntimeRole(scratch);
-        const [subscriptionTable] = await scratch.sql<
-          Array<{ relation_name: string | null }>
-        >`
+        const [subscriptionTable] = await scratch.sql<Array<{ relation_name: string | null }>>`
           SELECT to_regclass('public.builder_subscriptions')::text AS relation_name
         `;
         if (subscriptionTable?.relation_name === null) {
@@ -308,9 +321,7 @@ describe('workspace access-state migrations', () => {
             (${paid.email}, ${paid.slug}, 'pro')
         `;
 
-        await expect(applyMigration(scratch, EXPAND)).rejects.toThrow(
-          /Free workspace\(s\) remain/,
-        );
+        await expect(applyMigration(scratch, EXPAND)).rejects.toThrow(/Free workspace\(s\) remain/);
         await scratch.sql`DELETE FROM builders WHERE email = ${legacyFree.email}`;
         await applyMigration(scratch, EXPAND);
         await assumeRuntimeRole(scratch);
@@ -411,9 +422,7 @@ describe('workspace access-state migrations', () => {
         });
 
         await assumeRuntimeRole(scratch);
-        const [row] = await scratch.sql<
-          Array<{ tier: string | null }>
-        >`
+        const [row] = await scratch.sql<Array<{ tier: string | null }>>`
           SELECT tier
           FROM builders
           WHERE email = ${oldWriter.email}

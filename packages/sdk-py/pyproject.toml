@@ -36,7 +36,7 @@ dev = [
   "pytest>=8",
   "pytest-asyncio>=0.23",
   "respx>=0.21",
-  "ruff>=0.5",
+  "ruff==0.15.21",
   "mypy>=1.10",
   "tomli>=2; python_version < '3.11'",
 ]

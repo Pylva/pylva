@@ -15,9 +15,9 @@ import {
 import { createRecordingSqlClient } from '../_helpers/migration-sql-mock.js';
 
 const CONTRACT_ROLE_ARN =
-  'arn:aws:sts::123456789012:assumed-role/agentmeter-prod-ecs-remove-free-contract-task/github-123';
+  'arn:aws:sts::123456789012:assumed-role/pylva-prod-ecs-remove-free-contract-task/github-123';
 const CONTRACT_TASK_ARN =
-  'arn:aws:ecs:us-east-1:123456789012:task/agentmeter-prod/0123456789abcdef0123456789abcdef';
+  'arn:aws:ecs:us-east-1:123456789012:task/pylva-prod/0123456789abcdef0123456789abcdef';
 const METADATA_URI = 'http://169.254.170.2/v4/0123456789abcdef0123456789abcdef';
 
 let rootDir = '';
@@ -85,12 +85,12 @@ describe('hosted remove-Free contract task-role attestation', () => {
     for (const arn of [
       undefined,
       '',
-      'arn:aws:iam::123456789012:role/agentmeter-prod-ecs-remove-free-contract-task',
-      'arn:aws:sts::123456789012:assumed-role/agentmeter-prod-ecs-task/session',
-      'arn:aws:sts::123456789012:assumed-role/agentmeter-prod-ecs-remove-free-contract-task-extra/session',
-      'arn:aws:sts::123456789012:assumed-role/path/agentmeter-prod-ecs-remove-free-contract-task/session',
-      'arn:aws:sts::not-an-account:assumed-role/agentmeter-prod-ecs-remove-free-contract-task/session',
-      'arn:aws:sts::123456789012:assumed-role/agentmeter-prod-ecs-remove-free-contract-task/',
+      'arn:aws:iam::123456789012:role/pylva-prod-ecs-remove-free-contract-task',
+      'arn:aws:sts::123456789012:assumed-role/pylva-prod-ecs-task/session',
+      'arn:aws:sts::123456789012:assumed-role/pylva-prod-ecs-remove-free-contract-task-extra/session',
+      'arn:aws:sts::123456789012:assumed-role/path/pylva-prod-ecs-remove-free-contract-task/session',
+      'arn:aws:sts::not-an-account:assumed-role/pylva-prod-ecs-remove-free-contract-task/session',
+      'arn:aws:sts::123456789012:assumed-role/pylva-prod-ecs-remove-free-contract-task/',
     ]) {
       expect(isRemoveFreeContractTaskRoleArn(arn)).toBe(false);
     }
@@ -108,7 +108,7 @@ describe('hosted remove-Free contract task-role attestation', () => {
       text: async () =>
         JSON.stringify({
           TaskARN: CONTRACT_TASK_ARN,
-          Family: 'agentmeter-prod-remove-free-contract-migrations',
+          Family: 'pylva-prod-remove-free-contract-migrations',
         }),
     }));
 
@@ -163,19 +163,19 @@ describe('hosted remove-Free contract task-role attestation', () => {
       sts: { Arn: undefined, Account: '123456789012', $metadata: {} },
       task: {
         TaskARN: CONTRACT_TASK_ARN,
-        Family: 'agentmeter-prod-remove-free-contract-migrations',
+        Family: 'pylva-prod-remove-free-contract-migrations',
       },
     },
     {
       name: 'ordinary task role',
       sts: {
-        Arn: 'arn:aws:sts::123456789012:assumed-role/agentmeter-prod-ecs-task/session',
+        Arn: 'arn:aws:sts::123456789012:assumed-role/pylva-prod-ecs-task/session',
         Account: '123456789012',
         $metadata: {},
       },
       task: {
         TaskARN: CONTRACT_TASK_ARN,
-        Family: 'agentmeter-prod-remove-free-contract-migrations',
+        Family: 'pylva-prod-remove-free-contract-migrations',
       },
     },
     {
@@ -187,19 +187,19 @@ describe('hosted remove-Free contract task-role attestation', () => {
       },
       task: {
         TaskARN: CONTRACT_TASK_ARN,
-        Family: 'agentmeter-prod-remove-free-contract-migrations',
+        Family: 'pylva-prod-remove-free-contract-migrations',
       },
     },
     {
       name: 'external-account assumed role credentials',
       sts: {
-        Arn: 'arn:aws:sts::999999999999:assumed-role/agentmeter-prod-ecs-remove-free-contract-task/session',
+        Arn: 'arn:aws:sts::999999999999:assumed-role/pylva-prod-ecs-remove-free-contract-task/session',
         Account: '999999999999',
         $metadata: {},
       },
       task: {
         TaskARN: CONTRACT_TASK_ARN,
-        Family: 'agentmeter-prod-remove-free-contract-migrations',
+        Family: 'pylva-prod-remove-free-contract-migrations',
       },
     },
     {
@@ -211,7 +211,7 @@ describe('hosted remove-Free contract task-role attestation', () => {
       },
       task: {
         TaskARN: CONTRACT_TASK_ARN,
-        Family: 'agentmeter-prod-migrations',
+        Family: 'pylva-prod-migrations',
       },
     },
     {
@@ -223,7 +223,7 @@ describe('hosted remove-Free contract task-role attestation', () => {
       },
       task: {
         TaskARN: CONTRACT_TASK_ARN,
-        Family: 'pylva-prod-remove-free-contract-migrations',
+        Family: 'other-prod-remove-free-contract-migrations',
       },
     },
     {
@@ -235,8 +235,8 @@ describe('hosted remove-Free contract task-role attestation', () => {
       },
       task: {
         TaskARN:
-          'arn:aws-us-gov:ecs:us-gov-west-1:123456789012:task/agentmeter-prod/0123456789abcdef0123456789abcdef',
-        Family: 'agentmeter-prod-remove-free-contract-migrations',
+          'arn:aws-us-gov:ecs:us-gov-west-1:123456789012:task/pylva-prod/0123456789abcdef0123456789abcdef',
+        Family: 'pylva-prod-remove-free-contract-migrations',
       },
     },
     {
@@ -260,7 +260,7 @@ describe('hosted remove-Free contract task-role attestation', () => {
       },
       task: {
         TaskARN: 'not-an-arn',
-        Family: 'agentmeter-prod-remove-free-contract-migrations',
+        Family: 'pylva-prod-remove-free-contract-migrations',
       },
     },
   ])('fails closed for $name without disclosing observed identities', async ({ sts, task }) => {
@@ -325,7 +325,7 @@ describe('hosted remove-Free contract task-role attestation', () => {
         text: async () =>
           JSON.stringify({
             TaskARN: CONTRACT_TASK_ARN,
-            Family: 'agentmeter-prod-remove-free-contract-migrations',
+            Family: 'pylva-prod-remove-free-contract-migrations',
           }),
       }),
     }).catch((caught: unknown) => caught);
