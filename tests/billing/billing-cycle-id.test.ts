@@ -282,6 +282,18 @@ describe('generateInvoice — auto-split billing_cycle_id stability', () => {
     expect(store[0]!.billing_cycle_id).toBe(store[1]!.billing_cycle_id);
   });
 
+  it('prorates a fixed period fee across pricing-version slices', async () => {
+    await generateInvoice({
+      builderId: BUILDER_ID,
+      customerId: 'cust-1',
+      period: PERIOD,
+      draftKeyBase: DRAFT_KEY_BASE,
+    });
+
+    expect(store.map((row) => Number(row.amount_usd))).toEqual([4.67, 5.33]);
+    expect(store.reduce((sum, row) => sum + Number(row.amount_usd), 0)).toBe(10);
+  });
+
   it('preflights every slice before creating any Stripe draft or invoice row', async () => {
     failUsageAt = 2;
 

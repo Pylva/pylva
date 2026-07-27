@@ -28,9 +28,26 @@ export interface FormulaResult {
   has_unpriced_events: boolean;
 }
 
+export interface FormulaOptions {
+  /**
+   * Share of the requested billing period covered by this pricing version.
+   * Fixed fees and included allowances are per-period values, so auto-split
+   * slices must prorate them instead of charging the full amount per slice.
+   */
+  periodFraction?: number;
+}
+
 /** Round to 2 decimal places (cents). Stable across the test fixtures. */
 export function roundUsd(x: number): number {
   return Math.round(x * 100) / 100;
+}
+
+function resolvePeriodFraction(options: FormulaOptions): number {
+  const value = options.periodFraction ?? 1;
+  if (!Number.isFinite(value) || value <= 0 || value > 1) {
+    throw new RangeError('periodFraction must be finite and within (0, 1]');
+  }
+  return value;
 }
 
 function withVersion(
@@ -41,9 +58,14 @@ function withVersion(
 }
 
 /** Flat: single monthly fee, ignores usage. */
-export function computeFlat(pricing: CustomerPricing, usage: UsageAggregate): FormulaResult {
+export function computeFlat(
+  pricing: CustomerPricing,
+  usage: UsageAggregate,
+  options: FormulaOptions = {},
+): FormulaResult {
   const rate = pricing.flat_rate_usd ?? 0;
-  const amount = roundUsd(rate);
+  const fraction = resolvePeriodFraction(options);
+  const amount = roundUsd(rate * fraction);
   return {
     amount_usd: amount,
     line_items: [
@@ -51,8 +73,8 @@ export function computeFlat(pricing: CustomerPricing, usage: UsageAggregate): Fo
         {
           description: 'Flat monthly fee',
           metric: 'base',
-          quantity: 1,
-          unit_price_usd: amount,
+          quantity: fraction,
+          unit_price_usd: roundUsd(rate),
           total_usd: amount,
         },
         pricing.version,
@@ -105,30 +127,36 @@ export function computePayAsYouGo(pricing: CustomerPricing, usage: UsageAggregat
 }
 
 /** Credit pack: fixed pack price + overage if usage > included credits. */
-export function computeCreditPack(pricing: CustomerPricing, usage: UsageAggregate): FormulaResult {
+export function computeCreditPack(
+  pricing: CustomerPricing,
+  usage: UsageAggregate,
+  options: FormulaOptions = {},
+): FormulaResult {
   const packPrice = pricing.pack_price_usd ?? 0;
-  const included = pricing.included_credits ?? 0;
+  const fraction = resolvePeriodFraction(options);
+  const included = (pricing.included_credits ?? 0) * fraction;
   const overageRate = pricing.overage_rate_usd ?? 0;
   const used = usage.by_metric['credits'] ?? 0;
+  const proratedPackPrice = roundUsd(packPrice * fraction);
 
   const lines: InvoiceLineItem[] = [
     withVersion(
       {
         description: `Credit pack (${included} credits)`,
         metric: 'pack',
-        quantity: 1,
+        quantity: fraction,
         unit_price_usd: roundUsd(packPrice),
-        total_usd: roundUsd(packPrice),
+        total_usd: proratedPackPrice,
       },
       pricing.version,
     ),
   ];
 
-  let amount = roundUsd(packPrice);
+  let amount = proratedPackPrice;
   if (used > included) {
     const overQty = used - included;
     const overTotal = roundUsd(overQty * overageRate);
-    amount = roundUsd(packPrice + overTotal);
+    amount = roundUsd(proratedPackPrice + overTotal);
     lines.push(
       withVersion(
         {
@@ -147,30 +175,36 @@ export function computeCreditPack(pricing: CustomerPricing, usage: UsageAggregat
 }
 
 /** Hybrid: base fee + included credits + overage. Base always a line item. */
-export function computeHybrid(pricing: CustomerPricing, usage: UsageAggregate): FormulaResult {
+export function computeHybrid(
+  pricing: CustomerPricing,
+  usage: UsageAggregate,
+  options: FormulaOptions = {},
+): FormulaResult {
   const baseFee = pricing.base_fee_usd ?? 0;
-  const included = pricing.included_credits ?? 0;
+  const fraction = resolvePeriodFraction(options);
+  const included = (pricing.included_credits ?? 0) * fraction;
   const overageRate = pricing.overage_rate_usd ?? 0;
   const used = usage.by_metric['credits'] ?? 0;
+  const proratedBaseFee = roundUsd(baseFee * fraction);
 
   const lines: InvoiceLineItem[] = [
     withVersion(
       {
         description: 'Base fee',
         metric: 'base',
-        quantity: 1,
+        quantity: fraction,
         unit_price_usd: roundUsd(baseFee),
-        total_usd: roundUsd(baseFee),
+        total_usd: proratedBaseFee,
       },
       pricing.version,
     ),
   ];
 
-  let amount = roundUsd(baseFee);
+  let amount = proratedBaseFee;
   if (used > included) {
     const overQty = used - included;
     const overTotal = roundUsd(overQty * overageRate);
-    amount = roundUsd(baseFee + overTotal);
+    amount = roundUsd(proratedBaseFee + overTotal);
     lines.push(
       withVersion(
         {
@@ -189,15 +223,19 @@ export function computeHybrid(pricing: CustomerPricing, usage: UsageAggregate): 
 }
 
 /** Dispatch by pricing_model. Single entry point used by invoice-generator + preview. */
-export function applyFormula(pricing: CustomerPricing, usage: UsageAggregate): FormulaResult {
+export function applyFormula(
+  pricing: CustomerPricing,
+  usage: UsageAggregate,
+  options: FormulaOptions = {},
+): FormulaResult {
   switch (pricing.pricing_model) {
     case 'flat':
-      return computeFlat(pricing, usage);
+      return computeFlat(pricing, usage, options);
     case 'pay_as_you_go':
       return computePayAsYouGo(pricing, usage);
     case 'credit_pack':
-      return computeCreditPack(pricing, usage);
+      return computeCreditPack(pricing, usage, options);
     case 'hybrid':
-      return computeHybrid(pricing, usage);
+      return computeHybrid(pricing, usage, options);
   }
 }

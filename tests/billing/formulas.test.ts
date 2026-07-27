@@ -71,3 +71,49 @@ describe('applyFormula() — contract fixture oracle (I-T2-2)', () => {
     });
   }
 });
+
+describe('applyFormula() — fixed-component proration', () => {
+  const usage = (credits: number): UsageAggregate => ({
+    by_model: {},
+    by_metric: { credits },
+    has_unpriced: false,
+  });
+
+  it.each([
+    {
+      name: 'flat',
+      pricing: { pricing_model: 'flat' as const, flat_rate_usd: 100 },
+      usedCredits: 0,
+      expectedAmount: 50,
+    },
+    {
+      name: 'credit pack',
+      pricing: {
+        pricing_model: 'credit_pack' as const,
+        pack_price_usd: 100,
+        included_credits: 1_000,
+        overage_rate_usd: 0.1,
+      },
+      usedCredits: 600,
+      expectedAmount: 60,
+    },
+    {
+      name: 'hybrid',
+      pricing: {
+        pricing_model: 'hybrid' as const,
+        base_fee_usd: 100,
+        included_credits: 1_000,
+        overage_rate_usd: 0.1,
+      },
+      usedCredits: 600,
+      expectedAmount: 60,
+    },
+  ])('prorates $name fees and allowances for a half-period slice', (testCase) => {
+    const result = applyFormula(toPricing(testCase.pricing), usage(testCase.usedCredits), {
+      periodFraction: 0.5,
+    });
+
+    expect(result.amount_usd).toBe(testCase.expectedAmount);
+    expect(result.line_items[0]).toMatchObject({ quantity: 0.5, total_usd: 50 });
+  });
+});
