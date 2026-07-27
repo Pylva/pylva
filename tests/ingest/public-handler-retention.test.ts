@@ -319,6 +319,27 @@ describe('handleTelemetryIngest retention stamping', () => {
     );
   });
 
+  it('does not retry a batch after ClickHouse succeeds but transaction finalization fails', async () => {
+    const defaultWithRLS = mocks.withRLS.getMockImplementation();
+    if (!defaultWithRLS) throw new Error('withRLS test implementation is missing');
+    mocks.withRLS.mockImplementationOnce(
+      async (builderId: string, fn: (tx: unknown) => Promise<unknown>) => {
+        await defaultWithRLS(builderId, fn);
+        throw new Error('postgres commit outcome unknown');
+      },
+    );
+
+    const response = await ingestPayload({
+      batch_id: '00000000-0000-4000-8000-000000000004',
+      sdk_version: '1.0.0',
+      events: [event('00000000-0000-4000-8000-000000000027')],
+    });
+
+    expect(response.status).toBe(200);
+    expect(mocks.insertCostEventsWithRetry).toHaveBeenCalledTimes(1);
+    expect(mocks.undoFilterDuplicates).not.toHaveBeenCalled();
+  });
+
   it('does not auto-register provider=other from reported non-LLM events', async () => {
     const spanId = '00000000-0000-4000-8000-000000000027';
     mocks.filterDuplicates.mockResolvedValueOnce(new Set([spanId]));
