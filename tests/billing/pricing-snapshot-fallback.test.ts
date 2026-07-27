@@ -5,8 +5,8 @@
 //   1. LiteLLM upstream breaks → 3 consecutive 'aborted' rows in
 //      pricing_sync_log → escalation fires → snapshot fallback is invoked
 //      (?fallback=snapshot).
-//   2. packages/shared/pricing-snapshot.json is empty (it is committed as
-//      `[]` in this repo today) → applyEntries([]) touches nothing.
+//   2. packages/shared/pricing-snapshot.json is empty or every entry is invalid
+//      → applyEntries([]) touches nothing.
 //   3. Pre-fix, the run was still logged as status='success', which resets
 //      the consecutive-failure streak that currentAttemptNumber() counts —
 //      the escalation alert never re-fires while llm_pricing silently

@@ -9,9 +9,9 @@
 //      with no safety net. The snapshot MUST carry real data.
 //   2. The snapshot and the seed (db/seeds/llm_pricing_seed.json) drifting apart.
 //      The seed is what populates llm_pricing on db:seed; the snapshot is the
-//      disaster-recovery mirror of those same prices. If a price is corrected in
-//      one but not the other, a LiteLLM-outage fallback would silently roll the
-//      live table back to the stale number. They must agree, entry for entry.
+//      disaster-recovery mirror of those same prices and their provenance. If
+//      either file changes alone, a LiteLLM-outage fallback can silently restore
+//      stale pricing metadata. They must agree, entry for entry.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -23,6 +23,8 @@ interface PriceEntry {
   model: string;
   input_per_1m: number;
   output_per_1m: number;
+  effective_from: string;
+  source: string;
 }
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -43,7 +45,7 @@ describe('pricing snapshot mirrors the LLM pricing seed', () => {
     expect(snapshot.length).toBeGreaterThan(0);
   });
 
-  it('every seed entry has a matching snapshot entry with identical prices', () => {
+  it('every seed entry has a matching snapshot entry with identical pricing and provenance', () => {
     const snapshotByKey = new Map(snapshot.map((e) => [key(e), e]));
 
     for (const s of seed) {
@@ -51,6 +53,8 @@ describe('pricing snapshot mirrors the LLM pricing seed', () => {
       expect(snap, `snapshot is missing ${key(s)}`).toBeDefined();
       expect(snap!.input_per_1m, `input price mismatch for ${key(s)}`).toBe(s.input_per_1m);
       expect(snap!.output_per_1m, `output price mismatch for ${key(s)}`).toBe(s.output_per_1m);
+      expect(snap!.effective_from, `effective date mismatch for ${key(s)}`).toBe(s.effective_from);
+      expect(snap!.source, `source mismatch for ${key(s)}`).toBe(s.source);
     }
   });
 
