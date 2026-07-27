@@ -78,24 +78,43 @@ async function persistCostEventsWithEntitlementFence(
   builderId: string,
   candidates: UnstampedCostEventRow[],
 ): Promise<FencedPersistenceResult> {
-  return withRLS(builderId, async (tx) => {
-    const resolution = await getBuilderEntitlementForShare(tx, builderId);
-    if (resolution === null || !resolution.ok) return { kind: 'invalid' };
+  const writeState: { rows: CostEventRow[] | null } = { rows: null };
+  try {
+    return await withRLS(builderId, async (tx) => {
+      const resolution = await getBuilderEntitlementForShare(tx, builderId);
+      if (resolution === null || !resolution.ok) return { kind: 'invalid' };
 
-    const entitlement = resolution.entitlement;
-    if (!entitlement.has_product_access) return { kind: 'restricted' };
+      const entitlement = resolution.entitlement;
+      if (!entitlement.has_product_access) return { kind: 'restricted' };
 
-    const limits = limitsForEntitlement(entitlement);
-    if (limits === null) return { kind: 'invalid' };
-    const retention = retentionStampForLimits(limits);
-    const rows: CostEventRow[] = candidates.map((candidate) => ({
-      ...candidate,
-      retention_days: retention.retention_days,
-      billing_retention_days: retention.billing_retention_days,
-    }));
-    await insertCostEventsWithRetry(rows);
-    return { kind: 'persisted', rows };
-  });
+      const limits = limitsForEntitlement(entitlement);
+      if (limits === null) return { kind: 'invalid' };
+      const retention = retentionStampForLimits(limits);
+      const rows: CostEventRow[] = candidates.map((candidate) => ({
+        ...candidate,
+        retention_days: retention.retention_days,
+        billing_retention_days: retention.billing_retention_days,
+      }));
+      await insertCostEventsWithRetry(rows);
+      writeState.rows = rows;
+      return { kind: 'persisted', rows };
+    });
+  } catch (error) {
+    // ClickHouse is the event source of truth. Once its insert returned, a
+    // later failure while finalizing this read-only PostgreSQL lock
+    // transaction must not make the SDK retry and duplicate the batch.
+    if (writeState.rows !== null) {
+      logger.child({ module: 'ingest.entitlement-fence' }).warn(
+        {
+          builder_id: builderId,
+          error_type: error instanceof Error ? error.name : 'UnknownError',
+        },
+        'entitlement fence finalization failed after ClickHouse persistence; accepting batch',
+      );
+      return { kind: 'persisted', rows: writeState.rows };
+    }
+    throw error;
+  }
 }
 
 function operationFromEvent(event: TelemetryEvent): string {
