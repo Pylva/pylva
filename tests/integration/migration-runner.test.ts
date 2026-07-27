@@ -10,10 +10,16 @@ import {
   ensureLedger,
   listMigrationFiles,
   recordBaseline,
+  REMOVE_FREE_FRESH_INSTALL_GUC,
   type MigrateSqlClient,
 } from '../../scripts/db-migrate-core.js';
 import { runDbMigrate, type DbMigrateArgs } from '../../scripts/db-migrate.js';
-import { applyMigrationsThrough, createScratchDb, type ScratchDb } from '../helpers/scratch-db.js';
+import {
+  applyMigrationsThrough,
+  createFreshInstallScratchDb,
+  createScratchDb,
+  type ScratchDb,
+} from '../helpers/scratch-db.js';
 
 const MIGRATIONS_DIR = path.resolve('db/migrations');
 const THROUGH_040 = '040_audit_log_partition_runway.sql';
@@ -25,6 +31,10 @@ const AUTHORITATIVE_BUDGET_LEGACY_RLS_COMPATIBILITY_MIGRATION =
   '053_legacy_catalog_owner_rls_compatibility.sql';
 const GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION = '054_general_app_runtime_owner_boundary.sql';
 const MONTHLY_INVOICE_PERIOD_RETRY_MIGRATION = '055_monthly_invoice_period_retry.sql';
+const WORKSPACE_ACCESS_STATE_EXPAND_MIGRATION = '056_workspace_access_state_expand.sql';
+const HOSTED_WORKSPACE_ENTITLEMENTS_MIGRATION = '057_hosted_workspace_entitlements.sql';
+const REMOVE_FREE_PLAN_CONTRACT_MIGRATION = '058_remove_free_plan_contract.sql';
+const HOSTED_REMOVE_FREE_CONTRACT_MIGRATION = '059_hosted_remove_free_contract.sql';
 const HISTORICAL_AUDIT_TIME_ZONE = 'Asia/Riyadh';
 const RESTORED_AUDIT_PARTITION = 'audit_log_y2026m04';
 const TEST_TIMEOUT_MS = 180_000;
@@ -57,6 +67,73 @@ async function runMigrate(scratch: ScratchDb, args: DbMigrateArgs): Promise<RunR
   return runMigrateWithSql(scratch.sql, MIGRATIONS_DIR, args);
 }
 
+async function runSupportedStagedUpgradeToHead(scratch: ScratchDb): Promise<RunResult> {
+  const stages: DbMigrateArgs[] = [
+    { mode: 'apply', phase: 'pre_roll', yes: false, json: false },
+    { mode: 'apply', phase: 'post_roll', yes: false, json: false },
+    {
+      mode: 'apply',
+      phase: 'pre_roll',
+      yes: false,
+      json: false,
+      approveRemoveFreeExpand: true,
+    },
+    {
+      mode: 'apply',
+      phase: 'post_roll',
+      yes: false,
+      json: false,
+      approveRemoveFreeContract: true,
+    },
+  ];
+  const aggregate: RunResult = { exitCode: 0, logs: [], errors: [] };
+  for (const [index, stage] of stages.entries()) {
+    if (index === stages.length - 1) {
+      await enableHostedProvisionalSignupForTest(scratch);
+    }
+    const result = await runMigrate(scratch, stage);
+    aggregate.logs.push(...result.logs);
+    aggregate.errors.push(...result.errors);
+    if (result.exitCode !== 0) {
+      aggregate.exitCode = result.exitCode;
+      return aggregate;
+    }
+  }
+  return aggregate;
+}
+
+async function enableHostedProvisionalSignupForTest(
+  scratch: ScratchDb,
+): Promise<void> {
+  if (
+    !(await migrationFilenames()).includes(
+      HOSTED_WORKSPACE_ENTITLEMENTS_MIGRATION,
+    )
+  ) {
+    return;
+  }
+
+  const rows = await scratch.sql<Array<{ control_key: string }>>`
+    UPDATE hosted_provisional_signup_rollout
+    SET enabled = TRUE,
+        enabled_at = transaction_timestamp(),
+        enabled_by = 'github-actions:Pylva/migration-runner-tests:1:1',
+        enablement_source = 'drained_rollout',
+        fresh_install_marker = NULL,
+        internal_sha = ${'1'.repeat(40)},
+        public_core_sha = ${'2'.repeat(40)},
+        drain_receipt_sha256 = ${`sha256:${'a'.repeat(64)}`},
+        drain_receipt_issued_at = '2020-01-01T00:00:00.000Z',
+        pre_enable_topology_sha256 = ${`sha256:${'b'.repeat(64)}`},
+        evidence_completed_at = '2020-01-01T00:01:00.000Z',
+        updated_at = transaction_timestamp()
+    WHERE control_key = 'provisional_signup'
+      AND enabled IS FALSE
+    RETURNING control_key
+  `;
+  expect(rows).toEqual([{ control_key: 'provisional_signup' }]);
+}
+
 async function runMigrateWithSql(
   sql: MigrateSqlClient,
   migrationsDir: string,
@@ -69,6 +146,10 @@ async function runMigrateWithSql(
     migrationsDir,
     log: (line) => logs.push(line),
     error: (line) => errors.push(line),
+    // This suite exercises migration ordering, SQL, and ledger behavior. The
+    // dedicated hosted STS/ECS authority attestation has its own boundary
+    // tests and is injected here so assembled contract runs can reach 058/059.
+    assertHostedContractAuthority: async () => undefined,
   });
   return { exitCode, logs, errors };
 }
@@ -82,8 +163,8 @@ function appliedLogFilenames(logs: string[]): string[] {
 async function insertMinimalBuilder(scratch: ScratchDb): Promise<string> {
   const suffix = randomBytes(6).toString('hex');
   const [builder] = await scratch.sql<{ id: string }[]>`
-    INSERT INTO builders (email, name, slug)
-    VALUES (${`migration-runner-${suffix}@example.com`}, 'Migration Runner', ${`migration-runner-${suffix}`})
+    INSERT INTO builders (email, name, slug, tier)
+    VALUES (${`migration-runner-${suffix}@example.com`}, 'Migration Runner', ${`migration-runner-${suffix}`}, 'pro')
     RETURNING id
   `;
   return builder!.id;
@@ -205,14 +286,34 @@ function spawnDbMigrateStatus(url: string) {
   });
 }
 
-function spawnDbSetup(url: string) {
-  return spawnSync('pnpm', ['exec', 'tsx', 'db/setup.ts'], {
-    env: {
-      ...childMigrationEnvironment(url),
-      SKIP_CLICKHOUSE: 'true',
+function spawnDbMigrateApply(url: string, opts?: { freshInstall?: boolean }) {
+  return spawnSync(
+    'pnpm',
+    [
+      'exec',
+      'tsx',
+      'scripts/db-migrate.ts',
+      ...(opts?.freshInstall === true ? ['--fresh-install'] : []),
+    ],
+    {
+      env: childMigrationEnvironment(url),
+      encoding: 'utf8',
     },
-    encoding: 'utf8',
-  });
+  );
+}
+
+function spawnDbSetup(url: string, opts?: { freshInstall?: boolean }) {
+  return spawnSync(
+    'pnpm',
+    ['exec', 'tsx', 'db/setup.ts', ...(opts?.freshInstall === true ? ['--fresh-install'] : [])],
+    {
+      env: {
+        ...childMigrationEnvironment(url),
+        SKIP_CLICKHOUSE: 'true',
+      },
+      encoding: 'utf8',
+    },
+  );
 }
 
 interface AuditPartitionRow {
@@ -476,12 +577,12 @@ describe('migration runner integration', () => {
           json: false,
         });
         expect(guardedApply.exitCode).toBe(4);
-        expect(guardedApply.errors.join('\n')).toContain('--baseline --yes');
+        expect(guardedApply.errors.join('\n')).toContain('--baseline --through');
 
         await baselineThrough040(scratch);
 
-        const catchUp = await runMigrate(scratch, { mode: 'apply', yes: false, json: false });
-        expect(catchUp.exitCode).toBe(0);
+        const catchUp = await runSupportedStagedUpgradeToHead(scratch);
+        expect(catchUp.exitCode, catchUp.errors.join('\n')).toBe(0);
         const catchUpFilenames = appliedLogFilenames(catchUp.logs);
         expect(catchUpFilenames).toEqual(
           (await migrationFilenames()).filter((filename) => migrationPrefix(filename) >= 41),
@@ -511,22 +612,69 @@ describe('migration runner integration', () => {
   );
 
   it(
-    'is idempotent on re-run after all migrations are recorded',
+    'runs the real db:migrate CLI as the scoped fresh-install owner and is idempotent',
     async () => {
-      const scratch = await createScratchDb();
+      const scratch = await createFreshInstallScratchDb({
+        prefix: 'pylva_fresh_db_migrate',
+      });
       try {
-        const firstRun = await runMigrate(scratch, { mode: 'apply', yes: false, json: false });
-        expect(firstRun.exitCode).toBe(0);
-        expect(appliedLogFilenames(firstRun.logs)).toContain(AUTHORITATIVE_BUDGET_LEDGER_MIGRATION);
-        expect(appliedLogFilenames(firstRun.logs)).toContain(
-          AUTHORITATIVE_BUDGET_RUNTIME_MIGRATION,
+        const blocked = spawnDbMigrateApply(scratch.url);
+        expect(blocked.status).not.toBe(0);
+        expect(`${blocked.stdout}\n${blocked.stderr}`).toContain(
+          'cannot run in one upgrade invocation',
         );
+        expect(await ledgerRows(scratch)).toHaveLength(0);
+
+        const firstRun = spawnDbMigrateApply(scratch.url, { freshInstall: true });
+        expect(firstRun.status, firstRun.stderr).toBe(0);
+        expect(firstRun.stdout).toContain(AUTHORITATIVE_BUDGET_LEDGER_MIGRATION);
+        expect(firstRun.stdout).toContain(AUTHORITATIVE_BUDGET_RUNTIME_MIGRATION);
+        const files = await migrationFilenames();
+        const firstLedger = await assertCompleteLedger(scratch, () => 'db:migrate');
+        expect(firstLedger.at(-1)?.filename).toBe(files.at(-1));
+        if (files.includes(HOSTED_REMOVE_FREE_CONTRACT_MIGRATION)) {
+          expect(firstLedger.at(-1)?.filename).toBe(
+            HOSTED_REMOVE_FREE_CONTRACT_MIGRATION,
+          );
+          const rollout = await scratch.sql<
+            Array<{
+              enabled: boolean;
+              enablement_source: string;
+              fresh_install_marker: string;
+              internal_sha: string | null;
+              public_core_sha: string | null;
+              drain_receipt_sha256: string | null;
+              pre_enable_topology_sha256: string | null;
+            }>
+          >`
+            SELECT
+              enabled,
+              enablement_source,
+              fresh_install_marker,
+              internal_sha,
+              public_core_sha,
+              drain_receipt_sha256,
+              pre_enable_topology_sha256
+            FROM hosted_provisional_signup_rollout
+            WHERE control_key = 'provisional_signup'
+          `;
+          expect(rollout).toEqual([
+            {
+              enabled: true,
+              enablement_source: 'fresh_install',
+              fresh_install_marker: 'empty-database-fresh-install-v1',
+              internal_sha: null,
+              public_core_sha: null,
+              drain_receipt_sha256: null,
+              pre_enable_topology_sha256: null,
+            },
+          ]);
+        }
         const before = await appliedAtPairs(scratch);
 
-        const secondRun = await runMigrate(scratch, { mode: 'apply', yes: false, json: false });
-        expect(secondRun.exitCode).toBe(0);
-        expect(appliedLogFilenames(secondRun.logs)).toEqual([]);
-        expect(secondRun.logs.join('\n')).toContain('0 pending');
+        const secondRun = spawnDbMigrateApply(scratch.url);
+        expect(secondRun.status, secondRun.stderr).toBe(0);
+        expect(secondRun.stdout).toContain('0 pending');
         expect(await appliedAtPairs(scratch)).toEqual(before);
       } finally {
         await scratch.drop();
@@ -919,6 +1067,66 @@ CREATE TABLE concurrent_migration_probe (id integer PRIMARY KEY);`,
   );
 
   it(
+    'overrides an ambient fresh-install GUC to off for ordinary migrations',
+    async () => {
+      const scratch = await createScratchDb({
+        prefix: 'pylva_migrate_ambient_fresh_guc',
+      });
+      const tempRoot = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'pylva-migrate-ambient-guc-'),
+      );
+      const tempMigrationsDir = path.join(tempRoot, 'db/migrations');
+
+      try {
+        await fs.mkdir(tempMigrationsDir, { recursive: true });
+        await fs.writeFile(
+          path.join(tempMigrationsDir, '001_assert_fresh_off.sql'),
+          `DO $migration$
+BEGIN
+  IF current_setting('${REMOVE_FREE_FRESH_INSTALL_GUC}', TRUE)
+       IS DISTINCT FROM 'off' THEN
+    RAISE EXCEPTION 'ordinary migration inherited a spoofed fresh-install GUC';
+  END IF;
+END
+$migration$;`,
+          'utf8',
+        );
+        await scratch.sql`
+          SELECT pg_catalog.set_config(
+            ${REMOVE_FREE_FRESH_INSTALL_GUC},
+            'on',
+            FALSE
+          )
+        `;
+
+        const result = await runMigrateWithSql(
+          scratch.sql,
+          tempMigrationsDir,
+          { mode: 'apply', yes: false, json: false },
+        );
+
+        expect(result).toMatchObject({ exitCode: 0, errors: [] });
+        expect(appliedLogFilenames(result.logs)).toEqual([
+          '001_assert_fresh_off.sql',
+        ]);
+        const [ambientAfterTransaction] = await scratch.sql<
+          Array<{ value: string | null }>
+        >`
+          SELECT current_setting(
+            ${REMOVE_FREE_FRESH_INSTALL_GUC},
+            TRUE
+          ) AS value
+        `;
+        expect(ambientAfterTransaction?.value).toBe('on');
+      } finally {
+        await fs.rm(tempRoot, { force: true, recursive: true });
+        await scratch.drop();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
     'keeps the ledger at the last successful file after an interrupted run',
     async () => {
       const scratch = await createScratchDb();
@@ -1021,8 +1229,8 @@ CREATE TABLE concurrent_migration_probe (id integer PRIMARY KEY);`,
         expect(rows).toHaveLength(through040.length);
         expect(rows.every((row) => row.applied_by === 'baseline')).toBe(true);
 
-        const catchUp = await runMigrate(scratch, { mode: 'apply', yes: false, json: false });
-        expect(catchUp.exitCode).toBe(0);
+        const catchUp = await runSupportedStagedUpgradeToHead(scratch);
+        expect(catchUp.exitCode, catchUp.errors.join('\n')).toBe(0);
         expect(appliedLogFilenames(catchUp.logs)).toEqual(
           (await migrationFilenames()).filter((filename) => migrationPrefix(filename) >= 41),
         );
@@ -1043,10 +1251,14 @@ CREATE TABLE concurrent_migration_probe (id integer PRIMARY KEY);`,
   );
 
   it(
-    'applies pre_roll migrations before the deferred universal-scope post_roll migration',
+    'keeps the legacy post-roll and remove-Free rollout windows separate',
     async () => {
       const scratch = await createScratchDb();
       try {
+        const allMigrationFilenames = await migrationFilenames();
+        const hasHostedCompanion = allMigrationFilenames.includes(
+          HOSTED_WORKSPACE_ENTITLEMENTS_MIGRATION,
+        );
         await legacy040WithBaseline(scratch);
 
         const preRoll = await runMigrate(scratch, {
@@ -1082,6 +1294,10 @@ CREATE TABLE concurrent_migration_probe (id integer PRIMARY KEY);`,
             AUTHORITATIVE_BUDGET_LEGACY_RLS_COMPATIBILITY_MIGRATION,
             GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION,
             MONTHLY_INVOICE_PERIOD_RETRY_MIGRATION,
+            WORKSPACE_ACCESS_STATE_EXPAND_MIGRATION,
+            ...(hasHostedCompanion ? [HOSTED_WORKSPACE_ENTITLEMENTS_MIGRATION] : []),
+            REMOVE_FREE_PLAN_CONTRACT_MIGRATION,
+            ...(hasHostedCompanion ? [HOSTED_REMOVE_FREE_CONTRACT_MIGRATION] : []),
           ],
         });
 
@@ -1103,6 +1319,36 @@ CREATE TABLE concurrent_migration_probe (id integer PRIMARY KEY);`,
           MONTHLY_INVOICE_PERIOD_RETRY_MIGRATION,
         ]);
 
+        const removeFreeExpand = await runMigrate(scratch, {
+          mode: 'apply',
+          phase: 'pre_roll',
+          yes: false,
+          json: false,
+          approveRemoveFreeExpand: true,
+        });
+        expect(removeFreeExpand.exitCode).toBe(0);
+        expect(appliedLogFilenames(removeFreeExpand.logs)).toEqual([
+          WORKSPACE_ACCESS_STATE_EXPAND_MIGRATION,
+          ...(hasHostedCompanion ? [HOSTED_WORKSPACE_ENTITLEMENTS_MIGRATION] : []),
+        ]);
+
+        await enableHostedProvisionalSignupForTest(scratch);
+        const removeFreeContract = await runMigrate(scratch, {
+          mode: 'apply',
+          phase: 'post_roll',
+          yes: false,
+          json: false,
+          approveRemoveFreeContract: true,
+        });
+        expect(
+          removeFreeContract.exitCode,
+          removeFreeContract.errors.join('\n'),
+        ).toBe(0);
+        expect(appliedLogFilenames(removeFreeContract.logs)).toEqual([
+          REMOVE_FREE_PLAN_CONTRACT_MIGRATION,
+          ...(hasHostedCompanion ? [HOSTED_REMOVE_FREE_CONTRACT_MIGRATION] : []),
+        ]);
+
         await assertCompleteLedger(scratch, (filename) =>
           migrationPrefix(filename) <= 40 ? 'baseline' : 'db:migrate',
         );
@@ -1121,8 +1367,8 @@ CREATE TABLE concurrent_migration_probe (id integer PRIMARY KEY);`,
 
       try {
         await legacy040WithBaseline(inSync);
-        const catchUp = await runMigrate(inSync, { mode: 'apply', yes: false, json: false });
-        expect(catchUp.exitCode).toBe(0);
+        const catchUp = await runSupportedStagedUpgradeToHead(inSync);
+        expect(catchUp.exitCode, catchUp.errors.join('\n')).toBe(0);
 
         const inSyncCli = spawnDbMigrateStatus(inSync.url);
         expect(inSyncCli.status).toBe(0);
@@ -1144,11 +1390,20 @@ CREATE TABLE concurrent_migration_probe (id integer PRIMARY KEY);`,
   );
 
   it(
-    'records db:setup migrations on a fresh database',
+    'runs the real db:setup CLI as the scoped fresh-install owner',
     async () => {
-      const scratch = await createScratchDb();
+      const scratch = await createFreshInstallScratchDb({
+        prefix: 'pylva_fresh_db_setup',
+      });
       try {
-        const setup = spawnDbSetup(scratch.url);
+        const blocked = spawnDbSetup(scratch.url);
+        expect(blocked.status).not.toBe(0);
+        expect(`${blocked.stdout}\n${blocked.stderr}`).toContain(
+          'cannot run in one upgrade invocation',
+        );
+        expect(await ledgerRows(scratch)).toHaveLength(0);
+
+        const setup = spawnDbSetup(scratch.url, { freshInstall: true });
         expect(setup.status).toBe(0);
 
         const rows = await ledgerRows(scratch);

@@ -50,7 +50,15 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       user_id: context.userId,
       org_slug: slug,
       ...(context.role ? { role: context.role } : {}),
-      ...(context.tier ? { tier: context.tier } : {}),
+      ...(context.accessState
+        ? {
+            plan: context.plan,
+            access_state: context.accessState,
+            ...(context.plan !== null && context.tier === context.plan
+              ? { tier: context.plan }
+              : {}),
+          }
+        : {}),
     });
   }
   const activeSlug = context.orgSlug ?? slug;

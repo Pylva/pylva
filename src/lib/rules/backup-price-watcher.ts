@@ -20,6 +20,7 @@ import { db } from '../db/client.js';
 import { logger } from '../logger.js';
 import { deliverBuilderAlert } from '../alerts/builder-alert.js';
 import { fetchActiveBackupPrice } from './backup-price-snapshot.js';
+import { authorizeBuilderCapability } from '../auth/builder-entitlement.js';
 
 const log = logger.child({ module: 'rules.backup-price-watcher' });
 
@@ -28,6 +29,7 @@ const PRICE_CHANGE_THRESHOLD_PCT = 10;
 export interface WatcherResult {
   scanned_rules: number;
   alerts_dispatched: number;
+  skipped_no_product_access: number;
   skipped_no_snapshot: number;
   skipped_no_pricing: number;
   errors: number;
@@ -43,6 +45,7 @@ export async function runBackupPriceWatcher(now: Date = new Date()): Promise<Wat
   const result: WatcherResult = {
     scanned_rules: 0,
     alerts_dispatched: 0,
+    skipped_no_product_access: 0,
     skipped_no_snapshot: 0,
     skipped_no_pricing: 0,
     errors: 0,
@@ -63,6 +66,15 @@ export async function runBackupPriceWatcher(now: Date = new Date()): Promise<Wat
 
   for (const row of candidates) {
     try {
+      const entitlement = await authorizeBuilderCapability(row.builder_id, 'product');
+      if (!entitlement.allowed) {
+        if (entitlement.lookup.kind === 'lookup_failed') {
+          throw new Error('workspace entitlement lookup failed');
+        }
+        result.skipped_no_product_access += 1;
+        continue;
+      }
+
       const cfg = row.config as unknown as ReliabilityFailoverConfig;
       const decision = evaluateRule(cfg);
       if (decision === 'no_snapshot') {
@@ -80,7 +92,16 @@ export async function runBackupPriceWatcher(now: Date = new Date()): Promise<Wat
       if (Math.abs(delta) < PRICE_CHANGE_THRESHOLD_PCT) continue;
 
       const payload = buildPayload(row.builder_id, row.id, cfg, current, delta);
-      await deliverBuilderAlert({ builderId: row.builder_id, payload });
+      const delivery = await deliverBuilderAlert({ builderId: row.builder_id, payload });
+      if (delivery.kind === 'access_denied') {
+        result.skipped_no_product_access += 1;
+        continue;
+      }
+      if (delivery.kind === 'skipped') continue;
+      if (delivery.kind === 'failed') {
+        throw new Error(`builder alert delivery failed: ${delivery.error}`);
+      }
+
       result.alerts_dispatched += 1;
       log.info(
         {

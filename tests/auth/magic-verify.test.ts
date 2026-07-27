@@ -4,6 +4,7 @@ import type { NextRequest, NextResponse } from 'next/server.js';
 // to it so set-cookie assertions verify the actual on-the-wire format
 // (`${sha256(userId).slice(0,16)}.${slug}`), never a made-up one.
 import { encodeActiveSessionValue } from '@/lib/auth/session-fingerprint';
+import { validateAuthNext } from '@/lib/auth/post-auth-redirect';
 
 const mocks = vi.hoisted(() => {
   class MockAuthDegraded extends Error {
@@ -18,6 +19,13 @@ const mocks = vi.hoisted(() => {
     auditLog: vi.fn(),
     consumeMagicToken: vi.fn(),
     findOrCreateBuilderForUser: vi.fn(),
+    lastMagicResult: null as null | {
+      userId: string;
+      email: string;
+      isNewUser: boolean;
+      next: string | null;
+      pendingInviteToken?: string | null;
+    },
     resolveSlugForUser: vi.fn(),
     setDashboardSessionCookies: vi.fn(),
     setActiveSessionCookie: vi.fn(),
@@ -43,10 +51,36 @@ vi.mock('../../src/lib/config.js', () => ({ env: testEnv }));
 vi.mock('@/lib/auth/magic-link', () => ({
   AuthDegraded: mocks.AuthDegraded,
   consumeMagicToken: mocks.consumeMagicToken,
+  consumeMagicTokenIdentity: async (token: string) => {
+    const result = await mocks.consumeMagicToken(token);
+    mocks.lastMagicResult = result;
+    return result;
+  },
 }));
 
 vi.mock('@/lib/auth/org', () => ({
   findOrCreateBuilderForUser: mocks.findOrCreateBuilderForUser,
+  provisionMagicLinkUserAndBuilder: async (input: {
+    email: string;
+    displayName: string | null;
+    avatarUrl: string | null;
+    pendingInviteToken?: string | null;
+  }) => {
+    const identity = mocks.lastMagicResult;
+    if (!identity) throw new Error('missing mocked magic identity');
+    const org = await mocks.findOrCreateBuilderForUser({
+      ...input,
+      userId: identity.userId,
+    });
+    return {
+      user: {
+        userId: identity.userId,
+        email: identity.email,
+        isNewUser: identity.isNewUser,
+      },
+      org,
+    };
+  },
   resolveSlugForUser: mocks.resolveSlugForUser,
 }));
 
@@ -91,6 +125,7 @@ async function invoke(token?: string): Promise<NextResponse> {
 describe('GET /api/v1/auth/magic/verify', () => {
   beforeEach(() => {
     mocks.auditLog.mockReset();
+    mocks.lastMagicResult = null;
     mocks.consumeMagicToken.mockReset();
     mocks.findOrCreateBuilderForUser.mockReset();
     mocks.resolveSlugForUser.mockReset();
@@ -141,8 +176,11 @@ describe('GET /api/v1/auth/magic/verify', () => {
       builderId: 'builder-legacy',
       slug: 'legacy-workspace',
       role: 'owner',
-      tier: 'scale',
+      plan: 'scale',
+      accessState: 'active',
+      entitlementSource: 'stripe',
       isNew: false,
+      acceptedInviteId: null,
     });
 
     const response = await invoke('magic-token');
@@ -164,6 +202,7 @@ describe('GET /api/v1/auth/magic/verify', () => {
       avatarUrl: null,
       displayName: null,
       email: 'legacy@example.com',
+      pendingInviteToken: undefined,
       userId: 'user-1',
     });
     expect(mocks.signJwt).toHaveBeenCalledWith(
@@ -171,11 +210,208 @@ describe('GET /api/v1/auth/magic/verify', () => {
         audience: 'pylva:dashboard',
         builder_id: 'builder-legacy',
         role: 'owner',
+        plan: 'scale',
+        access_state: 'active',
         tier: 'scale',
         user_id: 'user-1',
       }),
     );
     expect(mocks.resolveSlugForUser).not.toHaveBeenCalled();
+  });
+
+  it('sends a generic hosted signup to required plan selection without paid claims', async () => {
+    mocks.consumeMagicToken.mockResolvedValue({
+      userId: 'user-new',
+      email: 'new@example.com',
+      isNewUser: true,
+      next: null,
+      pendingInviteToken: null,
+    });
+    mocks.findOrCreateBuilderForUser.mockResolvedValue({
+      builderId: 'builder-new',
+      slug: 'new-workspace',
+      role: 'owner',
+      plan: null,
+      accessState: 'checkout_required',
+      entitlementSource: null,
+      isNew: true,
+      acceptedInviteId: null,
+    });
+
+    const response = await invoke('magic-token');
+
+    expect(response.headers.get('location')).toBe(
+      'https://app.example.com/o/new-workspace/subscription',
+    );
+    expect(mocks.signJwt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        plan: null,
+        access_state: 'checkout_required',
+      }),
+    );
+    expect(mocks.signJwt.mock.calls[0]?.[0]).not.toHaveProperty('tier');
+  });
+
+  it('mints a checkout-required session for an existing legacy Free row normalized by org lookup', async () => {
+    mocks.consumeMagicToken.mockResolvedValue({
+      userId: 'user-expand-race',
+      email: 'expand-race@example.com',
+      isNewUser: false,
+      next: null,
+      pendingInviteToken: null,
+    });
+    mocks.findOrCreateBuilderForUser.mockResolvedValue({
+      builderId: 'builder-expand-race',
+      slug: 'expand-race',
+      role: 'owner',
+      plan: null,
+      accessState: 'checkout_required',
+      entitlementSource: null,
+      isNew: false,
+      acceptedInviteId: null,
+    });
+
+    const response = await invoke('magic-token');
+
+    expect(response.headers.get('location')).toBe(
+      'https://app.example.com/o/expand-race/subscription',
+    );
+    expect(mocks.signJwt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        builder_id: 'builder-expand-race',
+        plan: null,
+        access_state: 'checkout_required',
+      }),
+    );
+    expect(mocks.signJwt.mock.calls[0]?.[0]).not.toHaveProperty('tier');
+  });
+
+  it.each(['checkout_required', 'suspended'] as const)(
+    'does not restore nested product navigation for a %s workspace',
+    async (accessState) => {
+      mocks.consumeMagicToken.mockResolvedValue({
+        userId: 'user-restricted',
+        email: 'restricted@example.com',
+        isNewUser: false,
+        next: '/o/restricted-workspace/dashboard/rules',
+        pendingInviteToken: null,
+      });
+      mocks.findOrCreateBuilderForUser.mockResolvedValue({
+        builderId: 'builder-restricted',
+        slug: 'restricted-workspace',
+        role: 'owner',
+        plan: null,
+        accessState,
+        entitlementSource: accessState === 'suspended' ? 'stripe' : null,
+        isNew: false,
+        acceptedInviteId: null,
+      });
+
+      const response = await invoke('magic-token');
+
+      expect(response.headers.get('location')).toBe(
+        'https://app.example.com/o/restricted-workspace/subscription',
+      );
+    },
+  );
+
+  it.each(['checkout_required', 'suspended'] as const)(
+    'does not resume WorkOS completion after login for a %s workspace',
+    async (accessState) => {
+      const next =
+        '/api/v1/auth/workos/complete?external_auth_id=ext_auth_01KXDW5PVKQ5MR2R0VN9D00J5C';
+      // Hosted assembly overlays the bounded WorkOS next-path validator. The
+      // public core deliberately does not expose that hosted-only endpoint.
+      if (!validateAuthNext(next)) return;
+
+      mocks.consumeMagicToken.mockResolvedValue({
+        userId: 'user-workos-restricted',
+        email: 'workos-restricted@example.com',
+        isNewUser: false,
+        next,
+        pendingInviteToken: null,
+      });
+      mocks.findOrCreateBuilderForUser.mockResolvedValue({
+        builderId: 'builder-workos-restricted',
+        slug: 'workos-restricted',
+        role: 'owner',
+        plan: null,
+        accessState,
+        entitlementSource: accessState === 'suspended' ? 'stripe' : null,
+        isNew: false,
+        acceptedInviteId: null,
+      });
+
+      const response = await invoke('magic-token');
+
+      expect(response.headers.get('location')).toBe(
+        'https://app.example.com/o/workos-restricted/subscription',
+      );
+    },
+  );
+
+  it.each(['pro', 'scale'] as const)(
+    'preserves a validated hosted %s checkout intent for a provisional workspace',
+    async (plan) => {
+      const next = `/subscribe/${plan}`;
+      // The public core intentionally rejects hosted-only checkout paths. This
+      // assertion becomes active in the assembled app, where the hosted
+      // post-auth helper is overlaid onto these shared auth routes.
+      if (!validateAuthNext(next)) return;
+
+      mocks.consumeMagicToken.mockResolvedValue({
+        userId: 'user-checkout',
+        email: 'checkout@example.com',
+        isNewUser: true,
+        next,
+        pendingInviteToken: null,
+      });
+      mocks.findOrCreateBuilderForUser.mockResolvedValue({
+        builderId: 'builder-checkout',
+        slug: 'checkout-workspace',
+        role: 'owner',
+        plan: null,
+        accessState: 'checkout_required',
+        entitlementSource: null,
+        isNew: true,
+        acceptedInviteId: null,
+      });
+
+      const response = await invoke('magic-token');
+
+      expect(response.headers.get('location')).toBe(`https://app.example.com${next}`);
+    },
+  );
+
+  it('lands an invite-first user in the invited workspace without a second accept round trip', async () => {
+    const pendingInviteToken = 'd'.repeat(64);
+    mocks.consumeMagicToken.mockResolvedValue({
+      userId: 'user-invited',
+      email: 'invited@example.com',
+      isNewUser: true,
+      next: null,
+      pendingInviteToken,
+    });
+    mocks.findOrCreateBuilderForUser.mockResolvedValue({
+      builderId: 'builder-invited',
+      slug: 'invited-workspace',
+      role: 'member',
+      plan: 'pro',
+      accessState: 'active',
+      entitlementSource: 'stripe',
+      isNew: false,
+      acceptedInviteId: 'invite-1',
+    });
+
+    const response = await invoke('magic-token');
+
+    expect(response.headers.get('location')).toBe(
+      'https://app.example.com/o/invited-workspace/dashboard',
+    );
+    expect(mocks.findOrCreateBuilderForUser).toHaveBeenCalledWith(
+      expect.objectContaining({ pendingInviteToken }),
+    );
+    expect(response.cookies.get('pylva_pending_invite')?.value).toBe('');
   });
 
   it('gives a pending invite precedence and restores its HttpOnly cookie', async () => {
@@ -191,13 +427,18 @@ describe('GET /api/v1/auth/magic/verify', () => {
       builderId: 'builder-legacy',
       slug: 'legacy-workspace',
       role: 'owner',
-      tier: 'scale',
+      plan: 'scale',
+      accessState: 'active',
+      entitlementSource: 'stripe',
       isNew: false,
+      acceptedInviteId: null,
     });
     mocks.resolveSlugForUser.mockResolvedValue({
       builderId: 'builder-other',
       role: 'member',
-      tier: 'free',
+      plan: 'pro',
+      accessState: 'active',
+      entitlementSource: 'stripe',
     });
 
     const response = await invoke('magic-token');
@@ -220,13 +461,18 @@ describe('GET /api/v1/auth/magic/verify', () => {
       builderId: 'builder-legacy',
       slug: 'legacy-workspace',
       role: 'owner',
-      tier: 'scale',
+      plan: 'scale',
+      accessState: 'active',
+      entitlementSource: 'stripe',
       isNew: false,
+      acceptedInviteId: null,
     });
     mocks.resolveSlugForUser.mockResolvedValue({
       builderId: 'builder-other',
       role: 'member',
-      tier: 'free',
+      plan: 'pro',
+      accessState: 'active',
+      entitlementSource: 'stripe',
     });
 
     const response = await invoke('magic-token');
@@ -241,7 +487,9 @@ describe('GET /api/v1/auth/magic/verify', () => {
         audience: 'pylva:dashboard',
         builder_id: 'builder-other',
         role: 'member',
-        tier: 'free',
+        plan: 'pro',
+        access_state: 'active',
+        tier: 'pro',
         user_id: 'user-1',
       }),
     );
@@ -263,8 +511,11 @@ describe('GET /api/v1/auth/magic/verify', () => {
       builderId: 'builder-legacy',
       slug: 'legacy-workspace',
       role: 'owner',
-      tier: 'scale',
+      plan: 'scale',
+      accessState: 'active',
+      entitlementSource: 'stripe',
       isNew: false,
+      acceptedInviteId: null,
     });
     mocks.resolveSlugForUser.mockResolvedValue(null);
 
@@ -295,8 +546,11 @@ describe('GET /api/v1/auth/magic/verify', () => {
       builderId: 'builder-legacy',
       slug: 'legacy-workspace',
       role: 'owner',
-      tier: 'scale',
+      plan: 'scale',
+      accessState: 'active',
+      entitlementSource: 'stripe',
       isNew: false,
+      acceptedInviteId: null,
     });
     // The one-time token is already consumed at this point: a transient
     // membership-lookup failure must NOT fail the login.

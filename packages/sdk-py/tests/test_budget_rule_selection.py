@@ -25,6 +25,7 @@ with open(CONTRACT_PATH, encoding="utf-8") as fp:
 
 def setup_function(_fn: object) -> None:
     rules_cache._reset_rules_cache_for_tests()  # type: ignore[attr-defined]
+    rules_cache._mark_rules_cache_fresh_for_tests()  # type: ignore[attr-defined]
     ba._reset_accumulator_for_tests()  # type: ignore[attr-defined]
     pricing_cache._reset_pricing_cache_for_tests()  # type: ignore[attr-defined]
 

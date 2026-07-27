@@ -21,7 +21,6 @@ const RANGE = {
 const queryCostEventsMock = vi.fn();
 const routeMocks = vi.hoisted(() => ({
   readBuilderContextFromDashboard: vi.fn(),
-  getBuilderTierGate: vi.fn(),
   checkCustomerLimitInTransaction: vi.fn(),
   lockCustomerLimit: vi.fn(),
   tierUsageHeader: vi.fn(),
@@ -37,14 +36,14 @@ vi.mock('@/lib/auth/builder-context', () => ({
   readBuilderContextFromDashboard: routeMocks.readBuilderContextFromDashboard,
 }));
 
-vi.mock('@/lib/auth/dashboard-feature-gate', () => ({
-  getBuilderTierGate: routeMocks.getBuilderTierGate,
-}));
-
 vi.mock('@/lib/auth/tier-enforcement', () => ({
   checkCustomerLimitInTransaction: routeMocks.checkCustomerLimitInTransaction,
   lockCustomerLimit: routeMocks.lockCustomerLimit,
   tierUsageHeader: routeMocks.tierUsageHeader,
+}));
+
+vi.mock('@/lib/auth/workspace-limits', () => ({
+  limitsForEntitlement: vi.fn(),
 }));
 
 vi.mock('@/lib/db/rls', () => ({

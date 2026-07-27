@@ -20,6 +20,7 @@ const authMocks = vi.hoisted(() => ({
   withMembership: vi.fn(),
   requestHasActiveSession: vi.fn(),
   setDashboardSessionCookies: vi.fn(),
+  signJwt: vi.fn(),
 }));
 
 vi.mock('@/lib/config', () => ({ env: testEnv }));
@@ -40,6 +41,10 @@ vi.mock('../../src/lib/auth/middleware.js', () => ({
   },
 }));
 
+vi.mock('../../src/lib/auth/jwt.js', () => ({
+  signJwt: authMocks.signJwt,
+}));
+
 const { NextRequest, NextResponse } = await import('next/server.js');
 const { middleware } = await import('../../src/middleware.js');
 
@@ -50,7 +55,9 @@ function dashboardSession() {
       userId: 'user-1',
       orgSlug: 'org-a',
       role: 'owner',
-      tier: 'free',
+      plan: 'pro',
+      accessState: 'active',
+      tier: 'pro',
       jti: 'j-1',
       revocationId: 'family-1',
     },
@@ -76,15 +83,19 @@ describe('middleware org binding for dashboard /api/v1 requests', () => {
     authMocks.withMembership.mockReset();
     authMocks.requestHasActiveSession.mockReset();
     authMocks.setDashboardSessionCookies.mockReset();
+    authMocks.signJwt.mockReset();
     authMocks.withJwtAuth.mockResolvedValue(dashboardSession());
     authMocks.requestHasActiveSession.mockReturnValue(true);
+    authMocks.signJwt.mockResolvedValue('normalized-legacy-token');
   });
 
   it("scopes x-builder-id to the page org's membership on an x-pylva-org hit", async () => {
     authMocks.withMembership.mockResolvedValue({
       builderId: 'org-a-builder',
       role: 'member',
-      tier: 'pro',
+      plan: 'pro',
+      accessState: 'active',
+      entitlementSource: 'admin',
     });
 
     const response = await middleware(
@@ -94,9 +105,57 @@ describe('middleware org binding for dashboard /api/v1 requests', () => {
       }),
     );
 
-    expect(authMocks.withMembership).toHaveBeenCalledWith({ slug: 'org-a', userId: 'user-1' });
+    expect(authMocks.withMembership).toHaveBeenCalledWith({
+      slug: 'org-a',
+      userId: 'user-1',
+      capability: 'product',
+    });
     expect(response.headers.get('x-middleware-request-x-builder-id')).toBe('org-a-builder');
     expect(response.headers.get('x-middleware-request-x-user-role')).toBe('member');
+  });
+
+  it('remints a legacy dashboard token with normalized checkout-required claims', async () => {
+    authMocks.withJwtAuth.mockResolvedValue({
+      ...dashboardSession(),
+      context: {
+        ...dashboardSession().context,
+        orgSlug: null,
+      },
+    });
+    authMocks.withMembership.mockResolvedValue({
+      builderId: 'legacy-builder',
+      role: 'owner',
+      plan: null,
+      accessState: 'checkout_required',
+      entitlementSource: null,
+    });
+
+    const response = await middleware(
+      new NextRequest('http://localhost/api/v1/billing/subscription', {
+        method: 'POST',
+        headers: {
+          'x-pylva-org': 'legacy-org',
+          'x-pylva-page-session': sessionFingerprint('user-1'),
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(authMocks.signJwt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        builder_id: 'legacy-builder',
+        org_slug: 'legacy-org',
+        plan: null,
+        access_state: 'checkout_required',
+        session_id: 'family-1',
+      }),
+    );
+    expect(authMocks.signJwt.mock.calls[0]?.[0]).not.toHaveProperty('tier');
+    expect(authMocks.setDashboardSessionCookies).toHaveBeenCalledWith(response, {
+      token: 'normalized-legacy-token',
+      userId: 'user-1',
+      orgSlug: 'legacy-org',
+    });
   });
 
   it('403s with ORG_MISMATCH when the session user has no membership in the page org', async () => {
@@ -128,7 +187,9 @@ describe('middleware org binding for dashboard /api/v1 requests', () => {
     authMocks.withMembership.mockResolvedValue({
       builderId: 'org-a-builder',
       role: 'owner',
-      tier: 'pro',
+      plan: 'pro',
+      accessState: 'active',
+      entitlementSource: 'admin',
     });
 
     const response = await middleware(
@@ -137,8 +198,74 @@ describe('middleware org binding for dashboard /api/v1 requests', () => {
       ),
     );
 
-    expect(authMocks.withMembership).toHaveBeenCalledWith({ slug: 'org-a', userId: 'user-1' });
+    expect(authMocks.withMembership).toHaveBeenCalledWith({
+      slug: 'org-a',
+      userId: 'user-1',
+      capability: 'product',
+    });
     expect(response.headers.get('x-middleware-request-x-builder-id')).toBe('org-a-builder');
+  });
+
+  it.each([
+    ['/api/v1/export/csv', 'GET', 'export'],
+    ['/api/v1/billing/subscription', 'POST', 'platform_billing'],
+    ['/api/v1/billing/invoices', 'GET', 'invoices'],
+    ['/api/v1/billing/invoices/in_123', 'GET', 'invoices'],
+    ['/api/v1/billing/invoices', 'POST', 'product'],
+    ['/api/v1/billing/invoices/in_123/finalize', 'POST', 'product'],
+    ['/api/v1/billing/invoices/in_123/void', 'POST', 'product'],
+  ])('requests the %s lifecycle capability for %s', async (pathname, method, capability) => {
+    authMocks.withMembership.mockResolvedValue({
+      builderId: 'org-a-builder',
+      role: 'owner',
+      plan: null,
+      accessState: 'suspended',
+      entitlementSource: 'stripe',
+    });
+
+    const response = await middleware(
+      new NextRequest(`http://localhost${pathname}`, {
+        method,
+        headers: {
+          'x-pylva-org': 'org-a',
+          'x-pylva-page-session': sessionFingerprint('user-1'),
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(authMocks.withMembership).toHaveBeenCalledWith({
+      slug: 'org-a',
+      userId: 'user-1',
+      capability,
+    });
+  });
+
+  it.each([
+    ['/o/org-a/subscription', 'platform_billing'],
+    ['/o/org-a/dashboard/billing', 'invoices'],
+    ['/o/org-a/dashboard/billing/invoices/76000000-0000-4000-8000-000000000001', 'invoices'],
+    ['/o/org-a/dashboard/billing/cycles/76000000-0000-4000-8000-000000000002', 'invoices'],
+    ['/o/org-a/dashboard', 'product'],
+    ['/o/org-a/dashboard/rules', 'product'],
+  ])('requests the %s dashboard-page lifecycle capability', async (pathname, capability) => {
+    authMocks.withMembership.mockResolvedValue({
+      builderId: 'org-a-builder',
+      role: 'owner',
+      plan: null,
+      accessState: 'suspended',
+      entitlementSource: 'stripe',
+    });
+
+    const response = await middleware(new NextRequest(`http://localhost${pathname}`));
+
+    expect(response.status).toBe(200);
+    expect(authMocks.withMembership).toHaveBeenCalledWith({
+      slug: 'org-a',
+      userId: 'user-1',
+      capability,
+      deniedRedirect: 'https://pylva.com/o/org-a/subscription',
+    });
   });
 
   it('rejects a valid shared-org request from a page owned by another user', async () => {

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NextRequest, NextResponse } from 'next/server.js';
-import { encodeOAuthStateValue } from '@/lib/auth/post-auth-redirect';
+import { encodeOAuthStateValue, validateAuthNext } from '@/lib/auth/post-auth-redirect';
 // Real module (node:crypto only) — the setActiveSessionCookie mock delegates
 // to it so set-cookie assertions verify the actual on-the-wire format
 // (`${sha256(userId).slice(0,16)}.${slug}`), never a made-up one.
@@ -48,6 +48,41 @@ vi.mock('@/lib/auth/oauth', async (importOriginal) => {
 
 vi.mock('@/lib/auth/org', () => ({
   findOrCreateBuilderForUser: mocks.findOrCreateBuilderForUser,
+  provisionOAuthUserAndBuilder: async (input: {
+    email: string;
+    displayName: string | null;
+    avatarUrl: string | null;
+    provider: string;
+    pendingInviteToken?: string | null;
+  }) => {
+    let user;
+    try {
+      user = await mocks.upsertUserFromOAuth({
+        email: input.email,
+        displayName: input.displayName,
+        avatarUrl: input.avatarUrl,
+        provider: input.provider,
+      });
+    } catch (cause) {
+      throw Object.assign(new Error('mocked user upsert failed', { cause }), {
+        stage: 'user_upsert',
+      });
+    }
+    try {
+      const org = await mocks.findOrCreateBuilderForUser({
+        userId: user.userId,
+        email: input.email,
+        displayName: input.displayName,
+        avatarUrl: input.avatarUrl,
+        pendingInviteToken: input.pendingInviteToken,
+      });
+      return { user, org };
+    } catch (cause) {
+      throw Object.assign(new Error('mocked org create failed', { cause }), {
+        stage: 'org_create',
+      });
+    }
+  },
   resolveSlugForUser: mocks.resolveSlugForUser,
 }));
 
@@ -147,8 +182,11 @@ function mockSuccessfulDbFlow(provider: 'github' | 'google'): void {
     builderId: 'builder-1',
     slug: 'oauth-user',
     role: 'owner',
-    tier: 'free',
+    plan: 'pro',
+    accessState: 'active',
+    entitlementSource: 'stripe',
     isNew: true,
+    acceptedInviteId: null,
   });
   mocks.signJwt.mockResolvedValue('signed-dashboard-jwt');
   mocks.withRLS.mockImplementation(
@@ -339,7 +377,9 @@ describe('GET /api/v1/auth/oauth/[provider]/callback', () => {
           builder_id: 'builder-1',
           user_id: 'user-1',
           role: 'owner',
-          tier: 'free',
+          plan: 'pro',
+          access_state: 'active',
+          tier: 'pro',
         }),
       );
       expect(mocks.auditLog).toHaveBeenCalledWith(
@@ -376,6 +416,158 @@ describe('GET /api/v1/auth/oauth/[provider]/callback', () => {
       'pkce-verifier',
     );
   });
+
+  it('sends a generic hosted OAuth signup to plan selection without a paid alias', async () => {
+    mockSuccessfulDbFlow('github');
+    mocks.findOrCreateBuilderForUser.mockResolvedValue({
+      builderId: 'builder-new',
+      slug: 'new-workspace',
+      role: 'owner',
+      plan: null,
+      accessState: 'checkout_required',
+      entitlementSource: null,
+      isNew: true,
+      acceptedInviteId: null,
+    });
+
+    const response = await invoke('github', { code: 'provider-code', state: 'state-123' });
+
+    expect(response.headers.get('location')).toBe(
+      'https://app.example.com/o/new-workspace/subscription',
+    );
+    expect(mocks.signJwt).toHaveBeenCalledWith(
+      expect.objectContaining({ plan: null, access_state: 'checkout_required' }),
+    );
+    expect(mocks.signJwt.mock.calls[0]?.[0]).not.toHaveProperty('tier');
+  });
+
+  it('mints a checkout-required session for an existing legacy Free row normalized by org lookup', async () => {
+    mockSuccessfulDbFlow('github');
+    mocks.findOrCreateBuilderForUser.mockResolvedValue({
+      builderId: 'builder-expand-race',
+      slug: 'expand-race',
+      role: 'owner',
+      plan: null,
+      accessState: 'checkout_required',
+      entitlementSource: null,
+      isNew: false,
+      acceptedInviteId: null,
+    });
+
+    const response = await invoke('github', {
+      code: 'provider-code',
+      state: 'state-123',
+    });
+
+    expect(response.headers.get('location')).toBe(
+      'https://app.example.com/o/expand-race/subscription',
+    );
+    expect(mocks.signJwt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        builder_id: 'builder-expand-race',
+        plan: null,
+        access_state: 'checkout_required',
+      }),
+    );
+    expect(mocks.signJwt.mock.calls[0]?.[0]).not.toHaveProperty('tier');
+  });
+
+  it.each(['checkout_required', 'suspended'] as const)(
+    'does not restore nested product navigation for a %s workspace',
+    async (accessState) => {
+      mockSuccessfulDbFlow('github');
+      mocks.findOrCreateBuilderForUser.mockResolvedValue({
+        builderId: 'builder-restricted',
+        slug: 'restricted-workspace',
+        role: 'owner',
+        plan: null,
+        accessState,
+        entitlementSource: accessState === 'suspended' ? 'stripe' : null,
+        isNew: false,
+        acceptedInviteId: null,
+      });
+
+      const state = encodeOAuthStateValue(
+        'nonce-1',
+        '/o/restricted-workspace/dashboard/rules',
+      );
+      const response = await invoke(
+        'github',
+        { code: 'provider-code', state },
+        flowCookies(state),
+      );
+
+      expect(response.headers.get('location')).toBe(
+        'https://app.example.com/o/restricted-workspace/subscription',
+      );
+    },
+  );
+
+  it.each(['checkout_required', 'suspended'] as const)(
+    'does not resume WorkOS completion after OAuth login for a %s workspace',
+    async (accessState) => {
+      const next =
+        '/api/v1/auth/workos/complete?external_auth_id=ext_auth_01KXDW5PVKQ5MR2R0VN9D00J5C';
+      // Hosted assembly overlays the bounded WorkOS next-path validator. The
+      // public core deliberately does not expose that hosted-only endpoint.
+      if (!validateAuthNext(next)) return;
+
+      mockSuccessfulDbFlow('github');
+      mocks.findOrCreateBuilderForUser.mockResolvedValue({
+        builderId: 'builder-workos-restricted',
+        slug: 'workos-restricted',
+        role: 'owner',
+        plan: null,
+        accessState,
+        entitlementSource: accessState === 'suspended' ? 'stripe' : null,
+        isNew: false,
+        acceptedInviteId: null,
+      });
+
+      const state = encodeOAuthStateValue('nonce-1', next);
+      const response = await invoke(
+        'github',
+        { code: 'provider-code', state },
+        flowCookies(state),
+      );
+
+      expect(response.headers.get('location')).toBe(
+        'https://app.example.com/o/workos-restricted/subscription',
+      );
+    },
+  );
+
+  it.each(['pro', 'scale'] as const)(
+    'preserves a validated hosted %s checkout intent for a provisional workspace',
+    async (plan) => {
+      const next = `/subscribe/${plan}`;
+      // The public core intentionally rejects hosted-only checkout paths. This
+      // assertion becomes active in the assembled app, where the hosted
+      // post-auth helper is overlaid onto these shared auth routes.
+      if (!validateAuthNext(next)) return;
+
+      mockSuccessfulDbFlow('github');
+      mocks.findOrCreateBuilderForUser.mockResolvedValue({
+        builderId: 'builder-checkout',
+        slug: 'checkout-workspace',
+        role: 'owner',
+        plan: null,
+        accessState: 'checkout_required',
+        entitlementSource: null,
+        isNew: true,
+        acceptedInviteId: null,
+      });
+
+      const state = encodeOAuthStateValue('nonce-1', next);
+      const response = await invoke(
+        'github',
+        { code: 'provider-code', state },
+        flowCookies(state),
+      );
+
+      expect(response.headers.get('location')).toBe(`https://app.example.com${next}`);
+    },
+  );
 
   it('gives pending invite continuation precedence without exposing its bearer token', async () => {
     mockSuccessfulDbFlow('github');
@@ -433,7 +625,9 @@ describe('GET /api/v1/auth/oauth/[provider]/callback', () => {
     mocks.resolveSlugForUser.mockResolvedValue({
       builderId: 'builder-other',
       role: 'member',
-      tier: 'scale',
+      plan: 'scale',
+      accessState: 'active',
+      entitlementSource: 'stripe',
     });
 
     const state = encodeOAuthStateValue('nonce-1', '/o/other-org/dashboard/rules');
@@ -468,7 +662,13 @@ describe('GET /api/v1/auth/oauth/[provider]/callback', () => {
     expect(response.status).toBe(307);
     expect(response.headers.get('location')).toBe('https://app.example.com/o/oauth-user/dashboard');
     expect(mocks.signJwt).toHaveBeenCalledWith(
-      expect.objectContaining({ builder_id: 'builder-1', role: 'owner', tier: 'free' }),
+      expect.objectContaining({
+        builder_id: 'builder-1',
+        role: 'owner',
+        plan: 'pro',
+        access_state: 'active',
+        tier: 'pro',
+      }),
     );
     expect(mocks.setActiveSessionCookie).toHaveBeenCalledWith(
       expect.anything(),
@@ -547,8 +747,11 @@ describe('GET /api/v1/auth/oauth/[provider]/callback', () => {
       builderId: 'builder-legacy',
       slug: 'legacy-workspace',
       role: 'owner',
-      tier: 'scale',
+      plan: 'scale',
+      accessState: 'active',
+      entitlementSource: 'stripe',
       isNew: false,
+      acceptedInviteId: null,
     });
 
     const response = await invoke('github', { code: 'provider-code', state: 'state-123' });

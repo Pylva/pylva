@@ -29,6 +29,7 @@ import {
 } from '@pylva/shared/cost-sources';
 import { slugify } from './slugify.js';
 import type { ApprovedSource, Detection } from './ci-check.js';
+import { API_CONTRACT_VERSION } from '../core/version.js';
 
 interface DeclarationPayload {
   display_name: string;
@@ -267,6 +268,7 @@ async function postDeclaration(
     headers: {
       'content-type': 'application/json',
       authorization: `Bearer ${ctx.cliKey}`,
+      'X-Pylva-Contract-Version': API_CONTRACT_VERSION,
     },
     body: JSON.stringify(payload),
   });

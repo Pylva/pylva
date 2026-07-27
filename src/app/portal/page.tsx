@@ -78,7 +78,7 @@ export default async function PortalPage({
   if (entitlement) {
     const body =
       entitlement.status === 403
-        ? "This portal is not available on the builder's current plan."
+        ? "This portal is unavailable while the builder's workspace access is restricted."
         : 'This portal is currently unavailable.';
 
     return <PortalError title="Portal unavailable" body={body} />;

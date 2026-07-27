@@ -66,13 +66,11 @@ describe('sanitizeProperties', () => {
       plan: 'price_abc123',
       // allowed
       surface: 'marketing',
-      cta_id: 'hero_start_free',
-      tier: 'free',
+      cta_id: 'hero_start_trial',
     });
     expect(out).toEqual({
       surface: 'marketing',
-      cta_id: 'hero_start_free',
-      tier: 'free',
+      cta_id: 'hero_start_trial',
     });
   });
 
@@ -130,7 +128,7 @@ describe('track() runtime guard', () => {
       api_key: 'pv_live_AAAA',
       apiKey: 'pv_live_BBBB',
       surface: 'app',
-      tier: 'free',
+      plan: 'pro',
       is_owner: true,
     } as never);
 
@@ -143,7 +141,7 @@ describe('track() runtime guard', () => {
     expect(call.properties).not.toHaveProperty('apiKey');
     expect(call.properties).toMatchObject({
       surface: 'app',
-      tier: 'free',
+      plan: 'pro',
       is_owner: true,
     });
   });

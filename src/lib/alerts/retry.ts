@@ -18,6 +18,16 @@ export interface RetryOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
+export type RetryResult<T> = DeliveryResult & {
+  value?: T;
+  /**
+   * Kept in-process only so callers can distinguish a lifecycle fence from a
+   * transport failure without parsing an error string. Channel-facing return
+   * values continue to expose the stable DeliveryResult contract.
+   */
+  cause?: unknown;
+};
+
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -25,7 +35,7 @@ function defaultSleep(ms: number): Promise<void> {
 export async function retryWithBackoff<T>(
   fn: () => Promise<T>,
   options: RetryOptions = {},
-): Promise<DeliveryResult & { value?: T }> {
+): Promise<RetryResult<T>> {
   const backoff = options.backoffMs ?? DEFAULT_BACKOFF_MS;
   const retryable = options.retryable ?? (() => true);
   const sleep = options.sleep ?? defaultSleep;
@@ -47,7 +57,7 @@ export async function retryWithBackoff<T>(
   }
 
   const message = lastError instanceof Error ? lastError.message : String(lastError);
-  return { ok: false, attempts, last_error: message };
+  return { ok: false, attempts, last_error: message, cause: lastError };
 }
 
 /** Classify HTTP-ish failures as retryable. 5xx + network → retry; 4xx → no. */

@@ -56,6 +56,10 @@ vi.mock('../../src/lib/rules/margin-evaluator.js', () => ({
   })),
 }));
 
+vi.mock('../../src/lib/auth/builder-entitlement.js', () => ({
+  authorizeBuilderCapability: vi.fn(async () => ({ allowed: true })),
+}));
+
 vi.mock('../../src/lib/logger.js', () => ({
   logger: { child: () => ({ warn: vi.fn(), info: vi.fn(), error: vi.fn() }) },
 }));
@@ -113,7 +117,7 @@ describe('bug_006 — cron idempotency across consecutive ticks', () => {
     listBuildersWithEventsMock.mockResolvedValue([
       { builderId: BUILDER_ID, earliestEvent: new Date('2026-03-01T00:00:00Z') },
     ]);
-    deliverBuilderAlertMock.mockResolvedValue(undefined);
+    deliverBuilderAlertMock.mockResolvedValue({ kind: 'delivered' });
   });
 
   it('two ticks within the same hour key into identical period bounds (ON CONFLICT path)', async () => {

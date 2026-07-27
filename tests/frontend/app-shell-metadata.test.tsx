@@ -10,7 +10,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // nothing but the `metadata` exports (and GlobalError's render output).
 // The root layout reads env.PUBLIC_SITE_URL at module scope; t3-env throws in
 // a jsdom ("client") context, so give it a synthetic value.
-vi.mock('../../src/lib/config', () => ({ env: { PUBLIC_SITE_URL: 'https://pylva.test' } }));
+vi.mock('../../src/lib/config', () => ({
+  env: { LOG_LEVEL: 'info', PUBLIC_SITE_URL: 'https://pylva.test' },
+}));
 vi.mock('../../src/components/dashboard/Sidebar', () => ({ Sidebar: () => null }));
 vi.mock('../../src/components/dashboard/TopBar', () => ({ TopBar: () => null }));
 vi.mock('../../src/components/dashboard/BrokenSourcesBanner', () => ({

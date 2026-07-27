@@ -5,9 +5,11 @@ import postgres, { type Sql } from 'postgres';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { applyPostgresMigration } from '../../scripts/apply-postgres-migration.js';
 import { runDbMigrate } from '../../scripts/db-migrate.js';
+import { ensureLedger, type MigrateSqlClient } from '../../scripts/db-migrate-core.js';
 import { findOrCreateBuilderForUser } from '../../src/lib/auth/org.js';
 import { upsertUserFromOAuth } from '../../src/lib/auth/oauth.js';
-import { OAuthProvider } from '@pylva/shared';
+import { env } from '../../src/lib/config.js';
+import { OAuthProvider, type BuilderPlan } from '@pylva/shared';
 import { applyMigrationsThrough, createScratchDb } from '../helpers/scratch-db.js';
 
 const MIGRATIONS_DIR = path.resolve('db/migrations');
@@ -25,14 +27,29 @@ function suffix(): string {
 async function insertBuilder(args: {
   email: string;
   slug: string;
-  tier?: string;
+  tier?: BuilderPlan;
   name?: string;
   sql?: Sql;
 }): Promise<string> {
   const client = args.sql ?? sql;
+  const plan = args.tier ?? 'scale';
   const [builder] = await client<{ id: string }[]>`
-    INSERT INTO builders (email, name, tier, slug)
-    VALUES (${args.email}, ${args.name ?? 'Legacy Builder'}, ${args.tier ?? 'scale'}, ${args.slug})
+    INSERT INTO builders (
+      email,
+      name,
+      tier,
+      access_state,
+      entitlement_source,
+      slug
+    )
+    VALUES (
+      ${args.email},
+      ${args.name ?? 'Legacy Builder'},
+      ${plan},
+      'active',
+      'admin',
+      ${args.slug}
+    )
     RETURNING id
   `;
   if (!args.sql) {
@@ -123,12 +140,14 @@ describe('legacy builder auth adoption', () => {
       userId,
     });
 
-    expect(org).toEqual({
+    expect(org).toMatchObject({
       builderId,
       isNew: false,
       role: 'owner',
       slug: `legacy-builder-${testSuffix}`,
-      tier: 'scale',
+      plan: 'scale',
+      accessState: 'active',
+      entitlementSource: 'admin',
     });
     expect(await membershipRows(builderId, userId)).toEqual([
       { builder_id: builderId, role: 'owner', user_id: userId },
@@ -185,7 +204,7 @@ describe('legacy builder auth adoption', () => {
     });
 
     expect(org.builderId).toBe(builderId);
-    expect(org.tier).toBe('enterprise');
+    expect(org.plan).toBe('enterprise');
     expect(org.isNew).toBe(false);
     expect(await membershipRows(builderId, userId)).toEqual([
       { builder_id: builderId, role: 'owner', user_id: userId },
@@ -215,7 +234,7 @@ describe('legacy builder auth adoption', () => {
     expect(await membershipRows(builderId, userId)).toHaveLength(1);
   });
 
-  it('still creates a new free builder for a brand-new email', async () => {
+  it('creates a new workspace with deployment-appropriate no-plan lifecycle state', async () => {
     const testSuffix = suffix();
     const email = `brand-new-${testSuffix}@example.com`;
     const userId = await upsertOAuthUser(email);
@@ -230,22 +249,56 @@ describe('legacy builder auth adoption', () => {
 
     expect(org.isNew).toBe(true);
     expect(org.role).toBe('owner');
-    expect(org.tier).toBe('free');
+    const expectedLifecycle =
+      env.PYLVA_DEPLOYMENT_MODE === 'hosted'
+        ? {
+            accessState: 'checkout_required',
+            entitlementSource: null,
+          }
+        : {
+            accessState: 'active',
+            entitlementSource: 'self_hosted',
+          };
+    expect(org).toMatchObject({
+      plan: null,
+      ...expectedLifecycle,
+    });
     expect(await membershipRows(org.builderId, userId)).toEqual([
       { builder_id: org.builderId, role: 'owner', user_id: userId },
     ]);
-    const builders = await sql<{ email: string }[]>`
-      SELECT email FROM builders WHERE id = ${org.builderId}
+    const builders = await sql<
+      Array<{
+        access_state: string;
+        email: string;
+        entitlement_source: string;
+        tier: string | null;
+      }>
+    >`
+      SELECT email, tier, access_state, entitlement_source
+      FROM builders
+      WHERE id = ${org.builderId}
     `;
-    expect(builders[0]!.email).toBe(email);
+    expect(builders[0]).toMatchObject({
+      email,
+      tier: null,
+      access_state: expectedLifecycle.accessState,
+      entitlement_source: expectedLifecycle.entitlementSource,
+    });
   });
+
 });
 
 describe('legacy builder membership migration and CLI provisioning', () => {
   it('backfills memberships only for existing matching user and builder emails', async () => {
     const scratch = await createScratchDb({ prefix: 'auth_legacy_backfill' });
     try {
+      await ensureLedger(scratch.sql as unknown as MigrateSqlClient);
       await applyMigrationsThrough(scratch, '048');
+      await scratch.sql.unsafe(`
+        ALTER TABLE builders
+          ADD COLUMN access_state VARCHAR(32) NOT NULL DEFAULT 'active',
+          ADD COLUMN entitlement_source VARCHAR(32)
+      `);
       const baselineExit = await runDbMigrate(
         { mode: 'baseline', through: '048_universal_api_key_scope.sql', yes: true, json: false },
         {
@@ -303,23 +356,28 @@ describe('legacy builder membership migration and CLI provisioning', () => {
     }
   });
 
-  it('makes create-builder idempotent for builder, user, and owner membership provisioning', async () => {
+  it('makes create-builder idempotent and never changes an existing plan when omitted', async () => {
     const scratch = await createScratchDb({ prefix: 'auth_cli_builder' });
     try {
-      await applyMigrationsThrough(scratch, '049');
+      await ensureLedger(scratch.sql as unknown as MigrateSqlClient);
+      await applyMigrationsThrough(scratch, '058');
+      await scratch.sql.unsafe('SET ROLE pylva_general_app_runtime');
       const testSuffix = suffix();
       const email = `cli-owner-${testSuffix}@example.com`;
       const scriptPath = path.resolve('scripts/cli/create-builder.ts');
+      const runtimeUrl = new URL(scratch.url);
+      runtimeUrl.searchParams.set('options', '-c role=pylva_general_app_runtime');
 
-      for (const tier of ['pro', 'scale']) {
+      for (const plan of ['pro', 'scale']) {
         const result = spawnSync(
           'pnpm',
-          ['exec', 'tsx', scriptPath, '--email', email.toUpperCase(), '--tier', tier, '--no-key'],
+          ['exec', 'tsx', scriptPath, '--email', email.toUpperCase(), '--plan', plan, '--no-key'],
           {
             encoding: 'utf8',
             env: {
               ...process.env,
-              DATABASE_URL: scratch.url,
+              DATABASE_URL: runtimeUrl.toString(),
+              PYLVA_DEPLOYMENT_MODE: 'hosted',
             },
           },
         );
@@ -327,9 +385,25 @@ describe('legacy builder membership migration and CLI provisioning', () => {
         expect(result.status).toBe(0);
       }
 
+      const omitted = spawnSync(
+        'pnpm',
+        ['exec', 'tsx', scriptPath, '--email', email.toUpperCase(), '--no-key'],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            DATABASE_URL: runtimeUrl.toString(),
+            PYLVA_DEPLOYMENT_MODE: 'hosted',
+          },
+        },
+      );
+      expect(omitted.status).toBe(0);
+
       const rows = await scratch.sql<
         {
+          access_state: string;
           builder_count: string;
+          entitlement_source: string;
           user_count: string;
           membership_count: string;
           tier: string;
@@ -348,12 +422,20 @@ describe('legacy builder membership migration and CLI provisioning', () => {
               AND lower(u.email::text) = ${email}
           ) AS membership_count,
           (SELECT tier FROM builders WHERE lower(email) = ${email}) AS tier,
+          (SELECT access_state FROM builders WHERE lower(email) = ${email}) AS access_state,
+          (
+            SELECT entitlement_source
+            FROM builders
+            WHERE lower(email) = ${email}
+          ) AS entitlement_source,
           (SELECT email FROM builders WHERE lower(email) = ${email}) AS email
       `;
 
       expect(rows[0]).toMatchObject({
+        access_state: 'active',
         builder_count: '1',
         email,
+        entitlement_source: 'admin',
         membership_count: '1',
         tier: 'scale',
         user_count: '1',

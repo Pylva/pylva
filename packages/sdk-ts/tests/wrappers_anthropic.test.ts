@@ -15,6 +15,7 @@ vi.mock('../src/wrappers/_load.js', async (importOriginal) => {
 vi.mock('../src/core/rules_cache.js', () => ({
   ensureRulesCache: vi.fn(async () => {}),
   getCachedRules: () => [],
+  getRulesForEvaluation: () => [],
   isPassthrough: () => false,
 }));
 

@@ -1,9 +1,9 @@
-#!/usr/bin/env python3
 """Build or verify immutable public Python SDK distribution artifacts."""
 
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import os
 import pathlib
 import re
@@ -17,7 +17,7 @@ import zipfile
 from dataclasses import dataclass
 from email.parser import Parser
 from hashlib import sha256
-from typing import Any, Callable
+from typing import Any
 
 try:
     import tomllib
@@ -113,7 +113,7 @@ def load_project(package_dir: pathlib.Path) -> dict[str, Any]:
         data = tomllib.load(pyproject)
     project = data.get("project")
     if not isinstance(project, dict):
-        raise AssertionError("pyproject.toml has no [project] table")
+        raise TypeError("pyproject.toml has no [project] table")
     return project
 
 
@@ -212,7 +212,7 @@ def inspect_wheel(
             )
         payload = metadata.get_payload()
         if not isinstance(payload, str):
-            raise AssertionError("wheel METADATA has a non-text description payload")
+            raise TypeError("wheel METADATA has a non-text description payload")
         assert_readme_bytes(
             normalized_metadata_description(payload), expected_readme, "wheel METADATA"
         )
@@ -833,7 +833,7 @@ def run_verified_leg(
 def provider_matrix(project: dict[str, Any]) -> tuple[tuple[str, tuple[str, str]], ...]:
     optional = project.get("optional-dependencies")
     if not isinstance(optional, dict) or not isinstance(optional.get("dev"), list):
-        raise AssertionError("pyproject.toml has no dev provider requirements")
+        raise TypeError("pyproject.toml has no dev provider requirements")
     dev = optional["dev"]
 
     def requirement(name: str) -> str:
@@ -989,9 +989,11 @@ def assert_pip_prerelease_policy(
             str(python),
             "-I",
             "-c",
-            "import importlib.metadata,os; "
-            "assert importlib.metadata.version('pylva-sdk') == "
-            "os.environ['PYLVA_EXPECTED_VERSION']",
+            (
+                "import importlib.metadata,os; "
+                "assert importlib.metadata.version('pylva-sdk') == "
+                "os.environ['PYLVA_EXPECTED_VERSION']"
+            ),
         ],
         cwd=environment_dir,
         env=check_environment,

@@ -12,19 +12,28 @@ import {
   AnomalyStatus,
 } from '@pylva/shared';
 
-const txInsertReturning = vi.fn();
+const mocks = vi.hoisted(() => ({
+  getBuilderEntitlementForShare: vi.fn(),
+  txInsertReturning: vi.fn(),
+}));
+
+const tx = {
+  insert: () => ({
+    values: () => ({
+      onConflictDoNothing: () => ({
+        returning: mocks.txInsertReturning,
+      }),
+    }),
+  }),
+};
 
 vi.mock('../../src/lib/db/rls.js', () => ({
   withRLS: async (_builderId: string, cb: (tx: unknown) => Promise<unknown>) =>
-    cb({
-      insert: () => ({
-        values: () => ({
-          onConflictDoNothing: () => ({
-            returning: txInsertReturning,
-          }),
-        }),
-      }),
-    }),
+    cb(tx),
+}));
+
+vi.mock('../../src/lib/db/advisory-locks.js', () => ({
+  getBuilderEntitlementForShare: mocks.getBuilderEntitlementForShare,
 }));
 
 const { insertAnomalyEvent } = await import('../../src/lib/anomaly/repository.js');
@@ -45,7 +54,17 @@ const BASE_INPUT = {
 
 describe('insertAnomalyEvent', () => {
   beforeEach(() => {
-    txInsertReturning.mockReset();
+    mocks.txInsertReturning.mockReset();
+    mocks.getBuilderEntitlementForShare.mockReset().mockResolvedValue({
+      ok: true,
+      entitlement: {
+        plan: 'pro',
+        access_state: 'active',
+        entitlement_source: 'stripe',
+        has_product_access: true,
+        legacy_free: false,
+      },
+    });
   });
 
   it('returns the inserted row on first insert', async () => {
@@ -66,21 +85,43 @@ describe('insertAnomalyEvent', () => {
       created_at: new Date(),
       dismissed_at: null,
     };
-    txInsertReturning.mockResolvedValue([fakeRow]);
+    mocks.txInsertReturning.mockResolvedValue([fakeRow]);
 
     const result = await insertAnomalyEvent(BASE_INPUT);
     expect(result).not.toBeNull();
     expect(result!.id).toBe('a-1');
     expect(result!.actual_value).toBe(120);
     expect(result!.delta_pct).toBe(20);
+    expect(mocks.getBuilderEntitlementForShare).toHaveBeenCalledWith(
+      tx,
+      BASE_INPUT.builder_id,
+    );
   });
 
   it('returns null when ON CONFLICT DO NOTHING swallows the insert', async () => {
     // ON CONFLICT DO NOTHING + RETURNING yields zero rows when the
     // partial unique index rejects the row.
-    txInsertReturning.mockResolvedValue([]);
+    mocks.txInsertReturning.mockResolvedValue([]);
 
     const result = await insertAnomalyEvent(BASE_INPUT);
     expect(result).toBeNull();
+  });
+
+  it('does not insert when the lifecycle row is restricted inside the transaction', async () => {
+    mocks.getBuilderEntitlementForShare.mockResolvedValue({
+      ok: true,
+      entitlement: {
+        plan: null,
+        access_state: 'suspended',
+        entitlement_source: 'stripe',
+        has_product_access: false,
+        legacy_free: false,
+      },
+    });
+
+    await expect(insertAnomalyEvent(BASE_INPUT)).rejects.toMatchObject({
+      code: 'product_access_mutation_denied',
+    });
+    expect(mocks.txInsertReturning).not.toHaveBeenCalled();
   });
 });

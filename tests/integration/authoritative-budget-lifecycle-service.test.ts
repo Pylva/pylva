@@ -18,7 +18,12 @@ import {
   createBudgetProjectionWorkerId,
   type BudgetProjectionPostgresStore,
 } from '../../src/lib/budget-projection/postgres.js';
-import { applyMigrationsThrough, createScratchDb, type ScratchDb } from '../helpers/scratch-db.js';
+import {
+  applyMigrationsThrough,
+  createScratchDb,
+  installWorkspaceLifecycleFixtureColumns,
+  type ScratchDb,
+} from '../helpers/scratch-db.js';
 
 const SDK_IDENTITY = { sdkVersion: '1.2.0', sdkLanguage: 'typescript' as const };
 const PAST_RESERVED_AT = '2020-01-01T00:00:00.000Z';
@@ -129,9 +134,12 @@ async function jsonHash(transaction: TransactionSql, value: postgres.JSONValue):
 async function insertBuilder(label: string): Promise<string> {
   const suffix = crypto.randomBytes(6).toString('hex');
   const rows = await db()<{ id: string }[]>`
-    INSERT INTO builders (email, name, tier, slug)
+    INSERT INTO builders (
+      email, name, tier, slug, access_state, entitlement_source
+    )
     VALUES (
-      ${`${label}-${suffix}@example.com`}, ${label}, 'pro', ${`${label}-${suffix}`}
+      ${`${label}-${suffix}@example.com`}, ${label}, 'pro', ${`${label}-${suffix}`},
+      'active', 'admin'
     )
     RETURNING id
   `;
@@ -645,6 +653,7 @@ beforeAll(async () => {
     // Applies 051 automatically when the readiness migration is present, while
     // preserving an explicit pre-051 compatibility assertion otherwise.
     await applyMigrationsThrough(scratch, '051');
+    await installWorkspaceLifecycleFixtureColumns(scratch);
     service = createBudgetLifecycleService({
       transactionOptions: { client: scratch.sql, maxAttempts: 1 },
     });

@@ -4,25 +4,17 @@
 // kill switch returns an empty list rather than 503 so dashboard pages
 // still render when the feature is operator-disabled.
 //
-// Tier gate: anomalies are an advanced-rules surface (Pro+); free-tier
-// builders see an empty list. Mirrors the rules list endpoint.
+// Access gate: restricted workspaces see an empty list. Mirrors the rules
+// list endpoint without inferring product access from a nullable plan.
 
 import { NextResponse, type NextRequest } from 'next/server.js';
 import * as v from 'valibot';
-import { eq } from 'drizzle-orm';
-import {
-  AnomalyStatus,
-  ErrorCode,
-  type AnomalyStatus as AnomalyStatusType,
-  type BuilderTier,
-} from '@pylva/shared';
+import { AnomalyStatus, type AnomalyStatus as AnomalyStatusType } from '@pylva/shared';
 import { readBuilderContextFromDashboard } from '../../../../lib/auth/builder-context.js';
-import { db } from '../../../../lib/db/client.js';
-import { builders } from '../../../../lib/db/schema.js';
 import { env } from '../../../../lib/config.js';
 import { listAnomalies } from '../../../../lib/anomaly/repository.js';
-import { checkFeatureGate } from '../../../../lib/auth/tier-enforcement.js';
-import { notFoundError, validationError } from '../../../../lib/errors.js';
+import { checkDashboardFeatureGate } from '../../../../lib/auth/dashboard-feature-gate.js';
+import { validationError } from '../../../../lib/errors.js';
 
 const QuerySchema = v.object({
   status: v.optional(
@@ -56,16 +48,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ anomalies: [], feature_disabled: true });
   }
 
-  const [builder] = await db
-    .select({ tier: builders.tier })
-    .from(builders)
-    .where(eq(builders.id, ctx.builderId))
-    .limit(1);
-  if (!builder) return notFoundError(ErrorCode.RESOURCE_NOT_FOUND, 'Builder not found');
-
-  const tierGate = checkFeatureGate(builder.tier as BuilderTier, 'advanced_rules');
-  if (tierGate) {
-    return NextResponse.json({ anomalies: [], feature_disabled: true });
+  const accessGate = await checkDashboardFeatureGate(ctx.builderId, 'advanced_rules');
+  if (accessGate) {
+    return accessGate.status === 403
+      ? NextResponse.json({ anomalies: [], feature_disabled: true })
+      : accessGate;
   }
 
   const anomalies = await listAnomalies(ctx.builderId, {

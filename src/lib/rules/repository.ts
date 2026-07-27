@@ -25,6 +25,11 @@ import {
   pgJsonbParameterText,
   withBudgetBuilderTransaction,
 } from '../budget-control/transaction.js';
+import {
+  ProductAccessMutationDeniedError,
+  isProductAccessMutationDeniedError,
+  withProductAccessMutation,
+} from '../auth/product-access-mutation.js';
 
 const log = logger.child({ module: 'rules.repository' });
 
@@ -312,13 +317,35 @@ export async function promoteRuleStatus(
 // alert or margin evaluation) so the dashboard's "last triggered" column
 // is truthful. Freshness signal, not an event log — alert_history holds
 // the per-fire records.
+export type MarkRuleTriggeredOutcome =
+  | { kind: 'updated' }
+  | { kind: 'rule_not_found' }
+  | { kind: 'access_denied' };
+
+export async function markRuleTriggeredWithProductAccess(
+  builderId: string,
+  ruleId: string,
+): Promise<MarkRuleTriggeredOutcome> {
+  try {
+    const updated = await withProductAccessMutation(builderId, async (tx) =>
+      tx
+        .update(rules)
+        .set({ last_triggered_at: new Date() })
+        .where(and(eq(rules.id, ruleId), eq(rules.builder_id, builderId)))
+        .returning({ id: rules.id }),
+    );
+    return updated.length > 0 ? { kind: 'updated' } : { kind: 'rule_not_found' };
+  } catch (error) {
+    if (isProductAccessMutationDeniedError(error)) return { kind: 'access_denied' };
+    throw error;
+  }
+}
+
 export async function markRuleTriggered(builderId: string, ruleId: string): Promise<void> {
-  await withRLS(builderId, async (tx) => {
-    await tx
-      .update(rules)
-      .set({ last_triggered_at: new Date() })
-      .where(and(eq(rules.id, ruleId), eq(rules.builder_id, builderId)));
-  });
+  const outcome = await markRuleTriggeredWithProductAccess(builderId, ruleId);
+  if (outcome.kind === 'access_denied') {
+    throw new ProductAccessMutationDeniedError(builderId);
+  }
 }
 
 // --- rule_alert_channels ---

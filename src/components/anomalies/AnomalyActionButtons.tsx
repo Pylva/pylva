@@ -8,7 +8,7 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation.js';
-import { AnomalyRecommendationAction, type AnomalyEvent } from '@pylva/shared';
+import { AnomalyRecommendationAction, type AnomalyEvent } from '@pylva/shared/rules';
 import { apiFetch } from '@/lib/dashboard/api-client';
 
 interface Props {

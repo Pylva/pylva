@@ -98,7 +98,7 @@ describe('GET /api/portal/overview — visibility_level gating', () => {
         {
           error: {
             code: ErrorCode.FEATURE_NOT_AVAILABLE,
-            message: 'portal is not available on the free tier',
+            message: 'Workspace access is suspended; reactivate billing to continue',
           },
         },
         { status: 403 },

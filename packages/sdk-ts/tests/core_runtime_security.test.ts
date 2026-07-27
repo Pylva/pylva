@@ -207,6 +207,7 @@ describe('canonical core runtime security boundary', () => {
       expect(url).toBe(`https://self-host.test/base${path}`);
       expect(requestInit?.method).toBe(method);
       expect(new Headers(requestInit?.headers).get('X-Pylva-Key')).toBe(KEY_A);
+      expect(new Headers(requestInit?.headers).get('X-Pylva-Contract-Version')).toBe('2');
       expect(new Headers(requestInit?.headers).get('Content-Type')).toBe(
         method === 'POST' ? 'application/json' : null,
       );

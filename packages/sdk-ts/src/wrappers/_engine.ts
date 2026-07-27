@@ -11,7 +11,7 @@ import {
   type RuleWarning,
   type ReliabilityFailoverConfig,
 } from '@pylva/shared/rules';
-import { getCachedRules } from '../core/rules_cache.js';
+import { getRulesForEvaluation } from '../core/rules_cache.js';
 import { evaluatePreCall, type PreCallContext } from '../core/rules_engine.js';
 import { isActive, recordOutcome } from '../core/failover.js';
 import { attemptWithFallback } from '../core/model_routing.js';
@@ -75,7 +75,7 @@ export async function runWithEngine<T>(input: EngineRequestShape): Promise<Engin
   // maybeEnforcePreCall already warms the rules cache via ensureRulesCache.
   maybeEnforcePreCall({ customer_id: input.ctx.customer_id, estimated_usd: 0 });
 
-  const evaluation = evaluatePreCall(getCachedRules(), input.ctx);
+  const evaluation = evaluatePreCall(getRulesForEvaluation(), input.ctx);
   const failoverCfg: ReliabilityFailoverConfig | null = evaluation.failover?.cfg ?? null;
   const warnings: RuleWarning[] = [];
 

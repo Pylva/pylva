@@ -74,4 +74,32 @@ describe('context-aware dashboard actions', () => {
     click.mockRestore();
     vi.unstubAllGlobals();
   });
+
+  it('announces export failures and permits a safe retry after a network error', async () => {
+    mocks.apiFetch
+      .mockRejectedValueOnce(new Error('network unavailable'))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { message: 'Export is temporarily unavailable' } }), {
+          status: 503,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    render(<DashboardDownloadLink href="/api/v1/export/csv">Export CSV</DashboardDownloadLink>);
+
+    const exportLink = screen.getByRole('link', { name: 'Export CSV' });
+    fireEvent.click(exportLink);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Export failed. Check your connection and try again.',
+    );
+    expect(exportLink).toHaveAttribute('aria-busy', 'false');
+    expect(exportLink).toHaveAttribute('aria-disabled', 'false');
+
+    fireEvent.click(exportLink);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Export is temporarily unavailable',
+    );
+    expect(mocks.apiFetch).toHaveBeenCalledTimes(2);
+  });
 });

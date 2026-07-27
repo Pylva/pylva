@@ -9,8 +9,11 @@ describe('production onboarding — no demo data', () => {
     const src = await readFile(path.join(ROOT, 'src/lib/auth/org.ts'), 'utf8');
     expect(src).not.toContain('seed-demo-data');
     expect(src).not.toContain('seedDemoData');
-    // Explicit free-tier insert (don't rely on DB default).
-    expect(src).toMatch(/tier:\s*['"]free['"]/);
+    // New workspaces express lifecycle access explicitly without inferring a
+    // paid plan or relying on a database default.
+    expect(src).toMatch(/tier:\s*null/);
+    expect(src).toContain('BuilderAccessState.CHECKOUT_REQUIRED');
+    expect(src).toContain('EntitlementSource.SELF_HOSTED');
   });
 
   it('dashboard pages no longer pass includeDemo: true', async () => {

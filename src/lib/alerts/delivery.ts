@@ -6,7 +6,6 @@
 // alert_history is written AFTER the parallel fan-out resolves so we capture
 // the final per-channel delivery_status.
 
-import { withRLS } from '../db/rls.js';
 import { alertHistory } from '../db/schema.js';
 import { logger } from '../logger.js';
 import { schedule as scheduleBatch } from './batcher.js';
@@ -20,6 +19,11 @@ import type {
   DeliveryResult,
   DeliveryStatusByChannel,
 } from '@pylva/shared';
+import {
+  isAlertDeliveryAccessDeniedError,
+  requireAlertDeliveryAccess,
+  withAlertDeliveryAccessMutation,
+} from './entitlement-fence.js';
 
 const log = logger.child({ module: 'alerts.delivery' });
 
@@ -30,12 +34,27 @@ export interface DeliverAlertInput {
   channels: AlertChannelEntry[];
 }
 
+export type DeliverAlertOutcome =
+  { kind: 'accepted' } | { kind: 'access_denied' } | { kind: 'failed'; error: string };
+
 /**
  * Dispatch a single rule-fire. Routes each channel through the batcher; the
  * batcher calls back into dispatchNow with the coalesced payload when the
  * window closes.
  */
-export async function deliverAlert(input: DeliverAlertInput): Promise<void> {
+export async function deliverAlert(input: DeliverAlertInput): Promise<DeliverAlertOutcome> {
+  // Check before scheduling the in-memory batch. The flush path rechecks so a
+  // workspace suspended during the batching window cannot receive delivery.
+  try {
+    await requireAlertDeliveryAccess(input.builder_id);
+  } catch (error) {
+    if (isAlertDeliveryAccessDeniedError(error)) {
+      log.info({ builder_id: input.builder_id }, 'alert dropped without product access');
+      return { kind: 'access_denied' };
+    }
+    throw error;
+  }
+
   const activeChannels = input.channels.filter((c) => c.enabled);
   for (const channel of activeChannels) {
     scheduleBatch(channel, input.payload, deliverCoalescedAlert);
@@ -45,8 +64,10 @@ export async function deliverAlert(input: DeliverAlertInput): Promise<void> {
   // with an empty delivery_status so the fires-vs-deliveries discrepancy is
   // visible in the dashboard history page.
   if (activeChannels.length === 0) {
-    await writeAlertHistory(input.builder_id, input.rule_id, input.payload, {});
+    return writeAlertHistory(input.builder_id, input.rule_id, input.payload, {});
   }
+
+  return { kind: 'accepted' };
 }
 
 interface DispatchNowInput {
@@ -89,14 +110,25 @@ export async function deliverCoalescedAlert(
   }
 
   await Promise.all(
-    [...byBuilder.entries()].map(([builder_id, builderPayloads]) =>
-      dispatchNow({
+    [...byBuilder.entries()].map(async ([builder_id, builderPayloads]) => {
+      // Recheck at flush time: a batch may sit in memory for 60 seconds after
+      // the rule fired, during which the workspace can be suspended.
+      try {
+        await requireAlertDeliveryAccess(builder_id);
+      } catch (error) {
+        if (isAlertDeliveryAccessDeniedError(error)) {
+          log.info({ builder_id }, 'coalesced alert dropped without product access');
+          return;
+        }
+        throw error;
+      }
+      return dispatchNow({
         builder_id,
         rule_id: builderPayloads[0]!.rule_id,
         entry,
         payloads: builderPayloads,
-      }),
-    ),
+      });
+    }),
   );
 }
 
@@ -124,6 +156,13 @@ async function dispatchNow(input: DispatchNowInput): Promise<void> {
         break;
     }
   } catch (err) {
+    if (isAlertDeliveryAccessDeniedError(err)) {
+      log.info(
+        { builder_id: input.builder_id, channel: input.entry.channel },
+        'channel dispatch stopped by workspace lifecycle fence',
+      );
+      return;
+    }
     // Channel impl bug: log + swallow so no pending batch corrupts further fires.
     const message = err instanceof Error ? err.message : String(err);
     log.error(
@@ -145,7 +184,8 @@ async function dispatchNow(input: DispatchNowInput): Promise<void> {
   // payloads — we still write one row per dispatch to match how channels
   // deliver).
   for (const p of input.payloads) {
-    await writeAlertHistory(p.payload.builder_id, p.rule_id, p, status);
+    const outcome = await writeAlertHistory(p.payload.builder_id, p.rule_id, p, status);
+    if (outcome.kind === 'access_denied') break;
   }
 }
 
@@ -154,9 +194,9 @@ async function writeAlertHistory(
   rule_id: string,
   payload: AlertPayload,
   delivery_status: DeliveryStatusByChannel,
-): Promise<void> {
+): Promise<DeliverAlertOutcome> {
   try {
-    await withRLS(builder_id, async (tx) => {
+    await withAlertDeliveryAccessMutation(builder_id, async (tx) => {
       await tx.insert(alertHistory).values({
         builder_id,
         rule_id,
@@ -165,8 +205,14 @@ async function writeAlertHistory(
         delivery_status: delivery_status as unknown as Record<string, unknown>,
       });
     });
+    return { kind: 'accepted' };
   } catch (err) {
+    if (isAlertDeliveryAccessDeniedError(err)) {
+      log.info({ builder_id, rule_id }, 'alert_history skipped by workspace lifecycle fence');
+      return { kind: 'access_denied' };
+    }
     const message = err instanceof Error ? err.message : String(err);
     log.error({ builder_id, rule_id, error: message }, 'alert_history insert failed');
+    return { kind: 'failed', error: message };
   }
 }

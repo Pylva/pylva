@@ -72,10 +72,35 @@ export class MigrationApplyError extends Error {
 
 const MIGRATION_ADVISORY_LOCK_ARGS = [1887001718, 1835624306];
 const UNIVERSAL_API_KEY_SCOPE_MIGRATION = '048_universal_api_key_scope.sql';
-const GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION =
-  '054_general_app_runtime_owner_boundary.sql';
+const GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION = '054_general_app_runtime_owner_boundary.sql';
 const UNIVERSAL_API_KEY_BACKFILL_BATCH_SIZE = 1_000;
 const ONLINE_DDL_LOCK_TIMEOUT = '1s';
+export const REMOVE_FREE_FRESH_INSTALL_GUC = 'pylva.remove_free_fresh_install';
+const REMOVE_FREE_EXPAND_MIGRATIONS = new Set([
+  '056_workspace_access_state_expand.sql',
+  '057_hosted_workspace_entitlements.sql',
+]);
+const REMOVE_FREE_CONTRACT_MIGRATIONS = new Set([
+  '058_remove_free_plan_contract.sql',
+  '059_hosted_remove_free_contract.sql',
+]);
+const REMOVE_FREE_RESERVED_PREFIX = /^(056|057|058|059)_/;
+
+export interface RemoveFreeMigrationApprovals {
+  expand: boolean;
+  contract: boolean;
+}
+
+export interface RemoveFreeMigrationPolicy {
+  approvals: RemoveFreeMigrationApprovals;
+  phase?: MigrationPhase;
+  /**
+   * This is not the CLI flag by itself. Callers may set it only after proving,
+   * under the migration advisory lock, that the database contains no builder
+   * rows and that its ledger is a clean contiguous manifest prefix.
+   */
+  freshInstallAuthorized: boolean;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -292,6 +317,120 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+export function isRemoveFreeReservedMigration(filename: string): boolean {
+  return REMOVE_FREE_RESERVED_PREFIX.test(filename);
+}
+
+/**
+ * The remove-Free migrations are intentionally split into two independently
+ * approved deployment windows. Normal upgrades must select exactly one window
+ * with its matching phase. A caller may bypass that separation only after it
+ * has independently authorized a truly empty fresh installation.
+ */
+export function removeFreeApprovalError(
+  pendingFilenames: string[],
+  approvals: RemoveFreeMigrationApprovals,
+  opts?: { phase?: MigrationPhase; freshInstallAuthorized?: boolean },
+): string | null {
+  const unknownReservedMigration = pendingFilenames.find(
+    (filename) =>
+      isRemoveFreeReservedMigration(filename) &&
+      !REMOVE_FREE_EXPAND_MIGRATIONS.has(filename) &&
+      !REMOVE_FREE_CONTRACT_MIGRATIONS.has(filename),
+  );
+  if (unknownReservedMigration !== undefined) {
+    return `unrecognized remove-Free migration in reserved rollout window: ${unknownReservedMigration}`;
+  }
+
+  const needsExpandApproval = pendingFilenames.some((filename) =>
+    REMOVE_FREE_EXPAND_MIGRATIONS.has(filename),
+  );
+  const needsContractApproval = pendingFilenames.some((filename) =>
+    REMOVE_FREE_CONTRACT_MIGRATIONS.has(filename),
+  );
+
+  if (opts?.freshInstallAuthorized === true) {
+    if (opts.phase !== undefined) {
+      return '--fresh-install cannot be combined with a phased migration run';
+    }
+    if (approvals.expand || approvals.contract) {
+      return '--fresh-install cannot be combined with remove-Free rollout approval flags';
+    }
+    return null;
+  }
+
+  if (needsExpandApproval && needsContractApproval) {
+    return (
+      'remove-Free expand and contract migrations cannot run in one upgrade invocation; ' +
+      'apply the expand window with --phase pre_roll, drain old writers, then apply the ' +
+      'contract window in a separate --phase post_roll invocation'
+    );
+  }
+
+  if (needsExpandApproval && opts?.phase !== 'pre_roll') {
+    return 'remove-Free expand migrations require an explicit --phase pre_roll invocation';
+  }
+  if (needsContractApproval && opts?.phase !== 'post_roll') {
+    return 'remove-Free contract migrations require an explicit --phase post_roll invocation';
+  }
+  if (needsExpandApproval && !approvals.expand) {
+    return (
+      'remove-Free expand migrations are pending; verify the expand preflight artifact, then ' +
+      'rerun with --phase pre_roll --approve-remove-free-expand'
+    );
+  }
+  if (needsContractApproval && !approvals.contract) {
+    return (
+      'remove-Free contract migrations are pending; verify the post-roll zero-Free/no-writer ' +
+      'artifact, then rerun with --phase post_roll --approve-remove-free-contract'
+    );
+  }
+  if (approvals.expand && !needsExpandApproval) {
+    return (
+      '--approve-remove-free-expand was supplied, but no exact remove-Free expand migration ' +
+      'is pending in the selected apply set'
+    );
+  }
+  if (approvals.contract && !needsContractApproval) {
+    return (
+      '--approve-remove-free-contract was supplied, but no exact remove-Free contract migration ' +
+      'is pending in the selected apply set'
+    );
+  }
+  return null;
+}
+
+/**
+ * A fresh-install retry may have already committed an initial migration
+ * prefix. It is safe to resume only when there are no customer workspaces and
+ * the ledger contains exactly a prefix of the checked-in manifest.
+ */
+export function freshInstallStateError(
+  files: Array<{ filename: string }>,
+  ledger: LedgerRow[],
+  builderRowsExist: boolean,
+): string | null {
+  if (builderRowsExist) {
+    return '--fresh-install requires zero rows in builders';
+  }
+
+  const applied = new Set(ledger.map((row) => row.filename));
+  let encounteredMissing = false;
+  for (const file of [...files].sort(compareFilename)) {
+    if (!applied.has(file.filename)) {
+      encounteredMissing = true;
+      continue;
+    }
+    if (encounteredMissing) {
+      return (
+        '--fresh-install requires schema_migrations to be a contiguous manifest prefix; ' +
+        `found applied migration after a gap: ${file.filename}`
+      );
+    }
+  }
+  return null;
+}
+
 export function logDrift(status: MigrationStatus, error: (line: string) => void): void {
   error('migration ledger drift detected; refusing to apply');
   for (const item of status.drift) {
@@ -362,7 +501,20 @@ export function pendingMigrationFilesForPhase(
     return firstPostRoll < 0 ? pendingFiles : pendingFiles.slice(0, firstPostRoll);
   }
 
-  return firstPostRoll < 0 ? [] : pendingFiles.slice(firstPostRoll);
+  if (firstPostRoll < 0) {
+    return [];
+  }
+
+  const postRollSuffix = pendingFiles.slice(firstPostRoll);
+  const nextProtectedExpand = postRollSuffix.findIndex((file) =>
+    REMOVE_FREE_EXPAND_MIGRATIONS.has(file.filename),
+  );
+  // A database upgrading from an older post-roll boundary (for example 048)
+  // must be able to reach the schema immediately before remove-Free without
+  // accidentally entering its independently approved expand window. Ordinary
+  // post-roll behavior still owns the full suffix; only the protected 056/057
+  // boundary truncates it.
+  return nextProtectedExpand <= 0 ? postRollSuffix : postRollSuffix.slice(0, nextProtectedExpand);
 }
 
 /**
@@ -448,6 +600,108 @@ export async function readLedger(sql: MigrateSqlClient): Promise<LedgerRow[]> {
 export async function buildersTableExists(sql: MigrateSqlClient): Promise<boolean> {
   const rows = await sql.unsafe(`SELECT to_regclass('public.builders') AS regclass`);
   return hasRegclass(rows);
+}
+
+export async function buildersContainRows(sql: MigrateSqlClient): Promise<boolean> {
+  if (!(await buildersTableExists(sql))) {
+    return false;
+  }
+  const rows = await sql.unsafe(`SELECT EXISTS (SELECT 1 FROM builders LIMIT 1) AS has_builders`);
+  const value = rows[0]?.['has_builders'];
+  if (typeof value !== 'boolean') {
+    throw new Error('Expected builders existence probe to return a boolean');
+  }
+  return value;
+}
+
+export async function freshInstallPrincipalError(
+  sql: MigrateSqlClient,
+): Promise<string | null> {
+  const rows = await sql.unsafe(`
+SELECT current_user::text AS current_user_name,
+       session_user::text AS session_user_name,
+       role.rolcanlogin AS can_login,
+       role.rolcreaterole AS can_create_role,
+       role.rolsuper AS is_superuser,
+       role.rolbypassrls AS bypasses_rls,
+       role.rolreplication AS can_replicate,
+       (database.datdba = role.oid) AS owns_current_database
+FROM pg_catalog.pg_roles AS role
+JOIN pg_catalog.pg_database AS database
+  ON database.datname = current_database()
+WHERE role.rolname = current_user`);
+  const row = rows[0];
+  if (!row) {
+    return '--fresh-install could not attest the migration principal';
+  }
+
+  const currentUser = row['current_user_name'];
+  const sessionUser = row['session_user_name'];
+  const booleanFields = [
+    'can_login',
+    'can_create_role',
+    'is_superuser',
+    'bypasses_rls',
+    'can_replicate',
+    'owns_current_database',
+  ] as const;
+  if (
+    typeof currentUser !== 'string' ||
+    typeof sessionUser !== 'string' ||
+    booleanFields.some((field) => typeof row[field] !== 'boolean')
+  ) {
+    throw new Error('Fresh-install migration-principal attestation returned malformed data');
+  }
+
+  const failures: string[] = [];
+  if (currentUser !== sessionUser) failures.push('current_user must equal session_user');
+  if (row['can_login'] !== true) failures.push('principal must be LOGIN');
+  if (row['can_create_role'] !== true) failures.push('principal must have CREATEROLE');
+  if (row['is_superuser'] !== false) failures.push('principal must be NOSUPERUSER');
+  if (row['bypasses_rls'] !== false) failures.push('principal must be NOBYPASSRLS');
+  if (row['can_replicate'] !== false) failures.push('principal must be NOREPLICATION');
+  if (row['owns_current_database'] !== true) {
+    failures.push('principal must own current_database()');
+  }
+  return failures.length === 0
+    ? null
+    : `--fresh-install migration principal is unsafe: ${failures.join('; ')}`;
+}
+
+export type FreshInstallLedgerPreparation =
+  | {
+      authorized: true;
+      ledger: LedgerRow[];
+    }
+  | {
+      authorized: false;
+      error: string;
+    };
+
+/**
+ * Prove a fresh install is both empty and running as the deliberately scoped
+ * migration owner before creating the migration ledger. Keeping this shared
+ * prevents db:migrate and db:setup from drifting into different bootstrap
+ * safety postures.
+ */
+export async function prepareFreshInstallLedger(
+  sql: MigrateSqlClient,
+  files: Array<{ filename: string }>,
+  hasLedger: boolean,
+): Promise<FreshInstallLedgerPreparation> {
+  const principalError = await freshInstallPrincipalError(sql);
+  if (principalError !== null) {
+    return { authorized: false, error: principalError };
+  }
+
+  const ledger = hasLedger ? await readLedger(sql) : [];
+  const stateError = freshInstallStateError(files, ledger, await buildersContainRows(sql));
+  if (stateError !== null) {
+    return { authorized: false, error: stateError };
+  }
+
+  await ensureLedger(sql);
+  return { authorized: true, ledger };
 }
 
 function backfillCount(row: Record<string, unknown> | undefined): number {
@@ -625,6 +879,7 @@ export async function applyPending(opts: {
   ledger: LedgerRow[];
   appliedBy: 'db:migrate' | 'db:setup';
   phase?: MigrationPhase;
+  removeFreePolicy: RemoveFreeMigrationPolicy;
   lockTimeout?: string;
   log?: (line: string) => void;
 }): Promise<{ appliedCount: number }> {
@@ -635,6 +890,14 @@ export async function applyPending(opts: {
     opts.phase === undefined
       ? status.pending
       : pendingMigrationFilesForPhase(status, opts.files, opts.phase).map((file) => file.filename);
+  const policyError = removeFreeApprovalError(
+    pending,
+    opts.removeFreePolicy.approvals,
+    opts.removeFreePolicy,
+  );
+  if (policyError !== null) {
+    throw new Error(`Refusing remove-Free migration apply: ${policyError}`);
+  }
   let appliedCount = 0;
 
   for (const filename of pending) {
@@ -654,6 +917,18 @@ export async function applyPending(opts: {
       await opts.sql.begin(async (tx) => {
         const fileLockTimeout = onlineMigrationLockTimeout(file.filename) ?? lockTimeout;
         await tx.unsafe(`SET LOCAL lock_timeout = '${fileLockTimeout}'`);
+        // Custom PostgreSQL settings can be inherited from ALTER ROLE,
+        // ALTER DATABASE, or PGOPTIONS. Always override the fresh-install
+        // attestation inside this transaction so ambient configuration can
+        // never make an ordinary upgrade look like an authorized empty
+        // bootstrap to migrations 057/059.
+        await tx.unsafe(
+          'SELECT pg_catalog.set_config($1, $2, true)',
+          [
+            REMOVE_FREE_FRESH_INSTALL_GUC,
+            opts.removeFreePolicy.freshInstallAuthorized ? 'on' : 'off',
+          ],
+        );
         await finalizeOnlineMigration(tx, file.filename);
         await tx.unsafe(file.content);
         elapsedMs = Date.now() - startedAt;
@@ -679,6 +954,14 @@ export async function recordBaseline(opts: {
   files: MigrationFile[];
   log?: (line: string) => void;
 }): Promise<{ recordedCount: number }> {
+  const protectedMigration = opts.files.find((file) =>
+    isRemoveFreeReservedMigration(file.filename),
+  );
+  if (protectedMigration !== undefined) {
+    throw new Error(
+      `Refusing to baseline protected remove-Free migration ${protectedMigration.filename}`,
+    );
+  }
   await opts.sql.begin(async (tx) => {
     for (const file of opts.files) {
       await tx.unsafe(

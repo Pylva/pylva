@@ -9,11 +9,15 @@ import { NextResponse, type NextRequest } from 'next/server.js';
 import * as v from 'valibot';
 import { and, desc, eq, ilike } from 'drizzle-orm';
 import { readBuilderContextFromDashboard } from '@/lib/auth/builder-context';
-import { checkCustomerLimitInTransaction, tierUsageHeader } from '@/lib/auth/tier-enforcement';
-import { getBuilderTierForShare, lockCustomerLimit } from '@/lib/db/advisory-locks';
+import {
+  checkCustomerLimitAgainstLimitInTransaction,
+  tierUsageHeader,
+} from '@/lib/auth/tier-enforcement';
+import { getBuilderEntitlementForShare, lockCustomerLimit } from '@/lib/db/advisory-locks';
+import { limitsForEntitlement } from '@/lib/auth/workspace-limits';
 import { withRLS } from '@/lib/db/rls';
 import { customers } from '@/lib/db/schema';
-import { notFoundError, validationError } from '@/lib/errors';
+import { forbiddenError, internalError, notFoundError, validationError } from '@/lib/errors';
 import { getCustomerCostSummary } from '@/lib/clickhouse/dashboard-queries';
 import { parseRange } from '../costs/route';
 import { logger } from '@/lib/logger';
@@ -137,9 +141,19 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   const result = await withRLS(ctx.builderId, async (tx) => {
     await lockCustomerLimit(tx, ctx.builderId);
-    const freshTier = await getBuilderTierForShare(tx, ctx.builderId);
-    if (freshTier === null) {
-      return { builderMissing: true as const };
+    const entitlementResolution = await getBuilderEntitlementForShare(tx, ctx.builderId);
+    if (entitlementResolution === null) {
+      return { entitlementFailure: 'not_found' as const };
+    }
+    if (!entitlementResolution.ok) {
+      return { entitlementFailure: 'invalid' as const };
+    }
+    if (!entitlementResolution.entitlement.has_product_access) {
+      return { entitlementFailure: 'inactive' as const };
+    }
+    const limits = limitsForEntitlement(entitlementResolution.entitlement);
+    if (limits === null) {
+      return { entitlementFailure: 'invalid' as const };
     }
 
     const existingRows = await tx
@@ -154,9 +168,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       .limit(1);
     const customerExists = existingRows.length > 0;
 
-    const customerLimit = await checkCustomerLimitInTransaction(tx, ctx.builderId, freshTier);
+    const customerLimit = await checkCustomerLimitAgainstLimitInTransaction(
+      tx,
+      ctx.builderId,
+      limits.max_customers,
+    );
     if (!customerExists && !customerLimit.allowed) {
-      return { builderMissing: false as const, customerLimit, inserted: null };
+      return {
+        entitlementFailure: null,
+        customerLimit,
+        inserted: null,
+      };
     }
 
     const rows = await tx
@@ -173,15 +195,21 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       })
       .returning({ id: customers.id, external_id: customers.external_id });
     return {
-      builderMissing: false as const,
+      entitlementFailure: null,
       customerLimit,
       inserted: rows[0]!,
       customerExists,
     };
   });
 
-  if (result.builderMissing) {
+  if (result.entitlementFailure === 'not_found') {
     return notFoundError(ErrorCode.RESOURCE_NOT_FOUND, 'Builder not found');
+  }
+  if (result.entitlementFailure === 'invalid') {
+    return internalError('Workspace entitlement configuration is invalid');
+  }
+  if (result.entitlementFailure === 'inactive') {
+    return forbiddenError(ErrorCode.FEATURE_NOT_AVAILABLE, 'Workspace access is unavailable');
   }
 
   if (result.inserted === null) {

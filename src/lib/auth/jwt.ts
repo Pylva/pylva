@@ -1,14 +1,22 @@
 // JWT auth via jose — Decision #4
 // RS256, dev: file keys, prod: KMS key IDs
 // Sliding window refresh at 50% token lifetime — Decision #10
-// B2a: dashboard JWTs carry user_id + role + tier claims. refreshJwtIfNeeded
-// preserves them on rotation.
+// Dashboard JWTs carry user + role plus informational plan/access claims.
+// Authorization must still resolve current entitlement from PostgreSQL.
 
 import { SignJWT, jwtVerify, importPKCS8, importSPKI, type CryptoKey, type KeyObject } from 'jose';
 import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
 import { env } from '../config.js';
-import { JwtAudience, type Role } from '@pylva/shared';
+import {
+  BuilderAccessState,
+  isBuilderAccessState,
+  isBuilderPlan,
+  JwtAudience,
+  type BuilderAccessState as BuilderAccessStateValue,
+  type BuilderPlan,
+  type Role,
+} from '@pylva/shared';
 import { ensureRedisCommandClient, redisClient } from '../redis/client.js';
 import { revocationBreaker } from '../redis/circuit-breaker.js';
 
@@ -37,12 +45,15 @@ export interface SignJwtOptions {
   expiresIn?: string;
   /** Stable revocation family shared by every sliding refresh of one session. */
   session_id?: string;
-  // B2a: dashboard tokens carry user identity + role + tier.
+  // Dashboard tokens carry user identity plus informational entitlement data.
   user_id?: string;
   /** Active dashboard organization; additive for legacy-token compatibility. */
   org_slug?: string;
   role?: Role;
-  tier?: string;
+  plan?: BuilderPlan | null;
+  access_state?: BuilderAccessStateValue;
+  /** @deprecated Compatibility alias emitted only for an active paid plan. */
+  tier?: BuilderPlan;
   // Customer-id for portal audience; retained for B3.
   customer_id?: string;
   additionalClaims?: Record<string, unknown>;
@@ -54,19 +65,73 @@ const DEFAULT_EXPIRATION: Record<string, string> = {
   [JwtAudience.WEBSOCKET]: '1h',
 };
 
+const RESERVED_JWT_CLAIMS = new Set([
+  'access_state',
+  'aud',
+  'builder_id',
+  'customer_id',
+  'exp',
+  'iat',
+  'iss',
+  'jti',
+  'nbf',
+  'org_slug',
+  'plan',
+  'role',
+  'sid',
+  'sub',
+  'tier',
+  'user_id',
+]);
+
 export async function signJwt(options: SignJwtOptions): Promise<string> {
+  for (const claim of Object.keys(options.additionalClaims ?? {})) {
+    if (RESERVED_JWT_CLAIMS.has(claim)) {
+      throw new Error(`additionalClaims cannot override reserved JWT claim: ${claim}`);
+    }
+  }
+
+  const hasEntitlementClaims =
+    options.plan !== undefined || options.access_state !== undefined || options.tier !== undefined;
+  if (hasEntitlementClaims && (options.plan === undefined || options.access_state === undefined)) {
+    throw new Error('Dashboard entitlement claims require both plan and access_state');
+  }
+  if (options.plan !== undefined && options.plan !== null && !isBuilderPlan(options.plan)) {
+    throw new Error('Dashboard token plan claim is invalid');
+  }
+  if (options.access_state !== undefined && !isBuilderAccessState(options.access_state)) {
+    throw new Error('Dashboard token access_state claim is invalid');
+  }
+  if (
+    options.tier !== undefined &&
+    (options.access_state !== BuilderAccessState.ACTIVE ||
+      options.plan === null ||
+      options.tier !== options.plan)
+  ) {
+    throw new Error('Deprecated tier claim must match an active paid plan');
+  }
+  if (
+    options.plan !== undefined &&
+    options.plan !== null &&
+    options.access_state !== BuilderAccessState.ACTIVE
+  ) {
+    throw new Error('A non-active dashboard token cannot carry a paid plan');
+  }
+
   const privateKey = await getPrivateKey();
   const jti = crypto.randomUUID();
   const expiresIn = options.expiresIn ?? DEFAULT_EXPIRATION[options.audience] ?? '24h';
 
   const claims: Record<string, unknown> = {
+    ...options.additionalClaims,
     builder_id: options.builder_id,
     ...(options.user_id ? { user_id: options.user_id } : {}),
     ...(options.org_slug ? { org_slug: options.org_slug } : {}),
     ...(options.role ? { role: options.role } : {}),
-    ...(options.tier ? { tier: options.tier } : {}),
+    ...(options.plan !== undefined ? { plan: options.plan } : {}),
+    ...(options.access_state !== undefined ? { access_state: options.access_state } : {}),
+    ...(options.tier !== undefined ? { tier: options.tier } : {}),
     ...(options.customer_id ? { customer_id: options.customer_id } : {}),
-    ...options.additionalClaims,
     // Keep the JWT ID unique per token while giving every refresh branch one
     // stable revocation identity. Without this, two refreshes of a stolen
     // cookie mint unrelated jtis and logout can revoke only one branch.
@@ -95,6 +160,9 @@ export interface VerifyJwtResult {
   user_id?: string;
   org_slug?: string;
   role?: Role;
+  plan?: BuilderPlan | null;
+  access_state?: BuilderAccessStateValue;
+  /** @deprecated Compatibility claim from the staged plan migration. */
   tier?: string;
   customer_id?: string;
   [key: string]: unknown;
@@ -136,9 +204,9 @@ export async function revokeJwt(
 
 /**
  * Sliding-window refresh — Decision #10.
- * B2a: preserves user_id + role + tier + customer_id claims on rotation so
- * the refreshed token still carries org context (critical when the original
- * claims are user/role-aware).
+ * Preserves validated informational entitlement claims on rotation. Legacy
+ * tokens that carry only `tier` deliberately lose that stale claim; middleware
+ * reloads authoritative entitlement state before authorizing product access.
  */
 export async function refreshJwtIfNeeded(payload: VerifyJwtResult): Promise<string | null> {
   const now = Math.floor(Date.now() / 1000);
@@ -156,7 +224,14 @@ export async function refreshJwtIfNeeded(payload: VerifyJwtResult): Promise<stri
     ...(payload.user_id ? { user_id: payload.user_id } : {}),
     ...(payload.org_slug ? { org_slug: payload.org_slug } : {}),
     ...(payload.role ? { role: payload.role } : {}),
-    ...(payload.tier ? { tier: payload.tier } : {}),
+    ...(payload.plan !== undefined ? { plan: payload.plan } : {}),
+    ...(payload.access_state !== undefined ? { access_state: payload.access_state } : {}),
+    ...(payload.plan !== null &&
+    payload.plan !== undefined &&
+    payload.access_state === BuilderAccessState.ACTIVE &&
+    isBuilderPlan(payload.tier)
+      ? { tier: payload.tier }
+      : {}),
     ...(payload.customer_id ? { customer_id: payload.customer_id } : {}),
   });
 }

@@ -16,6 +16,7 @@ from typing import Literal
 
 import httpx
 
+from .._version import API_CONTRACT_VERSION
 from .config import get_config, get_config_generation
 
 LRU_MAX = 50_000
@@ -420,7 +421,11 @@ def _run_sync_now(expected_epoch: int, expected_config_generation: int) -> None:
                 try:
                     resp = client.post(
                         f"{cfg.endpoint}/api/v1/budget/sync",
-                        headers={"X-Pylva-Key": cfg.api_key, "Content-Type": "application/json"},
+                        headers={
+                            "X-Pylva-Key": cfg.api_key,
+                            "X-Pylva-Contract-Version": API_CONTRACT_VERSION,
+                            "Content-Type": "application/json",
+                        },
                         json={"entries": batch},
                     )
                     if not resp.is_success:

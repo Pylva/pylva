@@ -16,7 +16,12 @@ import {
 } from '../../src/lib/budget-control/http-handler.js';
 import { createBudgetLifecycleService } from '../../src/lib/budget-control/lifecycle-service.js';
 import { createReserveBudgetUsage } from '../../src/lib/budget-control/reservation-service.js';
-import { applyMigrationsThrough, createScratchDb, type ScratchDb } from '../helpers/scratch-db.js';
+import {
+  applyMigrationsThrough,
+  createScratchDb,
+  installWorkspaceLifecycleFixtureColumns,
+  type ScratchDb,
+} from '../helpers/scratch-db.js';
 
 const SDK_IDENTITY = { sdkVersion: '1.2.0', sdkLanguage: 'typescript' as const };
 const SDK_KEY = `pv_live_aabbccdd_${'a'.repeat(32)}`;
@@ -68,10 +73,12 @@ async function withBuilder<T>(
 async function seedControlledBuilder(limitUsd: string): Promise<BuilderFixture> {
   const suffix = crypto.randomBytes(6).toString('hex');
   const builders = await db()<{ id: string }[]>`
-    INSERT INTO public.builders (email, name, tier, slug)
+    INSERT INTO public.builders (
+      email, name, tier, slug, access_state, entitlement_source
+    )
     VALUES (
       ${`tavily-pricing-${suffix}@example.com`}, 'Tavily pricing integration', 'pro',
-      ${`tavily-pricing-${suffix}`}
+      ${`tavily-pricing-${suffix}`}, 'active', 'admin'
     )
     RETURNING id::TEXT AS id
   `;
@@ -297,6 +304,7 @@ beforeAll(async () => {
   scratch = await createScratchDb({ prefix: 'budget_tavily_pricing' });
   try {
     await applyMigrationsThrough(scratch, '051');
+    await installWorkspaceLifecycleFixtureColumns(scratch);
   } catch (error) {
     await scratch.drop();
     scratch = undefined;

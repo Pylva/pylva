@@ -5,10 +5,7 @@ import {
   BUDGET_CONTROL_SCHEMA_VERSION,
   BudgetReleaseReason,
   ErrorCode,
-  billingRetentionDays,
-  isBuilderTier,
-  telemetryRetentionDays,
-  RETENTION_FALLBACK_DAYS,
+  resolveBuilderEntitlement,
   type CommitUsageResponse,
   type ExtendUsageRequest,
   type ExtendUsageResponse,
@@ -16,6 +13,11 @@ import {
   type ReleaseUsageRequest,
   type ReleaseUsageResponse,
 } from '@pylva/shared';
+import {
+  limitsForEntitlement,
+  retentionStampForLimits,
+  type RetentionStamp,
+} from '../auth/workspace-limits.js';
 import type { BudgetControlSdkIdentity } from './sdk-identity.js';
 import {
   priceAuthoritativeUsage,
@@ -54,7 +56,7 @@ interface JsonObject {
 }
 
 interface LockedReservation {
-  billingTier: string;
+  retention: RetentionStamp;
   costSourceSlug: string | null;
   customerId: string;
   decisionId: string;
@@ -408,7 +410,9 @@ async function lockReservation(
 ): Promise<LockedReservation | null> {
   const rows = await transaction<
     {
-      billing_tier: string;
+      billing_plan: unknown;
+      billing_access_state: unknown;
+      billing_entitlement_source: unknown;
       cost_source_slug: string | null;
       customer_id: string;
       decision_id: string;
@@ -432,7 +436,9 @@ async function lockReservation(
       trace_id: string;
     }[]
   >`
-    SELECT builder.tier AS billing_tier,
+    SELECT builder.tier AS billing_plan,
+           builder.access_state AS billing_access_state,
+           builder.entitlement_source AS billing_entitlement_source,
            reservation.cost_source_slug,
            reservation.customer_id,
            reservation.decision_id,
@@ -474,8 +480,13 @@ async function lockReservation(
   ) {
     throw integrityFailure('Held reservation is missing authoritative lifecycle or pricing data');
   }
+  const retention = retentionForEntitlement({
+    plan: row.billing_plan,
+    access_state: row.billing_access_state,
+    entitlement_source: row.billing_entitlement_source,
+  });
   return {
-    billingTier: row.billing_tier,
+    retention,
     costSourceSlug: row.cost_source_slug,
     customerId: row.customer_id,
     decisionId: row.decision_id,
@@ -689,14 +700,20 @@ async function expireIfDue(
   };
 }
 
-function retentionForTier(tier: string): { billing: number; telemetry: number } {
-  if (!isBuilderTier(tier)) {
-    return { billing: RETENTION_FALLBACK_DAYS, telemetry: RETENTION_FALLBACK_DAYS };
+function retentionForEntitlement(input: {
+  plan: unknown;
+  access_state: unknown;
+  entitlement_source: unknown;
+}): RetentionStamp {
+  const resolution = resolveBuilderEntitlement(input);
+  if (!resolution.ok || !resolution.entitlement.has_product_access) {
+    throw integrityFailure('Workspace entitlement cannot stamp authoritative usage retention');
   }
-  return {
-    billing: billingRetentionDays(tier),
-    telemetry: telemetryRetentionDays(tier),
-  };
+  const limits = limitsForEntitlement(resolution.entitlement);
+  if (limits === null) {
+    throw integrityFailure('Workspace entitlement has no limits in this deployment mode');
+  }
+  return retentionStampForLimits(limits);
 }
 
 async function commitWithinTransaction(
@@ -840,7 +857,7 @@ async function commitWithinTransaction(
   `;
   const budgetExceededAfterCommit = budgetRows[0]?.exceeded ?? false;
 
-  const retention = retentionForTier(reservation.billingTier);
+  const retention = reservation.retention;
   const usageId = randomUUID();
   const costEventId = randomUUID();
   const metadata = reservation.kind === 'llm' ? { token_count_source: 'exact' } : {};
@@ -875,10 +892,10 @@ async function commitWithinTransaction(
       ${pgJsonbParameterText(jsonValue(requestSnapshot))}::TEXT::JSONB, ${requestHash},
       ${reservation.kind === 'llm' ? 'auto' : 'configured'},
       ${reservation.kind === 'llm' ? 'sdk_wrapper' : 'reported'}, FALSE,
-      ${retention.telemetry}, ${retention.billing},
+      ${retention.retention_days}, ${retention.billing_retention_days},
       ${pgJsonbParameterText(jsonValue(metadata))}::TEXT::JSONB,
       ${committedAt}::TIMESTAMPTZ,
-      ${committedAt}::TIMESTAMPTZ + ${retention.billing} * INTERVAL '1 day'
+      ${committedAt}::TIMESTAMPTZ + ${retention.billing_retention_days} * INTERVAL '1 day'
     )
     RETURNING id
   `;
@@ -1280,6 +1297,7 @@ export const __budgetLifecycleTesting = {
   decimalText,
   decimalUnits,
   lockAllocationAccounts,
+  retentionForEntitlement,
   isExtensionLeaseBoundaryDatabaseError,
   replayResponse,
   terminalTimestampAtOrAfterExpiry,

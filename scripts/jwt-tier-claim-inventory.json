@@ -1,0 +1,122 @@
+[
+  {
+    "kind": "producer",
+    "path": "src/app/api/v1/auth/magic/verify/route.ts",
+    "snippet": "tier: target.plan",
+    "occurrence": 1
+  },
+  {
+    "kind": "producer",
+    "path": "src/app/api/v1/auth/oauth/[provider]/callback/route.ts",
+    "snippet": "tier: target.plan",
+    "occurrence": 1
+  },
+  {
+    "kind": "producer",
+    "path": "src/app/api/v1/auth/switch-org/route.ts",
+    "snippet": "tier: target.plan",
+    "occurrence": 1
+  },
+  {
+    "kind": "producer",
+    "path": "src/app/api/v1/invites/accept/route.ts",
+    "snippet": "tier: accepted.plan",
+    "occurrence": 1
+  },
+  {
+    "kind": "read",
+    "path": "src/app/settings/keys/route.ts",
+    "snippet": "context.tier",
+    "occurrence": 1
+  },
+  {
+    "kind": "producer",
+    "path": "src/app/settings/keys/route.ts",
+    "snippet": "tier: context.plan",
+    "occurrence": 1
+  },
+  {
+    "kind": "read",
+    "path": "src/lib/auth/jwt.ts",
+    "snippet": "options.tier",
+    "occurrence": 1
+  },
+  {
+    "kind": "read",
+    "path": "src/lib/auth/jwt.ts",
+    "snippet": "options.tier",
+    "occurrence": 2
+  },
+  {
+    "kind": "read",
+    "path": "src/lib/auth/jwt.ts",
+    "snippet": "options.tier",
+    "occurrence": 3
+  },
+  {
+    "kind": "read",
+    "path": "src/lib/auth/jwt.ts",
+    "snippet": "options.tier",
+    "occurrence": 4
+  },
+  {
+    "kind": "schema",
+    "path": "src/lib/auth/jwt.ts",
+    "snippet": "tier?: string;",
+    "occurrence": 1
+  },
+  {
+    "kind": "read",
+    "path": "src/lib/auth/jwt.ts",
+    "snippet": "payload.tier",
+    "occurrence": 1
+  },
+  {
+    "kind": "producer",
+    "path": "src/lib/auth/jwt.ts",
+    "snippet": "tier: payload.tier",
+    "occurrence": 1
+  },
+  {
+    "kind": "read",
+    "path": "src/lib/auth/jwt.ts",
+    "snippet": "payload.tier",
+    "occurrence": 2
+  },
+  {
+    "kind": "schema",
+    "path": "src/lib/auth/jwt.ts",
+    "snippet": "tier?: BuilderPlan;",
+    "occurrence": 1
+  },
+  {
+    "kind": "reserved",
+    "path": "src/lib/auth/jwt.ts",
+    "snippet": "'tier'",
+    "occurrence": 1
+  },
+  {
+    "kind": "read",
+    "path": "src/lib/auth/jwt.ts",
+    "snippet": "options.tier",
+    "occurrence": 5
+  },
+  {
+    "kind": "schema",
+    "path": "src/lib/auth/middleware.ts",
+    "snippet": "tier: string | null;",
+    "occurrence": 1
+  },
+  {
+    "kind": "read",
+    "path": "src/lib/auth/middleware.ts",
+    "snippet": "payload.tier",
+    "occurrence": 1
+  },
+  {
+    "kind": "producer",
+    "path": "src/middleware.ts",
+    "snippet": "tier: resolved.plan",
+    "occurrence": 1
+  }
+]

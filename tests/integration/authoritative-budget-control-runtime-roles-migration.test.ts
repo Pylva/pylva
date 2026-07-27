@@ -107,13 +107,23 @@ async function insertBuilder(builderId: string, label: string): Promise<void> {
   await db().begin(async (transaction) => {
     await useBuilder(transaction, builderId);
     await transaction`
-      INSERT INTO public.builders (id, email, name, tier, slug)
+      INSERT INTO public.builders (
+        id,
+        email,
+        name,
+        tier,
+        slug,
+        access_state,
+        entitlement_source
+      )
       VALUES (
         ${builderId}::UUID,
         ${`${label}@projection-discovery.example`},
         ${label},
         'pro',
-        ${`projection-discovery-${label}`}
+        ${`projection-discovery-${label}`},
+        'active',
+        'admin'
       )
     `;
   });
@@ -598,6 +608,62 @@ beforeAll(async () => {
     );
     await db().begin((transaction) => transaction.unsafe(compatibilityMigrationSql));
 
+    // The role migration is intentionally tested at its original 052/053
+    // boundary, including legacy-owner writes that migration 056 later closes.
+    // Current runtime code nevertheless reads the additive workspace lifecycle
+    // tuple and its attestation requires the narrowed post-056 builders ACL.
+    // Reproduce exactly that structural/ACL postcondition in this disposable
+    // fixture without applying the later no-Free contract being tested
+    // independently by workspace-access-state-migrations.test.ts.
+    await db().unsafe(`
+      ALTER TABLE public.builders
+        ADD COLUMN access_state VARCHAR(32),
+        ADD COLUMN entitlement_source VARCHAR(32);
+
+      REVOKE ALL PRIVILEGES ON TABLE public.builders
+        FROM ${RUNTIME_ROLE};
+
+      DO $runtime_builder_column_acl_reset$
+      DECLARE
+        grant_row RECORD;
+      BEGIN
+        FOR grant_row IN
+          SELECT privilege.privilege_type,
+                 pg_catalog.string_agg(
+                   pg_catalog.format('%I', attribute.attname),
+                   ', ' ORDER BY attribute.attnum
+                 ) AS column_list
+          FROM pg_catalog.pg_attribute AS attribute
+          CROSS JOIN LATERAL pg_catalog.aclexplode(attribute.attacl) AS privilege
+          JOIN pg_catalog.pg_roles AS grantee
+            ON grantee.oid = privilege.grantee
+          WHERE attribute.attrelid = 'public.builders'::pg_catalog.regclass
+            AND attribute.attnum > 0
+            AND NOT attribute.attisdropped
+            AND attribute.attacl IS NOT NULL
+            AND grantee.rolname = '${RUNTIME_ROLE}'
+            AND privilege.privilege_type IN (
+              'SELECT', 'INSERT', 'UPDATE', 'REFERENCES'
+            )
+          GROUP BY privilege.privilege_type
+        LOOP
+          EXECUTE pg_catalog.format(
+            'REVOKE %s (%s) ON TABLE public.builders FROM ${RUNTIME_ROLE}',
+            grant_row.privilege_type,
+            grant_row.column_list
+          );
+        END LOOP;
+      END;
+      $runtime_builder_column_acl_reset$;
+
+      GRANT SELECT (id, tier, access_state, entitlement_source)
+        ON TABLE public.builders
+        TO ${RUNTIME_ROLE};
+      GRANT UPDATE (id)
+        ON TABLE public.builders
+        TO ${RUNTIME_ROLE};
+    `);
+
     // Fixtures exercise only discovery state. The authoritative lifecycle and
     // retention graph is covered by its dedicated suites; relax those two
     // fixture relationships only in this disposable database.
@@ -752,7 +818,7 @@ afterAll(async () => {
   await cleanup();
 });
 
-describe('authoritative budget-control runtime roles through migration 053', () => {
+describe('authoritative budget-control runtime roles through migration 053 with current lifecycle ACLs', () => {
   it('pins non-login NOBYPASSRLS owners and closed runtime ACLs', async () => {
     const [contract] = await db()<
       Array<{
@@ -1732,7 +1798,13 @@ describe('authoritative budget-control runtime roles through migration 053', () 
         AND runtime.rolname = ${RUNTIME_ROLE}
       ORDER BY relation.relname, attribute.attnum, privilege.privilege_type
     `;
-    expect(runtimeColumnGrants).toEqual([]);
+    expect(runtimeColumnGrants).toEqual([
+      { column_name: 'id', privilege: 'SELECT', table_name: 'builders' },
+      { column_name: 'id', privilege: 'UPDATE', table_name: 'builders' },
+      { column_name: 'tier', privilege: 'SELECT', table_name: 'builders' },
+      { column_name: 'access_state', privilege: 'SELECT', table_name: 'builders' },
+      { column_name: 'entitlement_source', privilege: 'SELECT', table_name: 'builders' },
+    ]);
 
     const relationPrivileges = await db()<Array<{ privileges: string[]; table_name: string }>>`
       SELECT grants.table_name,
@@ -1756,7 +1828,6 @@ describe('authoritative budget-control runtime roles through migration 053', () 
       { privileges: ['INSERT', 'SELECT', 'UPDATE'], table_name: 'budget_reservations' },
       { privileges: ['INSERT', 'SELECT', 'UPDATE'], table_name: 'budget_rule_revisions' },
       { privileges: ['INSERT', 'SELECT'], table_name: 'budget_usage_ledger' },
-      { privileges: ['SELECT'], table_name: 'builders' },
       { privileges: ['SELECT'], table_name: 'cost_sources' },
       { privileges: ['SELECT'], table_name: 'custom_pricing' },
       { privileges: ['SELECT'], table_name: 'llm_pricing' },

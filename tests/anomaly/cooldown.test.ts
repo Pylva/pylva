@@ -114,6 +114,10 @@ vi.mock('../../src/lib/rules/margin-evaluator.js', () => ({
   })),
 }));
 
+vi.mock('../../src/lib/auth/builder-entitlement.js', () => ({
+  authorizeBuilderCapability: vi.fn(async () => ({ allowed: true })),
+}));
+
 vi.mock('../../src/lib/logger.js', () => ({
   logger: { child: () => ({ warn: vi.fn(), info: vi.fn(), error: vi.fn() }) },
 }));
@@ -200,7 +204,7 @@ describe('anomaly cooldown -- first alert must not self-suppress', () => {
     store.length = 0;
     idSeq = 0;
     insertAnomalyEventMock.mockReset();
-    deliverBuilderAlertMock.mockReset().mockResolvedValue(undefined);
+    deliverBuilderAlertMock.mockReset().mockResolvedValue({ kind: 'delivered' });
     fetchPeriodAggregatesMock.mockReset();
     listBuildersWithEventsMock.mockReset();
     loadModelTierCatalogMock.mockReset();

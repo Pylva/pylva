@@ -19,6 +19,7 @@ from typing import Any, Literal, TypedDict
 
 import httpx
 
+from .._version import API_CONTRACT_VERSION
 from .config import get_config, get_config_generation
 from .telemetry import utc_now_iso
 
@@ -375,6 +376,7 @@ def flush_non_llm_discoveries() -> None:
                     headers={
                         "content-type": "application/json",
                         "X-Pylva-Key": cfg.api_key,
+                        "X-Pylva-Contract-Version": API_CONTRACT_VERSION,
                     },
                     content=json.dumps(body),
                 )
@@ -395,7 +397,10 @@ def _refresh_policy(
         with httpx.Client(timeout=5.0) as client:
             response = client.get(
                 f"{endpoint}/api/v1/sdk/non-llm-policy",
-                headers={"X-Pylva-Key": api_key},
+                headers={
+                    "X-Pylva-Key": api_key,
+                    "X-Pylva-Contract-Version": API_CONTRACT_VERSION,
+                },
             )
         if response.status_code < 200 or response.status_code >= 300:
             _mark_policy_fetch_failed_if_current(

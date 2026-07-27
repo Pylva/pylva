@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { pathToFileURL } from 'node:url';
@@ -6,9 +7,29 @@ import { pathToFileURL } from 'node:url';
 import {
   commandWithClickHouseRetry,
   isMainModule,
+  parseSetupArgs,
+  runPostgresSetupMigrations,
   shouldSkipClickhouse,
   shouldSkipPostgres,
 } from '../../db/setup.js';
+import {
+  createRecordingSqlClient,
+  type FreshInstallPrincipal,
+} from '../_helpers/migration-sql-mock.js';
+import { REMOVE_FREE_FRESH_INSTALL_GUC } from '../../scripts/db-migrate-core.js';
+
+describe('parseSetupArgs', () => {
+  it('requires an explicit, singular fresh-install mode', () => {
+    expect(parseSetupArgs([])).toEqual({ freshInstall: false });
+    expect(parseSetupArgs(['--fresh-install'])).toEqual({ freshInstall: true });
+    expect(() => parseSetupArgs(['--fresh-install', '--fresh-install'])).toThrow(
+      'can only be specified once',
+    );
+    expect(() => parseSetupArgs(['--approve-remove-free-expand'])).toThrow(
+      'Unknown db:setup argument',
+    );
+  });
+});
 
 describe('shouldSkipClickhouse', () => {
   it('skips when SKIP_CLICKHOUSE=true regardless of URL', () => {
@@ -125,9 +146,110 @@ describe('PostgreSQL migration delegation', () => {
     const source = await fs.readFile(path.resolve('db/setup.ts'), 'utf8');
 
     expect(source).toMatch(
-      /import\s+\{[\s\S]*applyPending[\s\S]*\}\s+from '\.\.\/scripts\/db-migrate-core\.js';/,
+      /import\s+\{[\s\S]*prepareFreshInstallLedger[\s\S]*\}\s+from '\.\.\/scripts\/db-migrate-core\.js';/,
     );
     expect(source).not.toMatch(/\.begin\s*\(\s*\(?\s*s\s*\)?\s*=>\s*s\.unsafe\s*\(\s*content\s*\)/);
+  });
+
+  it.each([
+    [
+      'a SET ROLE/session mismatch',
+      { sessionUserName: 'session_owner' },
+      'current_user must equal session_user',
+    ],
+    ['a NOLOGIN role', { canLogin: false }, 'principal must be LOGIN'],
+    ['a role without CREATEROLE', { canCreateRole: false }, 'principal must have CREATEROLE'],
+    ['a superuser', { isSuperuser: true }, 'principal must be NOSUPERUSER'],
+    ['a BYPASSRLS role', { bypassesRls: true }, 'principal must be NOBYPASSRLS'],
+    ['a replication role', { canReplicate: true }, 'principal must be NOREPLICATION'],
+    [
+      'a non-owner of the target database',
+      { ownsCurrentDatabase: false },
+      'principal must own current_database()',
+    ],
+  ])(
+    'refuses db:setup fresh install under %s before creating the ledger',
+    async (
+      _description,
+      principal: Partial<FreshInstallPrincipal>,
+      expectedError: string,
+    ) => {
+      const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pylva-db-setup-test-'));
+      const migrationsDir = path.join(rootDir, 'db/migrations');
+      await fs.mkdir(migrationsDir, { recursive: true });
+      await fs.writeFile(path.join(migrationsDir, '001_one.sql'), "SELECT '001';", 'utf8');
+      const recording = createRecordingSqlClient({
+        regclasses: { schema_migrations: false, builders: false },
+        freshInstallPrincipal: principal,
+      });
+      const errors: string[] = [];
+
+      try {
+        const exitCode = await runPostgresSetupMigrations(
+          { freshInstall: true },
+          {
+            sql: recording.client,
+            migrationsDir,
+            log: () => undefined,
+            error: (line) => errors.push(line),
+          },
+        );
+
+        expect(exitCode).toBe(1);
+        expect(errors.join('\n')).toContain(expectedError);
+        expect(
+          recording.calls.some((call) =>
+            call.query?.includes('CREATE TABLE IF NOT EXISTS schema_migrations'),
+          ),
+        ).toBe(false);
+        expect(recording.calls.some((call) => call.kind === 'begin.enter')).toBe(false);
+      } finally {
+        await fs.rm(rootDir, { force: true, recursive: true });
+      }
+    },
+  );
+
+  it('lets a safe db:setup fresh-install owner create the ledger only after attestation', async () => {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pylva-db-setup-test-'));
+    const migrationsDir = path.join(rootDir, 'db/migrations');
+    await fs.mkdir(migrationsDir, { recursive: true });
+    await fs.writeFile(path.join(migrationsDir, '001_one.sql'), "SELECT '001';", 'utf8');
+    const recording = createRecordingSqlClient({
+      regclasses: { schema_migrations: false, builders: false },
+    });
+
+    try {
+      const exitCode = await runPostgresSetupMigrations(
+        { freshInstall: true },
+        {
+          sql: recording.client,
+          migrationsDir,
+          log: () => undefined,
+          error: () => undefined,
+        },
+      );
+
+      expect(exitCode).toBe(0);
+      const attestationIndex = recording.calls.findIndex((call) =>
+        call.query?.includes('FROM pg_catalog.pg_roles AS role'),
+      );
+      const ledgerCreateIndex = recording.calls.findIndex((call) =>
+        call.query?.includes('CREATE TABLE IF NOT EXISTS schema_migrations'),
+      );
+      expect(attestationIndex).toBeGreaterThanOrEqual(0);
+      expect(ledgerCreateIndex).toBeGreaterThan(attestationIndex);
+      const freshAttestation = recording.calls.find(
+        (call) =>
+          call.kind === 'tx.unsafe' &&
+          call.query === 'SELECT pg_catalog.set_config($1, $2, true)',
+      );
+      expect(freshAttestation?.params).toEqual([
+        REMOVE_FREE_FRESH_INSTALL_GUC,
+        'on',
+      ]);
+    } finally {
+      await fs.rm(rootDir, { force: true, recursive: true });
+    }
   });
 });
 

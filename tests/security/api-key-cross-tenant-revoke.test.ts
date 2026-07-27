@@ -60,16 +60,30 @@ beforeAll(async () => {
   sql = postgres(DATABASE_URL);
 
   const [a] = await sql<{ id: string }[]>`
-    INSERT INTO builders (email, name, tier, slug)
-    VALUES (${`xtenant-attacker-${suffix}@test.com`}, 'Attacker A', 'free', ${`xtenant-attacker-${suffix}`})
+    INSERT INTO builders (email, name, tier, access_state, entitlement_source, slug)
+    VALUES (
+      ${`xtenant-attacker-${suffix}@test.com`},
+      'Attacker A',
+      'pro',
+      'active',
+      'admin',
+      ${`xtenant-attacker-${suffix}`}
+    )
     RETURNING id
   `;
   attackerBuilderId = a!.id;
   builderIdsToCleanup.push(attackerBuilderId);
 
   const [b] = await sql<{ id: string }[]>`
-    INSERT INTO builders (email, name, tier, slug)
-    VALUES (${`xtenant-victim-${suffix}@test.com`}, 'Victim B', 'free', ${`xtenant-victim-${suffix}`})
+    INSERT INTO builders (email, name, tier, access_state, entitlement_source, slug)
+    VALUES (
+      ${`xtenant-victim-${suffix}@test.com`},
+      'Victim B',
+      'pro',
+      'active',
+      'admin',
+      ${`xtenant-victim-${suffix}`}
+    )
     RETURNING id
   `;
   victimBuilderId = b!.id;

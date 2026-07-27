@@ -6,6 +6,7 @@ export type GeneralAppRuntimePostureReason =
   | 'ambient_access_missing'
   | 'attestation_query_failed'
   | 'authority_access_exposed'
+  | 'hosted_billing_access_invalid'
   | 'identity_mismatch'
   | 'invalid_attestation'
   | 'legacy_access_missing'
@@ -29,6 +30,7 @@ export interface GeneralAppRuntimeAttestationRow {
   ambient_access_ready: unknown;
   authority_access_denied: unknown;
   current_user_matches_login: unknown;
+  hosted_billing_access_valid: unknown;
   legacy_crud_available: unknown;
   login_direct_acl_safe: unknown;
   login_ownership_safe: unknown;
@@ -104,6 +106,7 @@ expected_runtime_relations(schema_name, relation_name, relation_kind) AS (
     ('public', 'invoices', 'r'::"char"),
     ('public', 'llm_pricing', 'r'::"char"),
     ('public', 'llm_pricing_id_seq', 'S'::"char"),
+    ('public', 'monthly_invoice_periods', 'r'::"char"),
     ('public', 'portal_access_grants', 'r'::"char"),
     ('public', 'portal_configs', 'r'::"char"),
     ('public', 'portal_domains', 'r'::"char"),
@@ -210,6 +213,340 @@ legacy_crud_relations AS (
     ]::pg_catalog.text[])
     AND relation.relkind = 'r'
 ),
+hosted_billing_relations AS (
+  SELECT relation.oid,
+         relation.relname,
+         relation.relowner,
+         relation.relrowsecurity,
+         relation.relforcerowsecurity
+  FROM pg_catalog.pg_class AS relation
+  JOIN pg_catalog.pg_namespace AS namespace
+    ON namespace.oid = relation.relnamespace
+  WHERE namespace.nspname = 'public'
+    AND relation.relkind = 'r'
+    AND relation.relname = ANY (ARRAY[
+      'builder_subscriptions',
+      'stripe_platform_event_log',
+      'stripe_price_tier_map',
+      'tier_limit_notifications'
+    ]::pg_catalog.text[])
+),
+expected_hosted_runtime_column_acl AS (
+  SELECT expected.relation_name,
+         column_name,
+         expected.privilege_type
+  FROM (VALUES
+    (
+      'stripe_price_tier_map'::pg_catalog.text,
+      ARRAY['stripe_price_id', 'tier', 'enabled', 'created_at']::pg_catalog.text[],
+      'SELECT'::pg_catalog.text
+    ),
+    (
+      'builder_subscriptions',
+      ARRAY[
+        'builder_id', 'stripe_customer_id', 'stripe_subscription_id', 'status',
+        'current_period_start', 'current_period_end', 'cancel_at_period_end',
+        'grace_expires_at', 'stripe_price_id', 'derived_tier',
+        'pending_checkout_session_id', 'pending_checkout_price_id',
+        'pending_checkout_url', 'pending_checkout_expires_at'
+      ]::pg_catalog.text[],
+      'SELECT'
+    ),
+    (
+      'builder_subscriptions',
+      ARRAY[
+        'builder_id', 'stripe_customer_id', 'stripe_subscription_id', 'status',
+        'current_period_start', 'current_period_end', 'cancel_at_period_end',
+        'grace_expires_at', 'stripe_price_id', 'derived_tier',
+        'pending_checkout_session_id', 'pending_checkout_price_id',
+        'pending_checkout_url', 'pending_checkout_expires_at'
+      ]::pg_catalog.text[],
+      'INSERT'
+    ),
+    (
+      'builder_subscriptions',
+      ARRAY[
+        'stripe_customer_id', 'stripe_subscription_id', 'status',
+        'current_period_start', 'current_period_end', 'cancel_at_period_end',
+        'grace_expires_at', 'stripe_price_id', 'derived_tier',
+        'pending_checkout_session_id', 'pending_checkout_price_id',
+        'pending_checkout_url', 'pending_checkout_expires_at', 'updated_at'
+      ]::pg_catalog.text[],
+      'UPDATE'
+    ),
+    (
+      'stripe_platform_event_log',
+      ARRAY['stripe_event_id', 'handled_at']::pg_catalog.text[],
+      'SELECT'
+    ),
+    (
+      'stripe_platform_event_log',
+      ARRAY['stripe_event_id', 'type', 'builder_id', 'received_at']::pg_catalog.text[],
+      'INSERT'
+    ),
+    (
+      'stripe_platform_event_log',
+      ARRAY['builder_id', 'handled_at']::pg_catalog.text[],
+      'UPDATE'
+    ),
+    (
+      'tier_limit_notifications',
+      ARRAY[
+        'builder_id', 'period_start', 'kind', 'tier', 'used', 'cap',
+        'window_source', 'period_end', 'attempts', 'last_attempt_at',
+        'last_error', 'created_at', 'sent_at'
+      ]::pg_catalog.text[],
+      'SELECT'
+    ),
+    (
+      'tier_limit_notifications',
+      ARRAY[
+        'builder_id', 'period_start', 'kind', 'tier', 'used', 'cap',
+        'window_source', 'period_end'
+      ]::pg_catalog.text[],
+      'INSERT'
+    ),
+    (
+      'tier_limit_notifications',
+      ARRAY['attempts', 'last_attempt_at', 'last_error', 'sent_at']::pg_catalog.text[],
+      'UPDATE'
+    )
+  ) AS expected(relation_name, columns, privilege_type)
+  CROSS JOIN LATERAL pg_catalog.unnest(expected.columns) AS column_name
+),
+actual_hosted_runtime_relation_acl AS (
+  SELECT relation.relname AS relation_name,
+         privilege.privilege_type,
+         privilege.is_grantable
+  FROM hosted_billing_relations AS hosted
+  JOIN pg_catalog.pg_class AS relation
+    ON relation.oid = hosted.oid
+  CROSS JOIN runtime_role AS runtime
+  CROSS JOIN LATERAL pg_catalog.aclexplode(relation.relacl) AS privilege
+  WHERE privilege.grantee = runtime.oid
+),
+actual_hosted_runtime_column_acl AS (
+  SELECT relation.relname AS relation_name,
+         attribute.attname AS column_name,
+         privilege.privilege_type,
+         privilege.is_grantable
+  FROM hosted_billing_relations AS hosted
+  JOIN pg_catalog.pg_class AS relation
+    ON relation.oid = hosted.oid
+  JOIN pg_catalog.pg_attribute AS attribute
+    ON attribute.attrelid = relation.oid
+   AND attribute.attnum > 0
+   AND NOT attribute.attisdropped
+  CROSS JOIN runtime_role AS runtime
+  CROSS JOIN LATERAL pg_catalog.aclexplode(attribute.attacl) AS privilege
+  WHERE privilege.grantee = runtime.oid
+),
+hosted_discovery_owner AS (
+  SELECT role.oid,
+         role.rolcanlogin,
+         role.rolinherit,
+         role.rolsuper,
+         role.rolbypassrls,
+         role.rolcreatedb,
+         role.rolcreaterole,
+         role.rolreplication
+  FROM pg_catalog.pg_roles AS role
+  WHERE role.rolname = 'pylva_hosted_billing_discovery_owner'
+),
+hosted_discovery_functions AS (
+  SELECT expected.function_oid
+  FROM (VALUES
+    (
+      pg_catalog.to_regprocedure(
+        'public.pylva_hosted_builder_for_stripe_customer(text)'
+      )::pg_catalog.oid
+    ),
+    (
+      pg_catalog.to_regprocedure(
+        'public.pylva_hosted_lapsed_subscription_candidates(timestamp with time zone,uuid,integer)'
+      )::pg_catalog.oid
+    ),
+    (
+      pg_catalog.to_regprocedure(
+        'public.pylva_hosted_notification_candidates(timestamp with time zone,timestamp with time zone,uuid,timestamp with time zone,text,integer)'
+      )::pg_catalog.oid
+    )
+  ) AS expected(function_oid)
+),
+hosted_billing_access_contract AS (
+  SELECT
+    CASE
+      WHEN (SELECT pg_catalog.count(*) FROM hosted_billing_relations) = 0
+        THEN (
+          SELECT pg_catalog.count(*) = 0
+          FROM hosted_discovery_functions
+          WHERE function_oid IS NOT NULL
+        )
+      ELSE
+        (SELECT pg_catalog.count(*) = 4 FROM hosted_billing_relations)
+        AND NOT EXISTS (
+          SELECT 1
+          FROM hosted_billing_relations AS relation
+          CROSS JOIN login_role AS login
+          CROSS JOIN runtime_role AS runtime
+          WHERE relation.relowner IN (login.oid, runtime.oid)
+        )
+        AND COALESCE((
+          SELECT pg_catalog.bool_and(
+            CASE
+              WHEN relation.relname IN (
+                'builder_subscriptions',
+                'tier_limit_notifications'
+              )
+                THEN relation.relrowsecurity AND NOT relation.relforcerowsecurity
+              ELSE NOT relation.relrowsecurity AND NOT relation.relforcerowsecurity
+            END
+          )
+          FROM hosted_billing_relations AS relation
+        ), FALSE)
+        AND NOT EXISTS (
+          SELECT 1
+          FROM pg_catalog.pg_policy AS policy
+          CROSS JOIN runtime_role AS runtime
+          WHERE runtime.oid = ANY (policy.polroles)
+            AND policy.polcmd = 'r'
+            AND pg_catalog.lower(
+              pg_catalog.pg_get_expr(policy.polqual, policy.polrelid)
+            ) = 'true'
+        )
+        AND NOT EXISTS (SELECT 1 FROM actual_hosted_runtime_relation_acl)
+        AND NOT EXISTS (
+          SELECT expected.relation_name,
+                 expected.column_name,
+                 expected.privilege_type
+          FROM expected_hosted_runtime_column_acl AS expected
+          EXCEPT
+          SELECT actual.relation_name,
+                 actual.column_name,
+                 actual.privilege_type
+          FROM actual_hosted_runtime_column_acl AS actual
+        )
+        AND NOT EXISTS (
+          SELECT actual.relation_name,
+                 actual.column_name,
+                 actual.privilege_type
+          FROM actual_hosted_runtime_column_acl AS actual
+          EXCEPT
+          SELECT expected.relation_name,
+                 expected.column_name,
+                 expected.privilege_type
+          FROM expected_hosted_runtime_column_acl AS expected
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM actual_hosted_runtime_column_acl
+          WHERE is_grantable
+        )
+        AND COALESCE((
+          SELECT pg_catalog.count(*) = 1
+             AND pg_catalog.bool_and(
+               NOT owner.rolcanlogin
+               AND NOT owner.rolinherit
+               AND NOT owner.rolsuper
+               AND NOT owner.rolbypassrls
+               AND NOT owner.rolcreatedb
+               AND NOT owner.rolcreaterole
+               AND NOT owner.rolreplication
+             )
+          FROM hosted_discovery_owner AS owner
+        ), FALSE)
+        AND (
+          SELECT pg_catalog.count(*) = 3
+             AND pg_catalog.bool_and(
+               procedure.prosecdef
+               AND procedure.provolatile = 's'
+               AND NOT procedure.proleakproof
+               AND procedure.proowner = owner.oid
+               AND pg_catalog.cardinality(procedure.proconfig) = 1
+               AND procedure.proconfig @> ARRAY[
+                 'search_path=pg_catalog'
+               ]::pg_catalog.text[]
+               AND (
+                 SELECT pg_catalog.count(*) = 2
+                    AND pg_catalog.bool_and(
+                      privilege.privilege_type = 'EXECUTE'
+                      AND NOT privilege.is_grantable
+                      AND privilege.grantee IN (
+                        procedure.proowner,
+                        runtime.oid
+                      )
+                    )
+                 FROM pg_catalog.aclexplode(
+                   COALESCE(
+                     procedure.proacl,
+                     pg_catalog.acldefault('f', procedure.proowner)
+                   )
+                 ) AS privilege
+               )
+             )
+          FROM hosted_discovery_functions AS expected
+          JOIN pg_catalog.pg_proc AS procedure
+            ON procedure.oid = expected.function_oid
+          CROSS JOIN hosted_discovery_owner AS owner
+          CROSS JOIN runtime_role AS runtime
+        )
+        AND (
+          SELECT pg_catalog.count(*) = 3
+             AND pg_catalog.bool_and(
+               policy.polcmd = 'r'
+               AND policy.polpermissive
+               AND policy.polroles = ARRAY[owner.oid]::pg_catalog.oid[]
+               AND pg_catalog.lower(
+                 pg_catalog.pg_get_expr(policy.polqual, policy.polrelid)
+               ) = 'true'
+               AND policy.polwithcheck IS NULL
+             )
+          FROM pg_catalog.pg_policy AS policy
+          JOIN pg_catalog.pg_class AS relation
+            ON relation.oid = policy.polrelid
+          JOIN pg_catalog.pg_namespace AS namespace
+            ON namespace.oid = relation.relnamespace
+          CROSS JOIN hosted_discovery_owner AS owner
+          WHERE namespace.nspname = 'public'
+            AND (
+              (
+                relation.relname = 'builders'
+                AND policy.polname = 'builders_hosted_billing_discovery'
+              )
+              OR (
+                relation.relname = 'builder_subscriptions'
+                AND policy.polname = 'builder_subscriptions_hosted_discovery'
+              )
+              OR (
+                relation.relname = 'tier_limit_notifications'
+                AND policy.polname = 'tier_limit_notifications_hosted_discovery'
+              )
+            )
+        )
+        AND (
+          SELECT pg_catalog.count(*) = 1
+             AND pg_catalog.bool_and(
+               member.rolcreaterole
+               AND NOT member.rolsuper
+               AND NOT member.rolbypassrls
+               AND edge.admin_option
+               AND NOT edge.inherit_option
+               AND NOT edge.set_option
+             )
+          FROM pg_catalog.pg_auth_members AS edge
+          JOIN pg_catalog.pg_roles AS member
+            ON member.oid = edge.member
+          CROSS JOIN hosted_discovery_owner AS owner
+          WHERE edge.roleid = owner.oid
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM pg_catalog.pg_auth_members AS edge
+          CROSS JOIN hosted_discovery_owner AS owner
+          WHERE edge.member = owner.oid
+        )
+    END AS safe
+),
 discovery_functions AS (
   SELECT
     pg_catalog.to_regprocedure(
@@ -221,6 +558,10 @@ discovery_functions AS (
 )
 SELECT
   CURRENT_USER = SESSION_USER AS current_user_matches_login,
+  COALESCE((
+    SELECT contract.safe
+    FROM hosted_billing_access_contract AS contract
+  ), FALSE) AS hosted_billing_access_valid,
   COALESCE((
     SELECT login.rolcanlogin
        AND login.rolinherit
@@ -581,6 +922,7 @@ export function evaluateGeneralAppRuntimeAttestation(
     ambientAccessReady: strictBoolean(row.ambient_access_ready),
     authorityAccessDenied: strictBoolean(row.authority_access_denied),
     currentUserMatchesLogin: strictBoolean(row.current_user_matches_login),
+    hostedBillingAccessValid: strictBoolean(row.hosted_billing_access_valid),
     legacyCrudAvailable: strictBoolean(row.legacy_crud_available),
     loginDirectAclSafe: strictBoolean(row.login_direct_acl_safe),
     loginOwnershipSafe: strictBoolean(row.login_ownership_safe),
@@ -600,6 +942,9 @@ export function evaluateGeneralAppRuntimeAttestation(
   if (!values.loginOwnershipSafe) return 'unsafe_login_ownership';
   if (!values.loginDirectAclSafe) return 'unsafe_login_acl';
   if (!values.authorityAccessDenied) return 'authority_access_exposed';
+  if (!values.hostedBillingAccessValid) {
+    return 'hosted_billing_access_invalid';
+  }
   if (!values.schemaMigrationsSelectOnly) return 'migration_ledger_access_invalid';
   if (!values.legacyCrudAvailable) return 'legacy_access_missing';
   if (!values.ambientAccessReady) return 'ambient_access_missing';

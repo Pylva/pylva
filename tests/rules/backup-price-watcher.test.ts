@@ -18,6 +18,9 @@ vi.mock('../../src/lib/alerts/builder-alert.js', () => ({
 vi.mock('../../src/lib/rules/backup-price-snapshot.js', () => ({
   fetchActiveBackupPrice: vi.fn(),
 }));
+vi.mock('../../src/lib/auth/builder-entitlement.js', () => ({
+  authorizeBuilderCapability: vi.fn(),
+}));
 vi.mock('../../src/lib/logger.js', () => ({
   logger: { child: () => ({ warn: vi.fn(), info: vi.fn() }) },
 }));
@@ -26,10 +29,12 @@ const watcher = await import('../../src/lib/rules/backup-price-watcher.js');
 const { db } = await import('../../src/lib/db/client.js');
 const { deliverBuilderAlert } = await import('../../src/lib/alerts/builder-alert.js');
 const { fetchActiveBackupPrice } = await import('../../src/lib/rules/backup-price-snapshot.js');
+const { authorizeBuilderCapability } = await import('../../src/lib/auth/builder-entitlement.js');
 
 const dbExecute = vi.mocked(db.execute);
 const deliverMock = vi.mocked(deliverBuilderAlert);
 const fetchPriceMock = vi.mocked(fetchActiveBackupPrice);
+const authorizeMock = vi.mocked(authorizeBuilderCapability);
 
 const SNAPSHOTTED_CFG: ReliabilityFailoverConfig = {
   customer_id: 'cust-1',
@@ -88,6 +93,9 @@ describe('runBackupPriceWatcher', () => {
     dbExecute.mockReset();
     deliverMock.mockReset();
     fetchPriceMock.mockReset();
+    authorizeMock.mockReset();
+    authorizeMock.mockResolvedValue({ allowed: true } as never);
+    deliverMock.mockResolvedValue({ kind: 'delivered' });
   });
 
   it('dispatches when delta exceeds 10%', async () => {
@@ -130,6 +138,70 @@ describe('runBackupPriceWatcher', () => {
     const result = await watcher.runBackupPriceWatcher();
 
     expect(result.alerts_dispatched).toBe(0);
+    expect(deliverMock).not.toHaveBeenCalled();
+  });
+
+  it('does not count an access-denied delivery no-op as dispatched', async () => {
+    dbExecute.mockResolvedValue([
+      {
+        id: 'r-1',
+        builder_id: 'b-1',
+        config: SNAPSHOTTED_CFG as unknown as Record<string, unknown>,
+      },
+    ] as never);
+    fetchPriceMock.mockResolvedValue({
+      input_per_1m_usd: 4.0,
+      output_per_1m_usd: 16.0,
+      observed_at: '',
+    });
+    deliverMock.mockResolvedValueOnce({ kind: 'access_denied' });
+
+    const result = await watcher.runBackupPriceWatcher();
+
+    expect(deliverMock).toHaveBeenCalledTimes(1);
+    expect(result.alerts_dispatched).toBe(0);
+    expect(result.skipped_no_product_access).toBe(1);
+  });
+
+  it('does no price evaluation or delivery without product access', async () => {
+    dbExecute.mockResolvedValue([
+      {
+        id: 'r-1',
+        builder_id: 'b-1',
+        config: SNAPSHOTTED_CFG as unknown as Record<string, unknown>,
+      },
+    ] as never);
+    authorizeMock.mockResolvedValueOnce({
+      allowed: false,
+      lookup: { kind: 'resolved' },
+    } as never);
+
+    const result = await watcher.runBackupPriceWatcher();
+
+    expect(result.skipped_no_product_access).toBe(1);
+    expect(authorizeMock).toHaveBeenCalledWith('b-1', 'product');
+    expect(fetchPriceMock).not.toHaveBeenCalled();
+    expect(deliverMock).not.toHaveBeenCalled();
+  });
+
+  it('surfaces an entitlement lookup outage as an isolated rule error', async () => {
+    dbExecute.mockResolvedValue([
+      {
+        id: 'r-1',
+        builder_id: 'b-1',
+        config: SNAPSHOTTED_CFG as unknown as Record<string, unknown>,
+      },
+    ] as never);
+    authorizeMock.mockResolvedValueOnce({
+      allowed: false,
+      lookup: { kind: 'lookup_failed' },
+    });
+
+    const result = await watcher.runBackupPriceWatcher();
+
+    expect(result.errors).toBe(1);
+    expect(result.skipped_no_product_access).toBe(0);
+    expect(fetchPriceMock).not.toHaveBeenCalled();
     expect(deliverMock).not.toHaveBeenCalled();
   });
 

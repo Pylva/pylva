@@ -16,6 +16,11 @@ vi.mock('../../src/lib/auth/builder-context.js', () => ({
   readBuilderContextFromDashboard: () => ({ builderId: 'b1' }),
 }));
 
+vi.mock('../../src/lib/auth/builder-entitlement.js', () => ({
+  authorizeBuilderCapability: vi.fn(async () => ({ allowed: true })),
+  accessDeniedMessage: vi.fn(() => 'Workspace access is unavailable'),
+}));
+
 // Real feed-subscriber + real sse-manager; only the Redis socket is stubbed so
 // we can assert SUBSCRIBE/UNSUBSCRIBE were balanced.
 const subscribeMock = vi.fn(async () => {});

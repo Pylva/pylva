@@ -32,7 +32,11 @@ vi.mock('../../src/lib/alerts/delivery.js', () => ({
 vi.mock('../../src/lib/rules/repository.js', () => ({
   listActiveRulesForCustomer: mocks.listActiveRulesForCustomer,
   listAlertChannelEntriesForRule: mocks.listChannelsForRule,
-  markRuleTriggered: vi.fn(async () => undefined),
+  markRuleTriggeredWithProductAccess: vi.fn(async () => ({ kind: 'updated' })),
+}));
+
+vi.mock('../../src/lib/auth/builder-entitlement.js', () => ({
+  authorizeBuilderCapability: vi.fn(async () => ({ allowed: true })),
 }));
 
 vi.mock('../../src/lib/logger.js', () => ({
@@ -80,7 +84,7 @@ describe('post-call dedup eviction', () => {
     vi.setSystemTime(new Date('2026-06-10T12:00:00.000Z'));
     vi.clearAllMocks();
     mocks.aggregateSpendForRule.mockResolvedValue(12);
-    mocks.deliverAlert.mockResolvedValue(undefined);
+    mocks.deliverAlert.mockResolvedValue({ kind: 'accepted' });
     mocks.listActiveRulesForCustomer.mockResolvedValue([monthlyBudgetRule()]);
     mocks.listChannelsForRule.mockResolvedValue([]);
     const { _resetPostCallEvalForTests } = await import('../../src/lib/rules/post-call-evaluator');

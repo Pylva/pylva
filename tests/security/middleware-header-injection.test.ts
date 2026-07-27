@@ -29,7 +29,13 @@ import { sessionFingerprint } from '../../src/lib/auth/session-fingerprint.js';
 const AUTHORITATIVE_BUILDER = '11111111-1111-1111-1111-111111111111';
 const VICTIM_BUILDER = '22222222-2222-2222-2222-222222222222';
 const AUTHORITATIVE_KEY_ID = 'authkey0';
-const IDENTITY_CONTEXT_HEADERS = ['x-builder-id', 'x-key-id', 'x-user-id', 'x-user-role'] as const;
+const IDENTITY_CONTEXT_HEADERS = [
+  'x-builder-id',
+  'x-key-id',
+  'x-user-id',
+  'x-user-role',
+  'x-pylva-product-access-verified',
+] as const;
 
 // Mock the auth helpers so the middleware's verify steps succeed without real
 // JWT keys / Redis. The mocks always return the AUTHORITATIVE identity.
@@ -38,6 +44,7 @@ vi.mock('../../src/lib/auth/middleware.js', () => ({
     builderId: AUTHORITATIVE_BUILDER,
     scope: 'universal',
     keyId: AUTHORITATIVE_KEY_ID,
+    productAccessVerified: true,
   })),
   withJwtAuth: vi.fn(async () => ({
     context: {
@@ -45,7 +52,9 @@ vi.mock('../../src/lib/auth/middleware.js', () => ({
       userId: 'u-1',
       orgSlug: 'acme',
       role: 'owner',
-      tier: 'free',
+      plan: 'pro',
+      accessState: 'active',
+      tier: 'pro',
       jti: 'j-1',
       revocationId: 'family-1',
     },
@@ -56,7 +65,9 @@ vi.mock('../../src/lib/auth/middleware.js', () => ({
   withMembership: vi.fn(async () => ({
     builderId: AUTHORITATIVE_BUILDER,
     role: 'owner',
-    tier: 'free',
+    plan: 'pro',
+    accessState: 'active',
+    entitlementSource: 'admin',
   })),
   requestHasActiveSession: vi.fn(() => true),
   setDashboardSessionCookies: vi.fn(),
@@ -132,6 +143,7 @@ describe('middleware injects trusted context as request headers (anti-spoofing)'
     expect(forwardedRequestHeader(res, 'x-builder-id')).not.toBe(VICTIM_BUILDER);
     expect(forwardedRequestHeader(res, 'x-key-id')).toBe(AUTHORITATIVE_KEY_ID);
     expect(forwardedRequestHeader(res, 'x-key-id')).not.toBe('spoofed-key');
+    expect(forwardedRequestHeader(res, 'x-pylva-product-access-verified')).toBe('1');
     expect(forwardedRequestHeader(res, 'x-pathname')).toBe('/api/v1/events');
   });
 

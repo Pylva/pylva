@@ -2,11 +2,16 @@ import crypto from 'node:crypto';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const authMocks = vi.hoisted(() => ({
+  authorizeBuilderCapability: vi.fn(),
   validateApiKey: vi.fn(),
 }));
 
 vi.mock('../../src/lib/auth/api-key.js', () => ({
   validateApiKey: authMocks.validateApiKey,
+}));
+
+vi.mock('../../src/lib/auth/builder-entitlement.js', () => ({
+  authorizeBuilderCapability: authMocks.authorizeBuilderCapability,
 }));
 
 const { NextRequest } = await import('next/server.js');
@@ -41,6 +46,8 @@ describe('authoritative budget-control Redis rate limiting', () => {
   beforeEach(async () => {
     _resetControlClientForTests();
     _resetConfigForTests();
+    authMocks.authorizeBuilderCapability.mockReset();
+    authMocks.authorizeBuilderCapability.mockResolvedValue({ allowed: true });
     authMocks.validateApiKey.mockReset();
     await ensureRedisCommandClient();
   });
@@ -131,6 +138,7 @@ describe('authoritative budget-control Redis rate limiting', () => {
       '/api/v1/budget/capabilities',
     );
     expect(authMocks.validateApiKey).toHaveBeenCalledTimes(2);
+    expect(authMocks.authorizeBuilderCapability).toHaveBeenCalledTimes(2);
     await expect(redisClient.get(bucketKey)).resolves.toBe(String(CONTROL_LIMIT + 2));
   });
 });

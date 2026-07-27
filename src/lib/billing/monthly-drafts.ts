@@ -30,6 +30,7 @@ interface PendingMonthlyPeriod extends Record<string, unknown> {
 export interface GenerateMonthlyDraftsResult {
   scanned_builders: number;
   generated: number;
+  skipped_workspace_access: number;
   skipped_pricing_not_configured: number;
   skipped_capabilities_pending: number;
   skipped_other: number;
@@ -61,6 +62,9 @@ async function enqueueClosedPeriod(periodStart: Date, periodEnd: Date): Promise<
       ${periodStart},
       ${periodEnd}
     FROM customer_pricing AS period_pricing
+    INNER JOIN builders AS period_builder
+      ON period_builder.id = period_pricing.builder_id
+     AND period_builder.access_state = 'active'
     WHERE period_pricing.billing_period = 'monthly'
       AND period_pricing.effective_from < ${periodEnd}
       AND (
@@ -73,10 +77,20 @@ async function enqueueClosedPeriod(periodStart: Date, periodEnd: Date): Promise<
 
 async function listPendingPeriods(): Promise<PendingMonthlyPeriod[]> {
   const rows = await db.execute<PendingMonthlyPeriod>(sql`
-    SELECT builder_id, customer_id, period_start, period_end
-    FROM monthly_invoice_periods
-    WHERE status = 'pending'
-    ORDER BY period_start ASC, builder_id ASC, customer_id ASC
+    SELECT
+      pending_period.builder_id,
+      pending_period.customer_id,
+      pending_period.period_start,
+      pending_period.period_end
+    FROM monthly_invoice_periods AS pending_period
+    INNER JOIN builders AS pending_builder
+      ON pending_builder.id = pending_period.builder_id
+     AND pending_builder.access_state = 'active'
+    WHERE pending_period.status = 'pending'
+    ORDER BY
+      pending_period.period_start ASC,
+      pending_period.builder_id ASC,
+      pending_period.customer_id ASC
   `);
   return rows as PendingMonthlyPeriod[];
 }
@@ -121,6 +135,7 @@ export async function generateMonthlyDrafts(opts: {
   const result: GenerateMonthlyDraftsResult = {
     scanned_builders: new Set(periods.map((period) => period.builder_id)).size,
     generated: 0,
+    skipped_workspace_access: 0,
     skipped_pricing_not_configured: 0,
     skipped_capabilities_pending: 0,
     skipped_other: 0,
@@ -157,6 +172,15 @@ export async function generateMonthlyDrafts(opts: {
       result.generated += drafts.length;
       await completePeriod(period);
     } catch (err) {
+      if (err instanceof BillingError) {
+        // Access can change after the pending-period scan. Keep the row
+        // pending without inflating retry attempts; reactivation can resume it.
+        if (err.code === 'workspace_access_unavailable') {
+          result.skipped_workspace_access += 1;
+          continue;
+        }
+      }
+
       await recordFailedAttempt(period, err);
       if (err instanceof BillingError) {
         if (err.code === 'pricing_not_configured') result.skipped_pricing_not_configured += 1;

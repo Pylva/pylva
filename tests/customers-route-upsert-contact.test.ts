@@ -4,12 +4,20 @@ import { ErrorCode } from '@pylva/shared';
 
 const BUILDER_ID = '00000000-0000-4000-8000-000000000001';
 
+const testEnv = vi.hoisted(() => ({
+  PYLVA_DEPLOYMENT_MODE: 'self_hosted',
+  SELF_HOSTED_MONTHLY_EVENTS_LIMIT: 10_000_000,
+  SELF_HOSTED_MAX_CUSTOMERS: 500,
+  SELF_HOSTED_TELEMETRY_RETENTION_DAYS: 365,
+  SELF_HOSTED_BILLING_RETENTION_DAYS: 365,
+}));
+
 const mocks = vi.hoisted(() => ({
   readBuilderContextFromDashboard: vi.fn(),
   withRLS: vi.fn(),
   getCustomerCostSummary: vi.fn(),
-  getBuilderTierForShare: vi.fn(),
-  checkCustomerLimitInTransaction: vi.fn(),
+  getBuilderEntitlementForShare: vi.fn(),
+  checkCustomerLimitAgainstLimitInTransaction: vi.fn(),
   lockCustomerLimit: vi.fn(),
   tierUsageHeader: vi.fn(),
   txSelect: vi.fn(),
@@ -20,13 +28,16 @@ vi.mock('@/lib/auth/builder-context', () => ({
   readBuilderContextFromDashboard: mocks.readBuilderContextFromDashboard,
 }));
 
+vi.mock('@/lib/config', () => ({ env: testEnv }));
+vi.mock('../src/lib/config.js', () => ({ env: testEnv }));
+
 vi.mock('@/lib/auth/tier-enforcement', () => ({
-  checkCustomerLimitInTransaction: mocks.checkCustomerLimitInTransaction,
+  checkCustomerLimitAgainstLimitInTransaction: mocks.checkCustomerLimitAgainstLimitInTransaction,
   tierUsageHeader: mocks.tierUsageHeader,
 }));
 
 vi.mock('@/lib/db/advisory-locks', () => ({
-  getBuilderTierForShare: mocks.getBuilderTierForShare,
+  getBuilderEntitlementForShare: mocks.getBuilderEntitlementForShare,
   lockCustomerLimit: mocks.lockCustomerLimit,
 }));
 
@@ -54,6 +65,24 @@ function makePost(body: Record<string, unknown>): NextRequest {
   });
 }
 
+function activeEntitlement(plan: 'pro' | 'scale' | 'enterprise' | null = 'pro') {
+  return {
+    ok: true as const,
+    entitlement: {
+      plan,
+      access_state: 'active' as const,
+      entitlement_source:
+        plan === null
+          ? ('self_hosted' as const)
+          : plan === 'enterprise'
+            ? ('enterprise_contract' as const)
+            : ('admin' as const),
+      has_product_access: true as const,
+      legacy_free: false as const,
+    },
+  };
+}
+
 describe('POST /api/v1/customers contact upsert', () => {
   let insertValues: Record<string, unknown> | null;
   let conflictSet: Record<string, unknown> | null;
@@ -69,12 +98,12 @@ describe('POST /api/v1/customers contact upsert', () => {
       userId: 'user-1',
       role: 'owner',
     });
-    mocks.getBuilderTierForShare.mockResolvedValue('free');
+    mocks.getBuilderEntitlementForShare.mockResolvedValue(activeEntitlement());
     mocks.lockCustomerLimit.mockResolvedValue(undefined);
-    mocks.checkCustomerLimitInTransaction.mockResolvedValue({
+    mocks.checkCustomerLimitAgainstLimitInTransaction.mockResolvedValue({
       allowed: true,
       current: 0,
-      limit: 10,
+      limit: 50,
     });
     mocks.tierUsageHeader.mockImplementation(
       (current: number, limit: number) => `${current}/${limit}`,
@@ -125,7 +154,7 @@ describe('POST /api/v1/customers contact upsert', () => {
     });
     expect(conflictSet).toMatchObject({ name: 'Onboarding Audit Customer 1' });
     expect(conflictSet).not.toHaveProperty('email');
-    expect(response.headers.get('X-Pylva-Tier-Usage')).toBe('1/10');
+    expect(response.headers.get('X-Pylva-Tier-Usage')).toBe('1/50');
   });
 
   it('does not clear an existing name when a later upsert only changes the email', async () => {
@@ -156,45 +185,45 @@ describe('POST /api/v1/customers contact upsert', () => {
 
     expect(response.status).toBe(200);
     expect(mocks.lockCustomerLimit).toHaveBeenCalledWith(expect.anything(), BUILDER_ID);
-    expect(mocks.getBuilderTierForShare).toHaveBeenCalledWith(expect.anything(), BUILDER_ID);
-    expect(mocks.checkCustomerLimitInTransaction).toHaveBeenCalledWith(
+    expect(mocks.getBuilderEntitlementForShare).toHaveBeenCalledWith(expect.anything(), BUILDER_ID);
+    expect(mocks.checkCustomerLimitAgainstLimitInTransaction).toHaveBeenCalledWith(
       expect.anything(),
       BUILDER_ID,
-      'free',
+      50,
     );
 
     const lockOrder = mocks.lockCustomerLimit.mock.invocationCallOrder[0];
-    const tierOrder = mocks.getBuilderTierForShare.mock.invocationCallOrder[0];
+    const entitlementOrder = mocks.getBuilderEntitlementForShare.mock.invocationCallOrder[0];
     const selectOrder = mocks.txSelect.mock.invocationCallOrder[0];
-    const limitOrder = mocks.checkCustomerLimitInTransaction.mock.invocationCallOrder[0];
+    const limitOrder =
+      mocks.checkCustomerLimitAgainstLimitInTransaction.mock.invocationCallOrder[0];
     const insertOrder = mocks.txInsert.mock.invocationCallOrder[0];
     expect(lockOrder).toBeDefined();
-    expect(tierOrder).toBeDefined();
+    expect(entitlementOrder).toBeDefined();
     expect(selectOrder).toBeDefined();
     expect(limitOrder).toBeDefined();
     expect(insertOrder).toBeDefined();
-    expect(lockOrder!).toBeLessThan(tierOrder!);
-    expect(tierOrder!).toBeLessThan(selectOrder!);
+    expect(lockOrder!).toBeLessThan(entitlementOrder!);
+    expect(entitlementOrder!).toBeLessThan(selectOrder!);
     expect(selectOrder!).toBeLessThan(limitOrder!);
     expect(limitOrder!).toBeLessThan(insertOrder!);
   });
 
-  it('uses the in-transaction tier for a new customer when the builder is at the limit', async () => {
+  it('uses the in-transaction plan for a new customer when the builder is at the limit', async () => {
     const forbidden = NextResponse.json(
       {
         error: {
           type: 'invalid_request_error',
           code: 'TIER_LIMIT_REACHED',
-          message: 'free tier allows 10 customers. You have 10. Upgrade to add more.',
+          message: 'pro plan allows 50 customers. You have 50.',
         },
       },
       { status: 403 },
     );
-    mocks.getBuilderTierForShare.mockResolvedValueOnce('free');
-    mocks.checkCustomerLimitInTransaction.mockResolvedValueOnce({
+    mocks.checkCustomerLimitAgainstLimitInTransaction.mockResolvedValueOnce({
       allowed: false,
-      current: 10,
-      limit: 10,
+      current: 50,
+      limit: 50,
       response: forbidden,
     });
 
@@ -208,18 +237,18 @@ describe('POST /api/v1/customers contact upsert', () => {
 
     expect(response.status).toBe(403);
     expect(body.error.code).toBe('TIER_LIMIT_REACHED');
-    expect(response.headers.get('X-Pylva-Tier-Usage')).toBe('10/10');
-    expect(mocks.checkCustomerLimitInTransaction).toHaveBeenCalledWith(
+    expect(response.headers.get('X-Pylva-Tier-Usage')).toBe('50/50');
+    expect(mocks.checkCustomerLimitAgainstLimitInTransaction).toHaveBeenCalledWith(
       expect.anything(),
       BUILDER_ID,
-      'free',
+      50,
     );
     expect(mocks.lockCustomerLimit).toHaveBeenCalledWith(expect.anything(), BUILDER_ID);
     expect(mocks.txInsert).not.toHaveBeenCalled();
   });
 
-  it('returns the missing-builder 404 when the in-transaction tier read finds no row', async () => {
-    mocks.getBuilderTierForShare.mockResolvedValueOnce(null);
+  it('returns the missing-builder 404 when the locked entitlement read finds no row', async () => {
+    mocks.getBuilderEntitlementForShare.mockResolvedValueOnce(null);
 
     const response = await POST(
       makePost({
@@ -234,7 +263,7 @@ describe('POST /api/v1/customers contact upsert', () => {
       code: ErrorCode.RESOURCE_NOT_FOUND,
       message: 'Builder not found',
     });
-    expect(mocks.checkCustomerLimitInTransaction).not.toHaveBeenCalled();
+    expect(mocks.checkCustomerLimitAgainstLimitInTransaction).not.toHaveBeenCalled();
     expect(mocks.txInsert).not.toHaveBeenCalled();
   });
 
@@ -245,15 +274,15 @@ describe('POST /api/v1/customers contact upsert', () => {
         error: {
           type: 'invalid_request_error',
           code: 'TIER_LIMIT_REACHED',
-          message: 'free tier allows 10 customers. You have 10. Upgrade to add more.',
+          message: 'pro plan allows 50 customers. You have 50.',
         },
       },
       { status: 403 },
     );
-    mocks.checkCustomerLimitInTransaction.mockResolvedValueOnce({
+    mocks.checkCustomerLimitAgainstLimitInTransaction.mockResolvedValueOnce({
       allowed: false,
-      current: 10,
-      limit: 10,
+      current: 50,
+      limit: 50,
       response: forbidden,
     });
 
@@ -267,15 +296,15 @@ describe('POST /api/v1/customers contact upsert', () => {
 
     expect(response.status).toBe(200);
     expect(body.customer.external_id).toBe('existing_customer');
-    expect(response.headers.get('X-Pylva-Tier-Usage')).toBe('10/10');
+    expect(response.headers.get('X-Pylva-Tier-Usage')).toBe('50/50');
     expect(mocks.txInsert).toHaveBeenCalled();
   });
 
   it('returns current plus one usage for a new customer below the cap', async () => {
-    mocks.checkCustomerLimitInTransaction.mockResolvedValueOnce({
+    mocks.checkCustomerLimitAgainstLimitInTransaction.mockResolvedValueOnce({
       allowed: true,
-      current: 9,
-      limit: 10,
+      current: 49,
+      limit: 50,
     });
 
     const response = await POST(
@@ -286,8 +315,51 @@ describe('POST /api/v1/customers contact upsert', () => {
     );
 
     expect(response.status).toBe(200);
-    expect(response.headers.get('X-Pylva-Tier-Usage')).toBe('10/10');
+    expect(response.headers.get('X-Pylva-Tier-Usage')).toBe('50/50');
     expect(mocks.txInsert).toHaveBeenCalled();
+  });
+
+  it('uses the finite self-host customer policy and still updates an existing customer at cap', async () => {
+    existingRows = [{ id: 'customer-row-1' }];
+    mocks.getBuilderEntitlementForShare.mockResolvedValueOnce(activeEntitlement(null));
+    mocks.checkCustomerLimitAgainstLimitInTransaction.mockResolvedValueOnce({
+      allowed: false,
+      current: 500,
+      limit: 500,
+      response: NextResponse.json(
+        { error: { code: ErrorCode.TIER_LIMIT_REACHED } },
+        { status: 403 },
+      ),
+    });
+
+    const response = await POST(
+      makePost({
+        external_id: 'self_hosted_existing',
+        name: 'Existing self-hosted customer',
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.checkCustomerLimitAgainstLimitInTransaction).toHaveBeenCalledWith(
+      expect.anything(),
+      BUILDER_ID,
+      500,
+    );
+    expect(response.headers.get('X-Pylva-Tier-Usage')).toBe('500/500');
+    expect(mocks.txInsert).toHaveBeenCalled();
+  });
+
+  it('fails closed for an invalid locked entitlement tuple', async () => {
+    mocks.getBuilderEntitlementForShare.mockResolvedValueOnce({
+      ok: false,
+      reason: 'invalid_combination',
+    });
+
+    const response = await POST(makePost({ external_id: 'invalid_entitlement' }));
+
+    expect(response.status).toBe(500);
+    expect(mocks.checkCustomerLimitAgainstLimitInTransaction).not.toHaveBeenCalled();
+    expect(mocks.txInsert).not.toHaveBeenCalled();
   });
 });
 

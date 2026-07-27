@@ -16,6 +16,7 @@
 
 import { Role } from '@pylva/shared';
 import { resolveSlugForUser, type MembershipContext } from './org.js';
+import { normalizeEntitlementContext } from './entitlement-context.js';
 import { ensureRedisCommandClient, redisClient } from '../redis/client.js';
 import { cacheBreaker } from '../redis/circuit-breaker.js';
 import { logger } from '../logger.js';
@@ -41,10 +42,20 @@ function parseCached(raw: string): MembershipContext | null {
       // Narrow to the known Role enum — a garbage cached role (future
       // serialization bug / key corruption) must re-check Postgres, never
       // reach the x-user-role header.
-      VALID_ROLES.includes(value.role) &&
-      typeof value.tier === 'string'
+      VALID_ROLES.includes(value.role)
     ) {
-      return value as MembershipContext;
+      const entitlement = normalizeEntitlementContext({
+        plan: value.plan,
+        access_state: value.accessState,
+        entitlement_source: value.entitlementSource,
+      });
+      if (entitlement) {
+        return {
+          builderId: value.builderId,
+          role: value.role as MembershipContext['role'],
+          ...entitlement,
+        };
+      }
     }
   } catch {
     /* malformed entry — fall through to Postgres */

@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest, NextResponse } from 'next/server.js';
 import { ErrorCode, Role } from '@pylva/shared';
-import type { TierFeature } from '../../src/lib/auth/tier-enforcement.js';
 
 const mocks = vi.hoisted(() => ({
   addChannel: vi.fn(),
   auditLog: vi.fn(),
+  checkDashboardCapabilityGate: vi.fn(),
   checkBuilderFeatureGate: vi.fn(),
   getRule: vi.fn(),
   listChannelsForRule: vi.fn(),
@@ -36,6 +36,10 @@ vi.mock('@/lib/auth/builder-context', () => ({
 
 vi.mock('@/lib/auth/tier-enforcement', () => ({
   checkBuilderFeatureGate: mocks.checkBuilderFeatureGate,
+}));
+
+vi.mock('@/lib/auth/dashboard-feature-gate', () => ({
+  checkDashboardCapabilityGate: mocks.checkDashboardCapabilityGate,
 }));
 
 vi.mock('@/lib/auth/middleware', () => ({
@@ -214,24 +218,20 @@ const { GET: getBillingAlertConfig } =
 const { GET: previewBillingPricing } =
   await import('../../src/app/api/v1/billing/pricing/preview/route.js');
 
-function deniedGate(feature: TierFeature = 'webhooks', tier = 'free'): NextResponse {
+function deniedGate(): NextResponse {
   return NextResponse.json(
     {
       error: {
         type: 'invalid_request_error',
         code: ErrorCode.FEATURE_NOT_AVAILABLE,
-        message: `'${feature}' is not available on the ${tier} tier. Upgrade to access this feature.`,
+        message: 'Workspace access is suspended; reactivate billing to continue',
       },
     },
     { status: 403 },
   );
 }
 
-async function expectFeatureUnavailable(
-  response: NextResponse,
-  feature: TierFeature,
-  tier = 'free',
-): Promise<void> {
+async function expectFeatureUnavailable(response: NextResponse): Promise<void> {
   const body = await response.json();
 
   expect(response.status).toBe(403);
@@ -239,7 +239,7 @@ async function expectFeatureUnavailable(
     error: {
       type: 'invalid_request_error',
       code: ErrorCode.FEATURE_NOT_AVAILABLE,
-      message: `'${feature}' is not available on the ${tier} tier. Upgrade to access this feature.`,
+      message: 'Workspace access is suspended; reactivate billing to continue',
     },
   });
 }
@@ -268,6 +268,8 @@ const invalidInvoiceParams = { params: Promise.resolve({ id: 'not-a-uuid' }) };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.checkBuilderFeatureGate.mockResolvedValue(null);
+  mocks.checkDashboardCapabilityGate.mockResolvedValue(null);
   mocks.tableRows = {
     stripe_connect: [
       {
@@ -377,10 +379,8 @@ describe('new feature-gated route groups', () => {
           ruleParams,
         ),
     ],
-  ])('returns 403 FEATURE_NOT_AVAILABLE for Free on %s', async (_name, call) => {
-    mocks.checkBuilderFeatureGate.mockImplementation(
-      async (_builderId: string, feature: TierFeature) => deniedGate(feature),
-    );
+  ])('returns 403 FEATURE_NOT_AVAILABLE for restricted access on %s', async (_name, call) => {
+    mocks.checkBuilderFeatureGate.mockImplementation(async () => deniedGate());
 
     const response = await call();
     const body = await response.json();
@@ -426,19 +426,12 @@ describe('new feature-gated route groups', () => {
           ruleParams,
         ),
     ],
-    [
-      'billing invoices GET',
-      'billing' as const,
-      () => getInvoices(request('http://localhost/api/v1/billing/invoices')),
-    ],
-  ])('returns the exact free-tier feature envelope for %s', async (_name, feature, call) => {
-    mocks.checkBuilderFeatureGate.mockImplementation(
-      async (_builderId: string, requestedFeature: TierFeature) => deniedGate(requestedFeature),
-    );
+  ])('returns the exact restricted-workspace envelope for %s', async (_name, feature, call) => {
+    mocks.checkBuilderFeatureGate.mockImplementation(async () => deniedGate());
 
     const response = await call();
 
-    await expectFeatureUnavailable(response, feature);
+    await expectFeatureUnavailable(response);
     expect(mocks.checkBuilderFeatureGate).toHaveBeenCalledWith('builder-a', feature);
   });
 
@@ -488,7 +481,7 @@ describe('new feature-gated route groups', () => {
           ruleParams,
         ),
     ],
-  ])('continues past the webhook gate for Pro on %s', async (_name, call) => {
+  ])('continues past the webhook gate for active workspaces on %s', async (_name, call) => {
     mocks.checkBuilderFeatureGate.mockResolvedValue(null);
 
     const response = await call();
@@ -528,8 +521,8 @@ describe('new feature-gated route groups', () => {
     expect(mocks.checkBuilderFeatureGate).not.toHaveBeenCalled();
   });
 
-  it('delete stays available after downgrade for rule-channel cleanup', async () => {
-    mocks.checkBuilderFeatureGate.mockImplementation(async () => deniedGate('webhooks'));
+  it('delete stays available after access restriction for rule-channel cleanup', async () => {
+    mocks.checkBuilderFeatureGate.mockImplementation(async () => deniedGate());
 
     const response = await deleteRuleChannel(
       request('http://localhost/api/v1/rules/rule-a/channels/channel-a', { method: 'DELETE' }),
@@ -545,13 +538,59 @@ describe('new feature-gated route groups', () => {
 
   it.each([
     [
-      'billing invoices list',
-      () => getInvoices(request('http://localhost/api/v1/billing/invoices')),
+      'billing invoice finalize',
+      () =>
+        finalizeInvoice(
+          request('http://localhost/api/v1/billing/invoices/1/finalize', { method: 'POST' }),
+          invalidInvoiceParams,
+        ),
     ],
     [
-      'billing invoice detail',
-      () => getInvoice(request('http://localhost/api/v1/billing/invoices/1'), invoiceParams),
+      'billing invoice void',
+      () =>
+        voidInvoice(
+          request('http://localhost/api/v1/billing/invoices/1/void', { method: 'POST' }),
+          invalidInvoiceParams,
+        ),
     ],
+    [
+      'billing connect',
+      () =>
+        connectBilling(
+          jsonRequest('http://localhost/api/v1/billing/connect', { slug: 'workspace-a' }),
+        ),
+    ],
+    [
+      'billing connect return',
+      () => returnBillingConnect(request('http://localhost/api/v1/billing/connect/return')),
+    ],
+    [
+      'billing disconnect',
+      () =>
+        disconnectBilling(
+          request('http://localhost/api/v1/billing/disconnect', { method: 'POST' }),
+        ),
+    ],
+    [
+      'billing alert config',
+      () => getBillingAlertConfig(request('http://localhost/api/v1/billing/alert-config')),
+    ],
+    [
+      'billing pricing preview',
+      () => previewBillingPricing(request('http://localhost/api/v1/billing/pricing/preview')),
+    ],
+  ])('returns 403 FEATURE_NOT_AVAILABLE for restricted access on %s', async (_name, call) => {
+    mocks.checkBuilderFeatureGate.mockImplementation(async () => deniedGate());
+
+    const response = await call();
+    const body = await response.json();
+
+    expect(response.status).toBe(403);
+    expect(body.error.code).toBe(ErrorCode.FEATURE_NOT_AVAILABLE);
+    expect(mocks.checkBuilderFeatureGate).toHaveBeenCalledWith('builder-a', 'billing');
+  });
+
+  it.each([
     [
       'billing invoice finalize',
       () =>
@@ -594,16 +633,12 @@ describe('new feature-gated route groups', () => {
       'billing pricing preview',
       () => previewBillingPricing(request('http://localhost/api/v1/billing/pricing/preview')),
     ],
-  ])('returns 403 FEATURE_NOT_AVAILABLE for Free on %s', async (_name, call) => {
-    mocks.checkBuilderFeatureGate.mockImplementation(
-      async (_builderId: string, feature: TierFeature) => deniedGate(feature),
-    );
+  ])('continues past the billing gate for active workspaces on %s', async (_name, call) => {
+    mocks.checkBuilderFeatureGate.mockResolvedValue(null);
 
     const response = await call();
-    const body = await response.json();
 
-    expect(response.status).toBe(403);
-    expect(body.error.code).toBe(ErrorCode.FEATURE_NOT_AVAILABLE);
+    expect(response.status).not.toBe(403);
     expect(mocks.checkBuilderFeatureGate).toHaveBeenCalledWith('builder-a', 'billing');
   });
 
@@ -616,54 +651,27 @@ describe('new feature-gated route groups', () => {
       'billing invoice detail',
       () => getInvoice(request('http://localhost/api/v1/billing/invoices/1'), invoiceParams),
     ],
-    [
-      'billing invoice finalize',
-      () =>
-        finalizeInvoice(
-          request('http://localhost/api/v1/billing/invoices/1/finalize', { method: 'POST' }),
-          invalidInvoiceParams,
-        ),
-    ],
-    [
-      'billing invoice void',
-      () =>
-        voidInvoice(
-          request('http://localhost/api/v1/billing/invoices/1/void', { method: 'POST' }),
-          invalidInvoiceParams,
-        ),
-    ],
-    [
-      'billing connect',
-      () =>
-        connectBilling(
-          jsonRequest('http://localhost/api/v1/billing/connect', { slug: 'workspace-a' }),
-        ),
-    ],
-    [
-      'billing connect return',
-      () => returnBillingConnect(request('http://localhost/api/v1/billing/connect/return')),
-    ],
-    [
-      'billing disconnect',
-      () =>
-        disconnectBilling(
-          request('http://localhost/api/v1/billing/disconnect', { method: 'POST' }),
-        ),
-    ],
-    [
-      'billing alert config',
-      () => getBillingAlertConfig(request('http://localhost/api/v1/billing/alert-config')),
-    ],
-    [
-      'billing pricing preview',
-      () => previewBillingPricing(request('http://localhost/api/v1/billing/pricing/preview')),
-    ],
-  ])('continues past the billing gate for Pro on %s', async (_name, call) => {
-    mocks.checkBuilderFeatureGate.mockResolvedValue(null);
+  ])('checks read-only invoice capability for %s', async (_name, call) => {
+    mocks.checkDashboardCapabilityGate.mockImplementation(async () => deniedGate());
 
-    const response = await call();
+    const denied = await call();
 
-    expect(response.status).not.toBe(403);
-    expect(mocks.checkBuilderFeatureGate).toHaveBeenCalledWith('builder-a', 'billing');
+    await expectFeatureUnavailable(denied);
+    expect(mocks.checkDashboardCapabilityGate).toHaveBeenCalledWith(
+      'builder-a',
+      'invoices',
+    );
+    expect(mocks.checkBuilderFeatureGate).not.toHaveBeenCalled();
+
+    mocks.checkDashboardCapabilityGate.mockClear();
+    mocks.checkDashboardCapabilityGate.mockResolvedValue(null);
+    const allowed = await call();
+
+    expect(allowed.status).not.toBe(403);
+    expect(mocks.checkDashboardCapabilityGate).toHaveBeenCalledWith(
+      'builder-a',
+      'invoices',
+    );
+    expect(mocks.checkBuilderFeatureGate).not.toHaveBeenCalled();
   });
 });

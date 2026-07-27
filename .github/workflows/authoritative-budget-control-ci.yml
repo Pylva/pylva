@@ -726,7 +726,7 @@ jobs:
         env:
           MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
           ALLOW_MIGRATION_DATABASE_URL_FALLBACK: 'true'
-        run: pnpm db:setup
+        run: pnpm db:setup --fresh-install
 
       - name: Provision ordinary general-app runtime login
         env:
@@ -1016,7 +1016,7 @@ jobs:
         env:
           MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
           ALLOW_MIGRATION_DATABASE_URL_FALLBACK: 'true'
-        run: pnpm db:setup
+        run: pnpm db:setup --fresh-install
 
       - name: Provision ordinary general-app runtime login
         env:

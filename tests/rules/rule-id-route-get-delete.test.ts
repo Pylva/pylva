@@ -5,6 +5,7 @@ import { AuditAction } from '../../src/lib/audit/actions.js';
 
 const mocks = vi.hoisted(() => ({
   auditLog: vi.fn(),
+  checkDashboardFeatureGate: vi.fn(),
   customerExternalIdExists: vi.fn(),
   deleteRule: vi.fn(),
   getRule: vi.fn(),
@@ -24,6 +25,10 @@ vi.mock('@/lib/rules/repository', () => ({
 
 vi.mock('@/lib/auth/audit-log', () => ({
   auditLog: mocks.auditLog,
+}));
+
+vi.mock('@/lib/auth/dashboard-feature-gate', () => ({
+  checkDashboardFeatureGate: mocks.checkDashboardFeatureGate,
 }));
 
 vi.mock('@/lib/db/rls', () => ({
@@ -49,18 +54,6 @@ vi.mock('@/lib/auth/middleware', () => ({
           },
           { status: 403 },
         ),
-}));
-
-vi.mock('@/lib/db/client', () => ({
-  db: {
-    select: () => ({
-      from: () => ({
-        where: () => ({
-          limit: () => Promise.resolve([{ tier: 'pro' }]),
-        }),
-      }),
-    }),
-  },
 }));
 
 const route = await import('../../src/app/api/v1/rules/[id]/route.js');
@@ -96,6 +89,7 @@ function ruleRow(overrides: Record<string, unknown> = {}) {
 describe('GET /api/v1/rules/[id]', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.checkDashboardFeatureGate.mockResolvedValue(null);
     mocks.getRule.mockResolvedValue(ruleRow());
   });
 

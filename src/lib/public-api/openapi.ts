@@ -16,7 +16,8 @@ import {
   BudgetRulePeriod,
   BudgetRuleScope,
   BudgetUnavailableReason,
-  BuilderTier,
+  BuilderAccessState,
+  BuilderPlan,
   ControlledUsageKind,
   CostSource,
   DEFAULT_RESERVATION_TTL_SECONDS,
@@ -636,7 +637,7 @@ export function buildOpenApiDocument() {
             "the SDK's own LRU) is dropped silently and counted in neither " +
             'accepted nor rejected, so retrying a batch after a network ' +
             'failure is safe. Rate limit: 1000 requests per minute per API ' +
-            'key, shared with the other Agent SDK endpoints; 429 ' +
+            'key, shared with the other public API endpoints; 429 ' +
             'responses carry Retry-After.',
           requestBody: {
             required: true,
@@ -899,14 +900,15 @@ export function buildOpenApiDocument() {
       '/api/v1/whoami': {
         get: {
           operationId: 'whoami',
-          summary: 'Identify the workspace behind an Agent SDK key',
+          summary: 'Identify the workspace behind an API key',
+          parameters: [{ $ref: '#/components/parameters/ContractVersionHeader' }],
           description:
-            'Returns the workspace, plan tier, key scope, and — when event ' +
+            'Returns the workspace, commercial plan, access state, key scope, and — when event ' +
             'limits are enforced — current monthly usage for the presented ' +
-            'Agent SDK key. Intended for integration setup and automated ' +
+            'universal API key. Intended for integration setup and automated ' +
             'verification: one call proves the key works and shows what it ' +
             'is attached to. Responses are never cached (Cache-Control: ' +
-            'no-store). Rate limit is shared with the other Agent SDK ' +
+            'no-store). Rate limit is shared with the other public API ' +
             'endpoints.',
           responses: {
             '200': {
@@ -915,6 +917,11 @@ export function buildOpenApiDocument() {
                 'Cache-Control': {
                   description: 'no-store (live, tenant-identifying).',
                   schema: { type: 'string' },
+                },
+                'X-Pylva-Contract-Version': {
+                  description:
+                    'Canonical response contract version. Informational only; it never grants access.',
+                  schema: { type: 'string', const: '2' },
                 },
               },
               content: {
@@ -934,15 +941,23 @@ export function buildOpenApiDocument() {
           name: 'X-Pylva-Key',
           description:
             'API key created in the dashboard (shown once at creation). ' +
-            'Format: pv_live_{keyId}_{randomPart}. Agent SDK keys with the ' +
-            'agent_sdk scope cover all ten endpoints in this document. A separate ' +
-            'admin_api scope exists for the private custom-pricing ' +
-            'surface, which is not documented here; keys presented with ' +
-            'the wrong scope receive 403 WRONG_SCOPE. Details: ' +
+            'Format: pv_live_{keyId}_{randomPart}. One key works on every ' +
+            'machine endpoint; current keys report scope=universal for ' +
+            'display and audit compatibility, not authorization. Details: ' +
             `${PYLVA_DOCS_URL}/api/api-keys.md`,
         },
       },
       parameters: {
+        ContractVersionHeader: {
+          name: 'X-Pylva-Contract-Version',
+          in: 'header',
+          required: false,
+          schema: { type: 'string', const: '2' },
+          description:
+            'Set to 2 when the client consumes canonical plan and access_state fields. ' +
+            'Absent or older values are counted conservatively as deprecated tier-alias usage ' +
+            'during the compatibility window. This metadata never grants access or changes entitlements.',
+        },
         SdkVersionHeader: {
           name: 'X-Pylva-SDK-Version',
           in: 'header',
@@ -1004,15 +1019,15 @@ export function buildOpenApiDocument() {
         },
         Forbidden: {
           description:
-            'The key is valid but lacks the required scope (type ' +
-            'authentication_error, code WRONG_SCOPE) — for example an ' +
-            'pv_cli_ key calling the telemetry endpoints.',
+            'The key is valid, but a workspace lifecycle, feature, or usage policy blocks ' +
+            'the request (for example code FEATURE_NOT_AVAILABLE or TIER_LIMIT_REACHED). ' +
+            'API key scopes do not restrict current releases.',
           content: errorContent,
         },
         BudgetControlForbidden: {
           description:
-            'The key is valid but cannot call the authoritative control surface ' +
-            '(type authentication_error, code WRONG_SCOPE).',
+            'The key is valid, but workspace lifecycle or control policy blocks the ' +
+            'authoritative control request (for example code FEATURE_NOT_AVAILABLE).',
           headers: noStoreHeaders,
           content: errorContent,
         },
@@ -1113,7 +1128,8 @@ export function buildOpenApiDocument() {
                     'Machine-readable code; this subset is what the public ' + 'endpoints emit.',
                   enum: [
                     ErrorCode.INVALID_API_KEY,
-                    ErrorCode.WRONG_SCOPE,
+                    ErrorCode.FEATURE_NOT_AVAILABLE,
+                    ErrorCode.TIER_LIMIT_REACHED,
                     ErrorCode.VALIDATION_ERROR,
                     ErrorCode.RATE_LIMIT_EXCEEDED,
                     ErrorCode.INTERNAL_ERROR,
@@ -1584,11 +1600,20 @@ export function buildOpenApiDocument() {
         WhoamiResponse: {
           type: 'object',
           description:
-            'Identity and plan information for the presented Agent SDK ' +
-            'key. usage is null when event limits are not enforced ' +
-            '(self-hosted default), on unlimited plans, or if the usage ' +
-            'lookup fails open; limits.enforced distinguishes those cases.',
-          required: ['org', 'tier', 'key', 'limits', 'usage', 'docs_url', 'agent_setup_url'],
+            'Identity, commercial plan, and workspace access state for the presented universal API ' +
+            'key. Self-hosted workspaces have plan=null and use the operator-configured deployment ' +
+            'limit. usage is null when event limits are explicitly disabled, on unlimited plans, or ' +
+            'if the usage lookup fails open; limits.enforced distinguishes those cases.',
+          required: [
+            'org',
+            'plan',
+            'access_state',
+            'key',
+            'limits',
+            'usage',
+            'docs_url',
+            'agent_setup_url',
+          ],
           properties: {
             org: {
               type: 'object',
@@ -1598,7 +1623,25 @@ export function buildOpenApiDocument() {
                 name: { type: 'string', description: 'Workspace display name.' },
               },
             },
-            tier: { type: 'string', enum: Object.values(BuilderTier) },
+            plan: {
+              type: ['string', 'null'],
+              enum: [...Object.values(BuilderPlan), null],
+              description:
+                'Current commercial plan. Null for checkout-required, suspended, and self-hosted workspaces.',
+            },
+            access_state: {
+              type: 'string',
+              enum: Object.values(BuilderAccessState),
+              description:
+                'Authoritative workspace lifecycle state. Product access is available only when active.',
+            },
+            tier: {
+              type: 'string',
+              enum: Object.values(BuilderPlan),
+              deprecated: true,
+              description:
+                'Deprecated compatibility alias. Present only for an active paid workspace when X-Pylva-Contract-Version is absent or older than 2; use plan.',
+            },
             key: {
               type: 'object',
               required: ['id', 'scope'],
@@ -1607,7 +1650,12 @@ export function buildOpenApiDocument() {
                   type: 'string',
                   description: 'Public key identifier — never the secret.',
                 },
-                scope: { type: 'string', const: 'agent_sdk' },
+                scope: {
+                  type: 'string',
+                  const: 'universal',
+                  description:
+                    'Effective scope. Current keys are universal; persisted legacy scope values do not restrict endpoint access.',
+                },
               },
             },
             limits: {
@@ -1616,7 +1664,8 @@ export function buildOpenApiDocument() {
               properties: {
                 monthly_events: {
                   type: ['integer', 'null'],
-                  description: 'Plan cap on monthly events; null means unlimited.',
+                  description:
+                    'Commercial-plan or self-host deployment cap on monthly events; null means unlimited.',
                 },
                 enforced: { type: 'boolean' },
               },

@@ -26,8 +26,15 @@ const builderIds: string[] = [];
 async function createBuilder(label: string): Promise<string> {
   const suffix = crypto.randomBytes(6).toString('hex');
   const [row] = await sql<{ id: string }[]>`
-    INSERT INTO builders (email, name, tier, slug)
-    VALUES (${`${label}-${suffix}@example.com`}, ${label}, 'pro', ${`${label}-${suffix}`})
+    INSERT INTO builders (email, name, tier, access_state, entitlement_source, slug)
+    VALUES (
+      ${`${label}-${suffix}@example.com`},
+      ${label},
+      'pro',
+      'active',
+      'admin',
+      ${`${label}-${suffix}`}
+    )
     RETURNING id
   `;
   const builderId = row!.id;

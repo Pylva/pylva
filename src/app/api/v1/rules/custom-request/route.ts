@@ -105,6 +105,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         slug: builders.slug,
         email: builders.email,
         tier: builders.tier,
+        access_state: builders.access_state,
+        entitlement_source: builders.entitlement_source,
       })
       .from(builders)
       .where(eq(builders.id, ctx.builderId))
@@ -115,6 +117,15 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (!userRow) return authError(ErrorCode.INVALID_API_KEY, 'User not found');
   const workspaceRow = workspace[0];
   if (!workspaceRow) return authError(ErrorCode.INVALID_API_KEY, 'Workspace not found');
+  const workspaceForRequest: Workspace = {
+    id: workspaceRow.id,
+    name: workspaceRow.name,
+    slug: workspaceRow.slug,
+    email: workspaceRow.email,
+    // Historical request records keep a non-null display snapshot even when
+    // the workspace has no commercial plan.
+    tier: workspaceRow.tier ?? workspaceRow.entitlement_source ?? workspaceRow.access_state,
+  };
 
   const submittedAt = new Date();
   const [requestRow] = await withRLS(ctx.builderId, async (tx) =>
@@ -125,10 +136,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         requester_user_id: ctx.userId,
         requester_email: userRow.email,
         requester_display_name: userRow.displayName,
-        workspace_name: workspaceRow.name,
-        workspace_slug: workspaceRow.slug,
-        workspace_email: workspaceRow.email,
-        workspace_tier: workspaceRow.tier,
+        workspace_name: workspaceForRequest.name,
+        workspace_slug: workspaceForRequest.slug,
+        workspace_email: workspaceForRequest.email,
+        workspace_tier: workspaceForRequest.tier,
         idea,
         email_status: 'pending',
         internal_email_sent: false,
@@ -146,7 +157,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const result = await sendCustomRuleRequestEmails({
     idea,
     requester: userRow,
-    workspace: workspaceRow,
+    workspace: workspaceForRequest,
     submittedAt,
   });
 

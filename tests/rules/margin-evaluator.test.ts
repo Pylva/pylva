@@ -23,6 +23,7 @@ import {
 const mocks = vi.hoisted(() => ({
   aggregateSpendForRule: vi.fn(),
   applyFormula: vi.fn(),
+  authorizeBuilderCapability: vi.fn(),
   countCustomers: vi.fn(),
   deliverAlert: vi.fn(),
   fetchPeriodAggregates: vi.fn(),
@@ -42,6 +43,11 @@ vi.mock('../../src/lib/rules/repository.js', () => ({
   listRules: mocks.listRules,
   listAlertChannelEntriesForRule: mocks.listAlertChannelEntriesForRule,
   markRuleTriggered: mocks.markRuleTriggered,
+  markRuleTriggeredWithProductAccess: mocks.markRuleTriggered,
+}));
+
+vi.mock('../../src/lib/auth/builder-entitlement.js', () => ({
+  authorizeBuilderCapability: mocks.authorizeBuilderCapability,
 }));
 
 vi.mock('../../src/lib/customers/lookup.js', () => ({
@@ -104,6 +110,8 @@ vi.mock('../../src/lib/logger.js', () => ({
 }));
 
 const { evaluateMarginRules, marginPct } = await import('../../src/lib/rules/margin-evaluator.js');
+const { ProductAccessMutationDeniedError } =
+  await import('../../src/lib/auth/product-access-mutation-error.js');
 
 const BUILDER = 'builder-a';
 const NOW = new Date('2026-06-10T12:30:00.000Z');
@@ -171,12 +179,13 @@ describe('evaluateMarginRules', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.alertHistoryRows = [];
+    mocks.authorizeBuilderCapability.mockResolvedValue({ allowed: true });
     mocks.listRules.mockResolvedValue([marginRule()]);
     mocks.listCustomersWithOpenPricing.mockResolvedValue([ALICE, BOB]);
     mocks.countCustomers.mockResolvedValue(2);
     mocks.listAlertChannelEntriesForRule.mockResolvedValue([]);
-    mocks.deliverAlert.mockResolvedValue(undefined);
-    mocks.markRuleTriggered.mockResolvedValue(undefined);
+    mocks.deliverAlert.mockResolvedValue({ kind: 'accepted' });
+    mocks.markRuleTriggered.mockResolvedValue({ kind: 'updated' });
     mocks.fetchPeriodAggregates.mockResolvedValue(
       aggregatesWith([{ provider: 'openai', model: 'gpt-4o', cost_usd: 90 }]),
     );
@@ -432,6 +441,185 @@ describe('evaluateMarginRules', () => {
     expect(summary.rules_evaluated).toBe(1);
     expect(summary.customers_skipped_insufficient_revenue).toBe(1);
     expect(mocks.deliverAlert).not.toHaveBeenCalled();
+  });
+
+  it('does not persist or deliver when suspension lands during margin measurement', async () => {
+    let resumeAliceUsage!: () => void;
+    let signalAliceUsageStarted!: () => void;
+    const aliceUsageStarted = new Promise<void>((resolve) => {
+      signalAliceUsageStarted = resolve;
+    });
+    const pausedAliceUsage = new Promise<void>((resolve) => {
+      resumeAliceUsage = resolve;
+    });
+    let hasProductAccess = true;
+
+    mocks.authorizeBuilderCapability.mockImplementation(async () => ({
+      allowed: hasProductAccess,
+    }));
+    mocks.getUsageForPeriod.mockImplementation(
+      async ({ customerId }: { customerId: string }) => {
+        if (customerId === 'builder-a:alice') {
+          signalAliceUsageStarted();
+          await pausedAliceUsage;
+        }
+        return { composite: customerId };
+      },
+    );
+
+    const evaluation = evaluateMarginRules({
+      builderId: BUILDER,
+      catalog: CATALOG,
+      now: NOW,
+    });
+    await aliceUsageStarted;
+    hasProductAccess = false;
+    resumeAliceUsage();
+
+    await expect(evaluation).resolves.toMatchObject({
+      anomalies_inserted: 0,
+      anomalies_skipped_idempotent: 0,
+      alerts_fired: 0,
+    });
+    expect(mocks.insertAnomalyEvent).not.toHaveBeenCalled();
+    expect(mocks.deliverAlert).not.toHaveBeenCalled();
+    expect(mocks.markRuleTriggered).not.toHaveBeenCalled();
+  });
+
+  it('does not deliver when suspension lands after persistence during channel lookup', async () => {
+    let resumeChannelLookup!: () => void;
+    let signalChannelLookupStarted!: () => void;
+    const channelLookupStarted = new Promise<void>((resolve) => {
+      signalChannelLookupStarted = resolve;
+    });
+    const pausedChannelLookup = new Promise<void>((resolve) => {
+      resumeChannelLookup = resolve;
+    });
+    let hasProductAccess = true;
+
+    mocks.authorizeBuilderCapability.mockImplementation(async () => ({
+      allowed: hasProductAccess,
+    }));
+    mocks.listAlertChannelEntriesForRule.mockImplementationOnce(async () => {
+      signalChannelLookupStarted();
+      await pausedChannelLookup;
+      return [];
+    });
+
+    const evaluation = evaluateMarginRules({
+      builderId: BUILDER,
+      catalog: CATALOG,
+      now: NOW,
+    });
+    await channelLookupStarted;
+    hasProductAccess = false;
+    resumeChannelLookup();
+
+    await expect(evaluation).resolves.toMatchObject({
+      anomalies_inserted: 1,
+      alerts_fired: 0,
+    });
+    expect(mocks.insertAnomalyEvent).toHaveBeenCalledTimes(1);
+    expect(mocks.deliverAlert).not.toHaveBeenCalled();
+    expect(mocks.markRuleTriggered).not.toHaveBeenCalled();
+  });
+
+  it('does not mark a rule triggered when suspension lands during alert delivery', async () => {
+    let resumeDelivery!: () => void;
+    let signalDeliveryStarted!: () => void;
+    const deliveryStarted = new Promise<void>((resolve) => {
+      signalDeliveryStarted = resolve;
+    });
+    const pausedDelivery = new Promise<void>((resolve) => {
+      resumeDelivery = resolve;
+    });
+    let hasProductAccess = true;
+
+    mocks.authorizeBuilderCapability.mockImplementation(async () => ({
+      allowed: hasProductAccess,
+    }));
+    mocks.deliverAlert.mockImplementationOnce(async () => {
+      signalDeliveryStarted();
+      await pausedDelivery;
+      return { kind: 'accepted' };
+    });
+    mocks.markRuleTriggered.mockImplementationOnce(async () => ({
+      kind: hasProductAccess ? 'updated' : 'access_denied',
+    }));
+
+    const evaluation = evaluateMarginRules({
+      builderId: BUILDER,
+      catalog: CATALOG,
+      now: NOW,
+    });
+    await deliveryStarted;
+    hasProductAccess = false;
+    resumeDelivery();
+
+    await expect(evaluation).resolves.toMatchObject({
+      anomalies_inserted: 1,
+      alerts_fired: 0,
+    });
+    expect(mocks.deliverAlert).toHaveBeenCalledTimes(1);
+    expect(mocks.markRuleTriggered).toHaveBeenCalledWith(BUILDER, 'rule-margin');
+  });
+
+  it('stops when the locked insert observes suspension after the pre-insert checkpoint', async () => {
+    let rejectLockedInsert!: () => void;
+    let signalLockedInsertStarted!: () => void;
+    const lockedInsertStarted = new Promise<void>((resolve) => {
+      signalLockedInsertStarted = resolve;
+    });
+    const pausedLockedInsert = new Promise<never>((_resolve, reject) => {
+      rejectLockedInsert = () => reject(new ProductAccessMutationDeniedError(BUILDER));
+    });
+
+    mocks.insertAnomalyEvent.mockImplementationOnce(() => {
+      signalLockedInsertStarted();
+      return pausedLockedInsert;
+    });
+
+    const evaluation = evaluateMarginRules({
+      builderId: BUILDER,
+      catalog: CATALOG,
+      now: NOW,
+    });
+    await lockedInsertStarted;
+    rejectLockedInsert();
+
+    await expect(evaluation).resolves.toMatchObject({
+      anomalies_inserted: 0,
+      anomalies_skipped_idempotent: 0,
+      alerts_fired: 0,
+    });
+    expect(mocks.deliverAlert).not.toHaveBeenCalled();
+    expect(mocks.markRuleTriggered).not.toHaveBeenCalled();
+  });
+
+  it('does not advance trigger state when the delivery fence denies access', async () => {
+    mocks.deliverAlert.mockResolvedValueOnce({ kind: 'access_denied' });
+
+    await expect(
+      evaluateMarginRules({ builderId: BUILDER, catalog: CATALOG, now: NOW }),
+    ).resolves.toMatchObject({
+      anomalies_inserted: 1,
+      alerts_fired: 0,
+    });
+    expect(mocks.markRuleTriggered).not.toHaveBeenCalled();
+  });
+
+  it('fails closed before persistence when the entitlement dependency throws', async () => {
+    mocks.authorizeBuilderCapability.mockRejectedValueOnce(new Error('database unavailable'));
+
+    await expect(
+      evaluateMarginRules({ builderId: BUILDER, catalog: CATALOG, now: NOW }),
+    ).resolves.toMatchObject({
+      anomalies_inserted: 0,
+      alerts_fired: 0,
+    });
+    expect(mocks.insertAnomalyEvent).not.toHaveBeenCalled();
+    expect(mocks.deliverAlert).not.toHaveBeenCalled();
+    expect(mocks.markRuleTriggered).not.toHaveBeenCalled();
   });
 
   it('ignores drafts, disabled rules, other types, and malformed configs', async () => {

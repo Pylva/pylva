@@ -4,6 +4,7 @@ import { ErrorCode, RuleStatus, RuleType } from '@pylva/shared';
 
 const mocks = vi.hoisted(() => ({
   auditLog: vi.fn(),
+  checkDashboardFeatureGate: vi.fn(),
   getRule: vi.fn(),
   isFeatureEnabled: vi.fn(),
   previewRule: vi.fn(),
@@ -33,6 +34,9 @@ vi.mock('../../src/lib/auth/middleware.js', () => ({
 }));
 
 vi.mock('../../src/lib/auth/audit-log.js', () => ({ auditLog: mocks.auditLog }));
+vi.mock('../../src/lib/auth/dashboard-feature-gate.js', () => ({
+  checkDashboardFeatureGate: mocks.checkDashboardFeatureGate,
+}));
 vi.mock('../../src/lib/db/rls.js', () => ({ withRLS: mocks.withRLS }));
 vi.mock('../../src/lib/feature-flags.js', () => ({ isFeatureEnabled: mocks.isFeatureEnabled }));
 vi.mock('../../src/lib/rules/backup-price-snapshot.js', () => ({
@@ -43,17 +47,6 @@ vi.mock('../../src/lib/rules/repository.js', () => ({
   getRule: mocks.getRule,
   promoteRuleStatus: mocks.promoteRuleStatus,
   updateRule: mocks.updateRule,
-}));
-vi.mock('../../src/lib/db/client.js', () => ({
-  db: {
-    select: () => ({
-      from: () => ({
-        where: () => ({
-          limit: () => Promise.resolve([{ tier: 'pro' }]),
-        }),
-      }),
-    }),
-  },
 }));
 vi.mock('../../src/lib/logger.js', () => ({
   logger: {
@@ -100,6 +93,7 @@ const params = { params: Promise.resolve({ id: 'rule-1' }) };
 describe('POST /api/v1/rules/[id]/activate', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.checkDashboardFeatureGate.mockResolvedValue(null);
     mocks.isFeatureEnabled.mockResolvedValue(true);
     mocks.previewRule.mockResolvedValue({
       affected_customers: [{ customer_id: 'cust_1' }],

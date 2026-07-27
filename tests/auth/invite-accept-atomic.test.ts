@@ -14,6 +14,9 @@ const mocks = vi.hoisted(() => ({
   candidate: true,
   inserted: vi.fn(),
   membershipRole: 'member',
+  membershipPlan: 'scale' as string | null,
+  membershipAccessState: 'active' as string | null,
+  membershipEntitlementSource: 'stripe' as string | null,
 }));
 
 vi.mock('@/lib/config', () => ({
@@ -56,7 +59,13 @@ vi.mock('@/lib/db/schema', () => ({
     builder_id: 'membership.builder_id',
     role: 'membership.role',
   },
-  builders: { id: 'builders.id', slug: 'builders.slug', tier: 'builders.tier' },
+  builders: {
+    id: 'builders.id',
+    slug: 'builders.slug',
+    tier: 'builders.tier',
+    access_state: 'builders.access_state',
+    entitlement_source: 'builders.entitlement_source',
+  },
 }));
 
 function queryResult(result: unknown[]) {
@@ -109,7 +118,17 @@ function transaction() {
   return {
     update: vi.fn(() => updateChain),
     insert: vi.fn(() => insertChain),
-    select: vi.fn(() => queryResult([{ role: mocks.membershipRole, slug: 'acme', tier: 'scale' }])),
+    select: vi.fn(() =>
+      queryResult([
+        {
+          role: mocks.membershipRole,
+          slug: 'acme',
+          plan: mocks.membershipPlan,
+          access_state: mocks.membershipAccessState,
+          entitlement_source: mocks.membershipEntitlementSource,
+        },
+      ]),
+    ),
   };
 }
 
@@ -131,13 +150,18 @@ describe('invite acceptance atomicity', () => {
     mocks.claimed = true;
     mocks.candidate = true;
     mocks.membershipRole = 'member';
+    mocks.membershipPlan = 'scale';
+    mocks.membershipAccessState = 'active';
+    mocks.membershipEntitlementSource = 'stripe';
     mocks.withJwtAuth.mockResolvedValue({
       context: {
         builderId: 'old-builder',
         userId: 'user-1',
         orgSlug: 'old-org',
         role: 'owner',
-        tier: 'free',
+        plan: 'pro',
+        accessState: 'active',
+        tier: 'pro',
         jti: 'leaf-1',
         revocationId: 'family-1',
       },
@@ -153,7 +177,12 @@ describe('invite acceptance atomicity', () => {
     expect(response.headers.get('location')).toBe('https://app.example.com/o/acme/dashboard');
     expect(mocks.inserted).toHaveBeenCalledTimes(1);
     expect(mocks.signJwt).toHaveBeenCalledWith(
-      expect.objectContaining({ role: 'member', org_slug: 'acme' }),
+      expect.objectContaining({
+        role: 'member',
+        org_slug: 'acme',
+        plan: 'scale',
+        access_state: 'active',
+      }),
     );
     expect(mocks.revokeJwt).toHaveBeenCalledWith('family-1', 'pylva:dashboard', 86_400);
     expect(mocks.setDashboardSessionCookies).toHaveBeenCalledWith(response, {
@@ -162,6 +191,33 @@ describe('invite acceptance atomicity', () => {
       orgSlug: 'acme',
     });
     expect(response.cookies.get('pylva_pending_invite')?.value).toBe('');
+  });
+
+  it('normalizes an old-writer legacy Free invite before committing and signing', async () => {
+    mocks.membershipPlan = 'free';
+    mocks.membershipAccessState = null;
+    mocks.membershipEntitlementSource = null;
+
+    const response = await GET(request());
+
+    expect(response.headers.get('location')).toBe('https://app.example.com/o/acme/subscription');
+    expect(mocks.signJwt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        plan: null,
+        access_state: 'checkout_required',
+      }),
+    );
+    expect(mocks.signJwt.mock.calls[0]?.[0]).not.toHaveProperty('tier');
+  });
+
+  it('fails closed inside the claim transaction for every malformed entitlement tuple', async () => {
+    mocks.membershipPlan = 'pro';
+    mocks.membershipAccessState = 'suspended';
+    mocks.membershipEntitlementSource = 'stripe';
+
+    await expect(GET(request())).rejects.toThrow('Invalid builder entitlement');
+    expect(mocks.signJwt).not.toHaveBeenCalled();
+    expect(mocks.invalidateMembershipCache).not.toHaveBeenCalled();
   });
 
   it('fails when a concurrent revoke or expiry wins the conditional claim', async () => {
@@ -174,6 +230,33 @@ describe('invite acceptance atomicity', () => {
     expect(mocks.signJwt).not.toHaveBeenCalled();
     expect(mocks.revokeJwt).not.toHaveBeenCalled();
     expect(response.cookies.get('pylva_pending_invite')?.value).toBe('');
+  });
+
+  it.each(['already expired', 'already accepted'])(
+    'returns gone without mutating state when the invite is %s before lookup',
+    async () => {
+      mocks.candidate = false;
+
+      const response = await GET(request());
+
+      expect(response.status).toBe(410);
+      expect(mocks.inserted).not.toHaveBeenCalled();
+      expect(mocks.signJwt).not.toHaveBeenCalled();
+      expect(mocks.revokeJwt).not.toHaveBeenCalled();
+    },
+  );
+
+  it('makes repeated acceptance idempotently unavailable after the first commit', async () => {
+    const accepted = await GET(request());
+    expect(accepted.status).toBe(307);
+
+    mocks.candidate = false;
+    const repeated = await GET(request());
+
+    expect(repeated.status).toBe(410);
+    expect(mocks.inserted).toHaveBeenCalledTimes(1);
+    expect(mocks.signJwt).toHaveBeenCalledTimes(1);
+    expect(mocks.revokeJwt).toHaveBeenCalledTimes(1);
   });
 
   it('parks only an HttpOnly cookie and keeps the login URL clean when unauthenticated', async () => {

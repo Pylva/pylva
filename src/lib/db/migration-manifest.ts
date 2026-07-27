@@ -264,6 +264,16 @@ export const EXPECTED_MIGRATIONS: readonly MigrationManifestEntry[] = [
     sha256: '2a4ee85821fc5f8eafe35a6bd4933e8c4c2a9de6373eb1d9e2f69fb06428ae3b',
     phase: 'pre_roll',
   },
+  {
+    filename: '056_workspace_access_state_expand.sql',
+    sha256: 'c7b8d4c170208a53f9dbc29d909b63dae79772f43faf404b6e259e3a71780bfc',
+    phase: 'pre_roll',
+  },
+  {
+    filename: '058_remove_free_plan_contract.sql',
+    sha256: '2aff230fc64229e5c4fefbf7f7a828ba7ccb5ebf6b3d20d52acd2ec55e4cc44e',
+    phase: 'post_roll',
+  },
 ] as const;
 
-export const EXPECTED_SCHEMA_HEAD: string = '055_monthly_invoice_period_retry.sql';
+export const EXPECTED_SCHEMA_HEAD: string = '058_remove_free_plan_contract.sql';

@@ -8,7 +8,7 @@ from datetime import datetime
 
 from ..core.budget_accumulator import check
 from ..core.budget_rules import find_applicable_budget_rules, period_start_utc
-from ..core.rules_cache import get_cached_rules, is_passthrough
+from ..core.rules_cache import get_cached_rules, is_passthrough, mark_stale_rules_passthrough
 from ..errors.budget_exceeded import BudgetExceededSource, PylvaBudgetExceeded
 
 Period = str
@@ -39,6 +39,7 @@ def _schedule_rules_refresh() -> None:
     Reuses ``refresh_and_validate_once`` from `_init_validation` so the D52
     failover-wrapper validation runs at most once per process even if init()
     ran without an event loop."""
+    mark_stale_rules_passthrough()
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:

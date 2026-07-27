@@ -122,7 +122,7 @@ jobs:
       - name: Run migrations
         env:
           MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
-        run: pnpm db:setup
+        run: pnpm db:setup --fresh-install
 
       - name: Provision ordinary general-app runtime login
         env:
@@ -253,7 +253,7 @@ jobs:
       - name: Run migrations
         env:
           MIGRATION_DATABASE_URL: postgresql://pylva_migration_ci:pylva_migration_ci_test@localhost:5432/pylva_test
-        run: pnpm db:setup
+        run: pnpm db:setup --fresh-install
 
       - name: Provision ordinary general-app runtime login
         env:

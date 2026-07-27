@@ -630,7 +630,10 @@ class _PylvaCallbackMixin:
         }
 
 
-class PylvaCallbackHandler(_PylvaCallbackMixin, BaseCallbackHandler):
+class PylvaCallbackHandler(  # type: ignore[misc, unused-ignore]
+    _PylvaCallbackMixin,
+    BaseCallbackHandler,
+):
     """Sync LangChain callback handler for Pylva cost telemetry."""
 
     def on_chain_start(
@@ -794,7 +797,10 @@ class PylvaCallbackHandler(_PylvaCallbackMixin, BaseCallbackHandler):
             _flush_best_effort()
 
 
-class AsyncPylvaCallbackHandler(_PylvaCallbackMixin, AsyncCallbackHandler):
+class AsyncPylvaCallbackHandler(  # type: ignore[misc, unused-ignore]
+    _PylvaCallbackMixin,
+    AsyncCallbackHandler,
+):
     """Async LangChain callback handler for Pylva cost telemetry."""
 
     async def on_chain_start(

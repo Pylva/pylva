@@ -33,7 +33,7 @@
     "db:migrate:verify-physical": "ALLOW_MIGRATION_DATABASE_URL_FALLBACK=true tsx scripts/verify-physical-schema-contract.ts",
     "db:setup:clickhouse": "SKIP_POSTGRES=true pnpm db:setup",
     "db:seed": "tsx db/seed.ts",
-    "db:reset": "ALLOW_MIGRATION_DATABASE_URL_FALLBACK=true tsx db/setup.ts && tsx db/seed.ts",
+    "db:reset": "pnpm db:setup --fresh-install && pnpm db:seed",
     "clickhouse:doctor": "tsx scripts/clickhouse-doctor.ts",
     "budget-control:doctor": "tsx scripts/authoritative-budget-control-doctor.ts",
     "budget:readiness": "tsx scripts/budget-readiness.ts",
@@ -50,6 +50,7 @@
   "dependencies": {
     "@aws-sdk/client-lambda": "^3.1090.0",
     "@aws-sdk/client-secrets-manager": "^3.1090.0",
+    "@aws-sdk/client-sts": "^3.1090.0",
     "@clickhouse/client": "^1.23.1",
     "@pylva/shared": "workspace:*",
     "@sentry/nextjs": "^10.66.0",

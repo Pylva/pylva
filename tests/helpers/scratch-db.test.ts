@@ -7,7 +7,9 @@ vi.mock('postgres', () => ({
 }));
 
 import {
+  createFreshInstallScratchDb,
   createScratchDb,
+  FRESH_INSTALL_SCRATCH_BOOTSTRAP_GUIDANCE,
   resolveScratchDatabaseAdminUrl,
   TEST_DATABASE_ADMIN_URL_ENV,
 } from './scratch-db.js';
@@ -23,9 +25,9 @@ function restoreEnvironment(name: string, value: string | undefined): void {
   }
 }
 
-function fakeClient() {
+function fakeClient(rows?: ReadonlyArray<Record<string, unknown>>) {
   return {
-    unsafe: vi.fn(async () => undefined),
+    unsafe: vi.fn(async (_query: string) => rows),
     end: vi.fn(async () => undefined),
   };
 }
@@ -104,5 +106,72 @@ describe('createScratchDb', () => {
       `DROP DATABASE IF EXISTS "${scratch.name}" WITH (FORCE)`,
     );
     expect(dropClient.end).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('createFreshInstallScratchDb', () => {
+  const safePosture = {
+    current_user_name: 'pylva_migration_ci',
+    session_user_name: 'pylva_migration_ci',
+    can_login: true,
+    inherits_privileges: true,
+    can_create_database: true,
+    can_create_role: true,
+    is_superuser: false,
+    bypasses_rls: false,
+    can_replicate: false,
+    owns_current_database: true,
+  };
+
+  it('attests the fixed scoped migrator and keeps cleanup database-scoped', async () => {
+    process.env[TEST_DATABASE_ADMIN_URL_ENV] =
+      'postgresql://pylva_migration_ci:secret@db.example:5432/postgres';
+    const createClient = fakeClient();
+    const scratchClient = fakeClient([safePosture]);
+    const dropClient = fakeClient();
+    postgresMock
+      .mockReturnValueOnce(createClient)
+      .mockReturnValueOnce(scratchClient)
+      .mockReturnValueOnce(dropClient);
+
+    const scratch = await createFreshInstallScratchDb({ prefix: 'fresh owner' });
+
+    expect(scratchClient.unsafe).toHaveBeenCalledWith(
+      expect.stringContaining('FROM pg_catalog.pg_roles AS role'),
+    );
+    await scratch.drop();
+    expect(dropClient.unsafe).toHaveBeenCalledWith(
+      expect.stringContaining(`DROP DATABASE IF EXISTS "${scratch.name}"`),
+    );
+    expect(
+      dropClient.unsafe.mock.calls.some(([query]) => String(query).includes('DROP ROLE')),
+    ).toBe(false);
+  });
+
+  it('drops the disposable database and emits exact bootstrap guidance for an unsafe owner', async () => {
+    process.env[TEST_DATABASE_ADMIN_URL_ENV] =
+      'postgresql://pylva:secret@db.example:5432/postgres';
+    const createClient = fakeClient();
+    const scratchClient = fakeClient([
+      {
+        ...safePosture,
+        current_user_name: 'pylva',
+        session_user_name: 'pylva',
+        is_superuser: true,
+      },
+    ]);
+    const dropClient = fakeClient();
+    postgresMock
+      .mockReturnValueOnce(createClient)
+      .mockReturnValueOnce(scratchClient)
+      .mockReturnValueOnce(dropClient);
+
+    await expect(
+      createFreshInstallScratchDb({ prefix: 'unsafe owner' }),
+    ).rejects.toThrow(FRESH_INSTALL_SCRATCH_BOOTSTRAP_GUIDANCE);
+    expect(scratchClient.end).toHaveBeenCalledTimes(1);
+    expect(dropClient.unsafe).toHaveBeenCalledWith(
+      expect.stringContaining('DROP DATABASE IF EXISTS "unsafe_owner_'),
+    );
   });
 });

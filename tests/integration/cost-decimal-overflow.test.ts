@@ -17,9 +17,8 @@ import { runBackfill } from '../../src/lib/pricing/backfill.js';
 const DATABASE_URL =
   process.env['DATABASE_URL'] ?? 'postgresql://pylva:pylva_dev@localhost:5432/pylva';
 
-// Recent timestamp: free-tier telemetry retention is now 30 days stamped at
-// ingest — a fixed historical date would be expired by ClickHouse TTL on
-// insert and the rows would never be readable back.
+// Use a recent timestamp so retention TTL cannot expire the row during the
+// integration assertion.
 const EVENT_TIMESTAMP = new Date(Date.now() - 60_000).toISOString();
 
 let sql: ReturnType<typeof postgres>;
@@ -32,8 +31,15 @@ function uniqueMetric(prefix: string): string {
 async function createBuilder(label: string): Promise<string> {
   const suffix = crypto.randomBytes(6).toString('hex');
   const [row] = await sql<{ id: string }[]>`
-    INSERT INTO builders (email, name, tier, slug)
-    VALUES (${`${label}-${suffix}@example.com`}, ${label}, 'free', ${`${label}-${suffix}`})
+    INSERT INTO builders (email, name, tier, access_state, entitlement_source, slug)
+    VALUES (
+      ${`${label}-${suffix}@example.com`},
+      ${label},
+      'pro',
+      'active',
+      'admin',
+      ${`${label}-${suffix}`}
+    )
     RETURNING id
   `;
   const builderId = row!.id;

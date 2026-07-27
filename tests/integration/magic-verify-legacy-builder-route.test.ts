@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => {
 vi.mock('@/lib/auth/magic-link', () => ({
   AuthDegraded: mocks.AuthDegraded,
   consumeMagicToken: mocks.consumeMagicToken,
+  consumeMagicTokenIdentity: mocks.consumeMagicToken,
 }));
 vi.mock('@/lib/auth/jwt', () => ({ signJwt: mocks.signJwt }));
 vi.mock('@/lib/auth/middleware', () => ({
@@ -81,8 +82,13 @@ describe('magic-link legacy builder adoption integration', () => {
 
     try {
       const [builder] = await sql<{ id: string }[]>`
-        INSERT INTO builders (email, name, tier, slug)
-        VALUES (${email.toUpperCase()}, 'Magic Legacy', 'enterprise', ${slug})
+        INSERT INTO builders (
+          email, name, tier, access_state, entitlement_source, slug
+        )
+        VALUES (
+          ${email.toUpperCase()}, 'Magic Legacy', 'enterprise',
+          'active', 'admin', ${slug}
+        )
         RETURNING id
       `;
       const [user] = await sql<{ id: string }[]>`

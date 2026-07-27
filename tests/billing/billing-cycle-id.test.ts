@@ -16,6 +16,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { billingCycleIdFor } from '../../src/lib/billing/auto-split.js';
 
+const entitlementMocks = vi.hoisted(() => ({
+  authorizeBuilderCapability: vi.fn(),
+  getBuilderEntitlementForShare: vi.fn(),
+}));
+
 const BUILDER_ID = '00000000-0000-0000-0000-000000000001';
 const STRIPE_ACCOUNT = 'acct_test_1';
 
@@ -78,6 +83,15 @@ vi.mock('../../src/lib/logger.js', () => ({
 }));
 
 vi.mock('../../src/lib/auth/audit-log.js', () => ({ auditLog: () => Promise.resolve() }));
+
+vi.mock('../../src/lib/auth/builder-entitlement.js', () => ({
+  authorizeBuilderCapability: entitlementMocks.authorizeBuilderCapability,
+}));
+
+vi.mock('../../src/lib/db/advisory-locks.js', () => ({
+  getBuilderEntitlementForShare:
+    entitlementMocks.getBuilderEntitlementForShare,
+}));
 
 vi.mock('../../src/lib/clickhouse/customer-id.js', () => ({
   resolveCustomerComposite: () => Promise.resolve(`${BUILDER_ID}:ext-1`),
@@ -217,6 +231,19 @@ beforeEach(() => {
   failOnCreateCall = null;
   usageCalls = 0;
   failUsageAt = null;
+  entitlementMocks.authorizeBuilderCapability.mockReset();
+  entitlementMocks.authorizeBuilderCapability.mockResolvedValue({ allowed: true });
+  entitlementMocks.getBuilderEntitlementForShare.mockReset();
+  entitlementMocks.getBuilderEntitlementForShare.mockResolvedValue({
+    ok: true,
+    entitlement: {
+      plan: null,
+      access_state: 'active',
+      entitlement_source: 'self_hosted',
+      has_product_access: true,
+      legacy_free: false,
+    },
+  });
 });
 
 describe('billingCycleIdFor()', () => {

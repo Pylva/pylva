@@ -74,11 +74,13 @@ function eventFor(params: {
 async function createBuilder(): Promise<string> {
   const suffix = crypto.randomBytes(6).toString('hex');
   const [row] = await sql<{ id: string }[]>`
-    INSERT INTO builders (email, name, tier, slug)
+    INSERT INTO builders (email, name, tier, access_state, entitlement_source, slug)
     VALUES (
       ${`langgraph-clickhouse-${suffix}@example.com`},
       'LangGraph ClickHouse Readiness',
       'pro',
+      'active',
+      'admin',
       ${`langgraph-clickhouse-${suffix}`}
     )
     RETURNING id

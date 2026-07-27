@@ -12,15 +12,19 @@ import {
 } from '@pylva/shared';
 
 const insertAnomalyEventMock = vi.fn();
+const isInCooldownMock = vi.fn();
 const deliverBuilderAlertMock = vi.fn();
 const fetchPeriodAggregatesMock = vi.fn();
 const listBuildersWithEventsMock = vi.fn();
 const loadModelTierCatalogMock = vi.fn();
+const authorizeBuilderCapabilityMock = vi.fn();
+const logInfoMock = vi.fn();
+const logWarnMock = vi.fn();
 
 vi.mock('../../src/lib/anomaly/repository.js', () => ({
   insertAnomalyEvent: insertAnomalyEventMock,
   expireStaleAnomalies: vi.fn().mockResolvedValue(0),
-  isInCooldown: vi.fn().mockResolvedValue(false),
+  isInCooldown: isInCooldownMock,
 }));
 
 vi.mock('../../src/lib/alerts/builder-alert.js', () => ({
@@ -52,11 +56,19 @@ vi.mock('../../src/lib/rules/margin-evaluator.js', () => ({
   })),
 }));
 
+vi.mock('../../src/lib/auth/builder-entitlement.js', () => ({
+  authorizeBuilderCapability: authorizeBuilderCapabilityMock,
+}));
+
 vi.mock('../../src/lib/logger.js', () => ({
-  logger: { child: () => ({ warn: vi.fn(), info: vi.fn(), error: vi.fn() }) },
+  logger: {
+    child: () => ({ warn: logWarnMock, info: logInfoMock, error: vi.fn() }),
+  },
 }));
 
 const { detectAnomalies } = await import('../../src/lib/anomaly/runner.js');
+const { ProductAccessMutationDeniedError } =
+  await import('../../src/lib/auth/product-access-mutation-error.js');
 
 const NOW = new Date('2026-04-26T12:00:00Z');
 const BUILDER_ID = '00000000-0000-0000-0000-000000000001';
@@ -111,10 +123,14 @@ function makeInsertedRow(): AnomalyEvent {
 describe('detectAnomalies — alert dispatch wiring', () => {
   beforeEach(() => {
     insertAnomalyEventMock.mockReset();
+    isInCooldownMock.mockReset().mockResolvedValue(false);
     deliverBuilderAlertMock.mockReset();
     fetchPeriodAggregatesMock.mockReset();
     listBuildersWithEventsMock.mockReset();
     loadModelTierCatalogMock.mockReset();
+    authorizeBuilderCapabilityMock.mockReset().mockResolvedValue({ allowed: true });
+    logInfoMock.mockReset();
+    logWarnMock.mockReset();
 
     loadModelTierCatalogMock.mockResolvedValue({ byProviderModel: new Map() });
     listBuildersWithEventsMock.mockResolvedValue([
@@ -137,7 +153,7 @@ describe('detectAnomalies — alert dispatch wiring', () => {
 
   it('dispatches an alert for every successfully inserted anomaly', async () => {
     insertAnomalyEventMock.mockResolvedValue(makeInsertedRow());
-    deliverBuilderAlertMock.mockResolvedValue(undefined);
+    deliverBuilderAlertMock.mockResolvedValue({ kind: 'delivered' });
 
     const result = await detectAnomalies({ now: NOW });
 
@@ -167,5 +183,171 @@ describe('detectAnomalies — alert dispatch wiring', () => {
 
     expect(result.anomalies_inserted).toBeGreaterThan(0);
     expect(result.errors).toBe(0); // dispatch errors don't increment cycle errors
+  });
+
+  it('does not report a lifecycle-denied delivery as dispatched', async () => {
+    insertAnomalyEventMock.mockResolvedValue(makeInsertedRow());
+    deliverBuilderAlertMock.mockResolvedValue({ kind: 'access_denied' });
+
+    const result = await detectAnomalies({ now: NOW });
+
+    expect(result).toMatchObject({ anomalies_inserted: 1, errors: 0 });
+    expect(logInfoMock).toHaveBeenCalledWith(
+      expect.objectContaining({ anomaly_id: 'a-inserted' }),
+      'anomaly alert stopped after workspace access changed',
+    );
+    expect(logInfoMock).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'anomaly alert dispatched',
+    );
+  });
+
+  it('does not report a skipped outcome as successful dispatch', async () => {
+    insertAnomalyEventMock.mockResolvedValue(makeInsertedRow());
+    deliverBuilderAlertMock.mockResolvedValueOnce({
+      kind: 'skipped',
+      reason: 'no_config',
+    });
+
+    await expect(detectAnomalies({ now: NOW })).resolves.toMatchObject({
+      anomalies_inserted: 1,
+      errors: 0,
+    });
+    expect(logInfoMock).toHaveBeenCalledWith(
+      expect.objectContaining({ anomaly_id: 'a-inserted', reason: 'no_config' }),
+      'anomaly alert not dispatched',
+    );
+    expect(logInfoMock).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'anomaly alert dispatched',
+    );
+  });
+
+  it('warns for an explicit failed outcome without rolling back the anomaly', async () => {
+    insertAnomalyEventMock.mockResolvedValue(makeInsertedRow());
+    deliverBuilderAlertMock.mockResolvedValue({
+      kind: 'failed',
+      error: 'channel down',
+    });
+
+    await expect(detectAnomalies({ now: NOW })).resolves.toMatchObject({
+      anomalies_inserted: 1,
+      errors: 0,
+    });
+    expect(logWarnMock).toHaveBeenCalledWith(
+      expect.objectContaining({ anomaly_id: 'a-inserted' }),
+      'anomaly alert dispatch failed',
+    );
+    expect(logInfoMock).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'anomaly alert dispatched',
+    );
+  });
+
+  it('does not persist or deliver after suspension lands during aggregate loading', async () => {
+    let resumeCurrentAggregate!: (value: ReturnType<typeof makeAggregate>) => void;
+    let signalAggregateStarted!: () => void;
+    const aggregateStarted = new Promise<void>((resolve) => {
+      signalAggregateStarted = resolve;
+    });
+    const pausedCurrentAggregate = new Promise<ReturnType<typeof makeAggregate>>((resolve) => {
+      resumeCurrentAggregate = resolve;
+    });
+    let hasProductAccess = true;
+
+    authorizeBuilderCapabilityMock.mockImplementation(async () => ({
+      allowed: hasProductAccess,
+    }));
+    fetchPeriodAggregatesMock.mockReset();
+    fetchPeriodAggregatesMock
+      .mockImplementationOnce(() => {
+        signalAggregateStarted();
+        return pausedCurrentAggregate;
+      })
+      .mockResolvedValueOnce(
+        makeAggregate(50, [{ provider: 'openai', model: 'gpt-4o', cost_usd: 50 }]),
+      )
+      .mockResolvedValueOnce(
+        makeAggregate(50, [{ provider: 'openai', model: 'gpt-4o', cost_usd: 50 }]),
+      );
+    insertAnomalyEventMock.mockResolvedValue(makeInsertedRow());
+    deliverBuilderAlertMock.mockResolvedValue({ kind: 'delivered' });
+
+    const run = detectAnomalies({ now: NOW });
+    await aggregateStarted;
+    hasProductAccess = false;
+    resumeCurrentAggregate(
+      makeAggregate(200, [{ provider: 'openai', model: 'gpt-4o', cost_usd: 200 }]),
+    );
+
+    await expect(run).resolves.toMatchObject({
+      anomalies_inserted: 0,
+      anomalies_skipped_idempotent: 0,
+      errors: 0,
+    });
+    expect(insertAnomalyEventMock).not.toHaveBeenCalled();
+    expect(deliverBuilderAlertMock).not.toHaveBeenCalled();
+  });
+
+  it('does not deliver after suspension lands between persistence and dispatch', async () => {
+    let resumeCooldown!: (cooled: boolean) => void;
+    let signalCooldownStarted!: () => void;
+    const cooldownStarted = new Promise<void>((resolve) => {
+      signalCooldownStarted = resolve;
+    });
+    const pausedCooldown = new Promise<boolean>((resolve) => {
+      resumeCooldown = resolve;
+    });
+    let hasProductAccess = true;
+
+    authorizeBuilderCapabilityMock.mockImplementation(async () => ({
+      allowed: hasProductAccess,
+    }));
+    insertAnomalyEventMock.mockResolvedValue(makeInsertedRow());
+    isInCooldownMock.mockImplementationOnce(() => {
+      signalCooldownStarted();
+      return pausedCooldown;
+    });
+    deliverBuilderAlertMock.mockResolvedValue({ kind: 'delivered' });
+
+    const run = detectAnomalies({ now: NOW });
+    await cooldownStarted;
+    hasProductAccess = false;
+    resumeCooldown(false);
+
+    await expect(run).resolves.toMatchObject({
+      anomalies_inserted: 1,
+      errors: 0,
+    });
+    expect(insertAnomalyEventMock).toHaveBeenCalledTimes(1);
+    expect(deliverBuilderAlertMock).not.toHaveBeenCalled();
+  });
+
+  it('stops when the locked insert observes suspension after the pre-insert checkpoint', async () => {
+    let rejectLockedInsert!: () => void;
+    let signalLockedInsertStarted!: () => void;
+    const lockedInsertStarted = new Promise<void>((resolve) => {
+      signalLockedInsertStarted = resolve;
+    });
+    const pausedLockedInsert = new Promise<never>((_resolve, reject) => {
+      rejectLockedInsert = () => reject(new ProductAccessMutationDeniedError(BUILDER_ID));
+    });
+
+    insertAnomalyEventMock.mockImplementationOnce(() => {
+      signalLockedInsertStarted();
+      return pausedLockedInsert;
+    });
+
+    const run = detectAnomalies({ now: NOW });
+    await lockedInsertStarted;
+    rejectLockedInsert();
+
+    await expect(run).resolves.toMatchObject({
+      anomalies_inserted: 0,
+      anomalies_skipped_idempotent: 0,
+      errors: 0,
+    });
+    expect(insertAnomalyEventMock).toHaveBeenCalledTimes(1);
+    expect(deliverBuilderAlertMock).not.toHaveBeenCalled();
   });
 });

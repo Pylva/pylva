@@ -4,6 +4,7 @@ import { ApiKeyScope } from '@pylva/shared';
 
 const mocks = vi.hoisted(() => ({
   validateApiKey: vi.fn(),
+  authorizeBuilderCapability: vi.fn(),
   env: {
     REDIS_URL: 'redis://localhost:6379',
     JWT_PRIVATE_KEY: '/dev/null',
@@ -17,6 +18,11 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('../../src/lib/auth/api-key.js', () => ({
   validateApiKey: mocks.validateApiKey,
+}));
+
+vi.mock('../../src/lib/auth/builder-entitlement.js', () => ({
+  authorizeBuilderCapability: mocks.authorizeBuilderCapability,
+  accessDeniedMessage: () => 'Choose a plan to continue',
 }));
 
 vi.mock('../../src/lib/config.js', () => ({ env: mocks.env }));
@@ -43,6 +49,23 @@ async function errorMessage(result: unknown): Promise<string> {
 describe('withApiKeyAuth', () => {
   beforeEach(() => {
     mocks.validateApiKey.mockReset();
+    mocks.authorizeBuilderCapability.mockReset();
+    mocks.authorizeBuilderCapability.mockResolvedValue({
+      allowed: true,
+      lookup: {
+        kind: 'resolved',
+        resolution: {
+          ok: true,
+          entitlement: {
+            plan: 'pro',
+            access_state: 'active',
+            entitlement_source: 'stripe',
+            has_product_access: true,
+            legacy_free: false,
+          },
+        },
+      },
+    });
   });
 
   it('accepts the CLI bearer API key header used by cost-source approval', async () => {
@@ -51,6 +74,7 @@ describe('withApiKeyAuth', () => {
       builderId: 'builder-1',
       scope: ApiKeyScope.UNIVERSAL,
       keyId: 'deadbeef',
+      productAccessVerified: true,
     });
 
     const result = await withApiKeyAuth(request({ authorization: `Bearer ${key}` }));
@@ -61,6 +85,7 @@ describe('withApiKeyAuth', () => {
       builderId: 'builder-1',
       scope: ApiKeyScope.UNIVERSAL,
       keyId: 'deadbeef',
+      productAccessVerified: true,
     });
   });
 
@@ -144,6 +169,64 @@ describe('withApiKeyAuth', () => {
       builderId: 'builder-legacy',
       scope: persistedScope,
       keyId: 'deadbeef',
+      productAccessVerified: true,
     });
+  });
+
+  it.each(['checkout_required', 'suspended'])(
+    'denies a valid cached key when authoritative access is %s',
+    async (accessState) => {
+      const key = `pv_live_deadbeef_${'d'.repeat(32)}`;
+      mocks.validateApiKey.mockResolvedValueOnce({
+        builderId: 'builder-restricted',
+        scope: ApiKeyScope.UNIVERSAL,
+        keyId: 'deadbeef',
+      });
+      mocks.authorizeBuilderCapability.mockResolvedValueOnce({
+        allowed: false,
+        lookup: {
+          kind: 'resolved',
+          resolution: {
+            ok: true,
+            entitlement: {
+              plan: null,
+              access_state: accessState,
+              entitlement_source: accessState === 'suspended' ? 'stripe' : null,
+              has_product_access: false,
+              legacy_free: false,
+            },
+          },
+        },
+      });
+
+      const result = await withApiKeyAuth(request({ authorization: `Bearer ${key}` }));
+
+      expect(result).toBeInstanceOf(NextResponse);
+      expect((result as NextResponse).status).toBe(403);
+      expect(mocks.authorizeBuilderCapability).toHaveBeenCalledWith(
+        'builder-restricted',
+        'product',
+      );
+    },
+  );
+
+  it('fails closed when authoritative entitlement cannot be resolved', async () => {
+    const key = `pv_live_deadbeef_${'f'.repeat(32)}`;
+    mocks.validateApiKey.mockResolvedValueOnce({
+      builderId: 'builder-corrupt',
+      scope: ApiKeyScope.UNIVERSAL,
+      keyId: 'deadbeef',
+    });
+    mocks.authorizeBuilderCapability.mockResolvedValueOnce({
+      allowed: false,
+      lookup: {
+        kind: 'resolved',
+        resolution: { ok: false, reason: 'unknown_access_state' },
+      },
+    });
+
+    const result = await withApiKeyAuth(request({ authorization: `Bearer ${key}` }));
+    expect(result).toBeInstanceOf(NextResponse);
+    expect((result as NextResponse).status).toBe(500);
   });
 });

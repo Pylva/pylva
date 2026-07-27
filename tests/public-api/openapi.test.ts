@@ -186,9 +186,41 @@ describe('public api openapi document', () => {
 
   it('marks whoami responses as non-cacheable and null-usage-aware', () => {
     const schema = doc.components.schemas.WhoamiResponse;
+    expect(schema.required).toContain('plan');
+    expect(schema.required).toContain('access_state');
+    expect(schema.required).not.toContain('tier');
+    expect(schema.properties.plan).toMatchObject({
+      type: ['string', 'null'],
+      enum: ['pro', 'scale', 'enterprise', null],
+    });
+    expect(schema.properties.access_state.enum).toEqual([
+      'checkout_required',
+      'active',
+      'suspended',
+    ]);
+    expect(schema.properties.tier).toMatchObject({
+      enum: ['pro', 'scale', 'enterprise'],
+      deprecated: true,
+    });
+    expect(schema.properties.key.properties.scope).toMatchObject({
+      const: 'universal',
+    });
     expect(schema.properties.usage.type).toEqual(['object', 'null']);
     expect(schema.properties.limits.properties.monthly_events.type).toEqual(['integer', 'null']);
     expect(doc.paths['/api/v1/whoami'].get.responses['200'].headers['Cache-Control']).toBeDefined();
+    expect(
+      doc.paths['/api/v1/whoami'].get.responses['200'].headers['X-Pylva-Contract-Version'],
+    ).toMatchObject({
+      schema: { const: '2' },
+    });
+    expect(doc.paths['/api/v1/whoami'].get.parameters).toContainEqual({
+      $ref: '#/components/parameters/ContractVersionHeader',
+    });
+    expect(doc.components.parameters.ContractVersionHeader).toMatchObject({
+      name: 'X-Pylva-Contract-Version',
+      in: 'header',
+      schema: { const: '2' },
+    });
   });
 
   it('authenticates via the X-Pylva-Key header scheme', () => {
@@ -196,6 +228,15 @@ describe('public api openapi document', () => {
     expect(scheme.type).toBe('apiKey');
     expect(scheme.in).toBe('header');
     expect(scheme.name).toBe('X-Pylva-Key');
+    expect(scheme.description).toContain('scope=universal');
+    expect(scheme.description).not.toContain('agent_sdk');
+    expect(scheme.description).not.toContain('WRONG_SCOPE');
+    expect(doc.components.responses.Forbidden.description).toContain(
+      'API key scopes do not restrict current releases',
+    );
+    expect(
+      doc.components.schemas.ErrorResponse.properties.error.properties.code.enum,
+    ).not.toContain('WRONG_SCOPE');
   });
 
   it('keeps servers fixed to the cloud origin and docs on the external site', () => {

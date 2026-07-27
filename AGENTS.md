@@ -28,7 +28,8 @@ Before editing, read:
 |---|---|
 | Install dependencies | `pnpm install` |
 | Start local services | `docker compose -f docker/docker-compose.yml up -d` |
-| Run migrations | `pnpm db:setup` |
+| Bootstrap an empty database (after the README migration-role bootstrap) | `pnpm db:setup --fresh-install` |
+| Apply migrations to an existing database | `pnpm db:migrate` |
 | Seed local data | `pnpm db:seed` |
 | Start dev server | `pnpm dev` |
 | Typecheck | `pnpm typecheck` |

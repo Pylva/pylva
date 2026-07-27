@@ -9,7 +9,7 @@ import * as v from 'valibot';
 import { and, eq } from 'drizzle-orm';
 import { ErrorCode } from '@pylva/shared';
 import { readBuilderContextFromDashboard } from '@/lib/auth/builder-context';
-import { checkBuilderFeatureGate } from '@/lib/auth/tier-enforcement';
+import { checkDashboardCapabilityGate } from '@/lib/auth/dashboard-feature-gate';
 import { withRLS } from '@/lib/db/rls';
 import { invoices } from '@/lib/db/schema';
 import { validationError, notFoundError } from '@/lib/errors';
@@ -20,8 +20,8 @@ export async function GET(
 ): Promise<NextResponse> {
   const ctx = readBuilderContextFromDashboard(request);
   if (ctx instanceof NextResponse) return ctx;
-  const tierGate = await checkBuilderFeatureGate(ctx.builderId, 'billing');
-  if (tierGate) return tierGate;
+  const capabilityGate = await checkDashboardCapabilityGate(ctx.builderId, 'invoices');
+  if (capabilityGate) return capabilityGate;
 
   const { id } = await params;
   if (!v.is(v.pipe(v.string(), v.uuid()), id)) return validationError('Invalid invoice id', 'id');

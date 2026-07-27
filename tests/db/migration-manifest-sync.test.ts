@@ -21,6 +21,10 @@ const AUTHORITATIVE_BUDGET_LEGACY_RLS_COMPATIBILITY_MIGRATION =
   '053_legacy_catalog_owner_rls_compatibility.sql';
 const GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION = '054_general_app_runtime_owner_boundary.sql';
 const MONTHLY_INVOICE_PERIOD_RETRY_MIGRATION = '055_monthly_invoice_period_retry.sql';
+const WORKSPACE_ACCESS_STATE_EXPAND_MIGRATION = '056_workspace_access_state_expand.sql';
+const HOSTED_WORKSPACE_ENTITLEMENTS_MIGRATION = '057_hosted_workspace_entitlements.sql';
+const REMOVE_FREE_PLAN_CONTRACT_MIGRATION = '058_remove_free_plan_contract.sql';
+const HOSTED_REMOVE_FREE_CONTRACT_MIGRATION = '059_hosted_remove_free_contract.sql';
 const FROZEN_LEDGER_SHA256 = '3bd8b69ef1b09814e6cc0645b2eb188504fc84b4e15abbe5e42ddf704619218e';
 const FROZEN_RUNTIME_SHA256 = '3fabbc1236e562eddd1b83e4c8826abfb61d0eca73b8e4773b10d94599055af8';
 const FROZEN_RUNTIME_ROLES_SHA256 =
@@ -133,7 +137,7 @@ describe('migration manifest sync', () => {
     expect(entry.sha256).toBe(GENERAL_APP_RUNTIME_OWNER_BOUNDARY_SHA256);
   });
 
-  it('tracks the durable monthly invoice retry ledger as the schema head', async () => {
+  it('keeps the durable monthly invoice retry migration frozen', async () => {
     const entry = EXPECTED_MIGRATIONS.find(
       (migration) => migration.filename === MONTHLY_INVOICE_PERIOD_RETRY_MIGRATION,
     );
@@ -145,15 +149,55 @@ describe('migration manifest sync', () => {
     const content = await fs.readFile(path.join(MIGRATIONS_DIR, entry.filename), 'utf8');
     expect(entry).toMatchObject({ phase: 'pre_roll' });
     expect(entry.sha256).toBe(computeChecksum(content));
-    expect(EXPECTED_SCHEMA_HEAD).toBe(MONTHLY_INVOICE_PERIOD_RETRY_MIGRATION);
   });
 
-  it('marks the resumable 048-049 suffix as post_roll and defaults earlier migrations to pre_roll', () => {
+  it('tracks public and optional hosted workspace lifecycle phases', () => {
+    const hasHostedExpand = EXPECTED_MIGRATIONS.some(
+      (migration) => migration.filename === HOSTED_WORKSPACE_ENTITLEMENTS_MIGRATION,
+    );
+    const hasHostedContract = EXPECTED_MIGRATIONS.some(
+      (migration) => migration.filename === HOSTED_REMOVE_FREE_CONTRACT_MIGRATION,
+    );
+    expect(hasHostedContract).toBe(hasHostedExpand);
+    expect(
+      EXPECTED_MIGRATIONS.find(
+        (migration) => migration.filename === WORKSPACE_ACCESS_STATE_EXPAND_MIGRATION,
+      ),
+    ).toMatchObject({ phase: 'pre_roll' });
+    expect(
+      EXPECTED_MIGRATIONS.find(
+        (migration) => migration.filename === REMOVE_FREE_PLAN_CONTRACT_MIGRATION,
+      ),
+    ).toMatchObject({ phase: 'post_roll' });
+    if (hasHostedExpand) {
+      expect(
+        EXPECTED_MIGRATIONS.find(
+          (migration) => migration.filename === HOSTED_WORKSPACE_ENTITLEMENTS_MIGRATION,
+        ),
+      ).toMatchObject({ phase: 'pre_roll' });
+      expect(
+        EXPECTED_MIGRATIONS.find(
+          (migration) => migration.filename === HOSTED_REMOVE_FREE_CONTRACT_MIGRATION,
+        ),
+      ).toMatchObject({ phase: 'post_roll' });
+    }
+    expect(EXPECTED_SCHEMA_HEAD).toBe(
+      hasHostedContract
+        ? HOSTED_REMOVE_FREE_CONTRACT_MIGRATION
+        : REMOVE_FREE_PLAN_CONTRACT_MIGRATION,
+    );
+  });
+
+  it('marks every deliberate post-roll migration and defaults the remainder to pre-roll', () => {
     const postRoll = EXPECTED_MIGRATIONS.filter((migration) => migration.phase === 'post_roll');
 
     expect(postRoll.map((migration) => migration.filename)).toEqual([
       '048_universal_api_key_scope.sql',
       '049_backfill_builder_owner_memberships.sql',
+      REMOVE_FREE_PLAN_CONTRACT_MIGRATION,
+      ...(EXPECTED_SCHEMA_HEAD === HOSTED_REMOVE_FREE_CONTRACT_MIGRATION
+        ? [HOSTED_REMOVE_FREE_CONTRACT_MIGRATION]
+        : []),
     ]);
     expect(
       EXPECTED_MIGRATIONS.filter((migration) => !postRoll.includes(migration)).every(

@@ -29,6 +29,8 @@ import { extractExternalCustomerId } from '../clickhouse/customer-id.js';
 import { loadModelTierCatalog } from './model-tier-catalog.js';
 import { buildAnomalyDetectedPayload } from '../alerts/anomaly-payloads.js';
 import { deliverBuilderAlert } from '../alerts/builder-alert.js';
+import { authorizeBuilderCapability } from '../auth/builder-entitlement.js';
+import { isProductAccessMutationDeniedError } from '../auth/product-access-mutation-error.js';
 
 const log = logger.child({ module: 'anomaly.runner' });
 
@@ -117,6 +119,39 @@ interface BuilderSummary {
   skipped_idempotent: number;
 }
 
+type ProductAccessCheckpoint =
+  | 'before_margin_evaluation'
+  | 'before_spike_drop_aggregation'
+  | 'before_spike_drop_evaluation'
+  | 'before_anomaly_persist'
+  | 'before_anomaly_delivery';
+
+async function retainsProductAccess(
+  builderId: string,
+  checkpoint: ProductAccessCheckpoint,
+): Promise<boolean> {
+  try {
+    const entitlement = await authorizeBuilderCapability(builderId, 'product');
+    if (entitlement.allowed) return true;
+
+    log.info(
+      { builder_id: builderId, checkpoint },
+      'anomaly detection stopped without product access',
+    );
+    return false;
+  } catch (error) {
+    log.warn(
+      {
+        builder_id: builderId,
+        checkpoint,
+        error_type: error instanceof Error ? error.name : 'UnknownError',
+      },
+      'anomaly entitlement checkpoint failed closed',
+    );
+    return false;
+  }
+}
+
 async function detectForBuilder(
   builderId: string,
   earliestEvent: Date,
@@ -129,6 +164,7 @@ async function detectForBuilder(
   // baseline statistics — they run even inside the spike/drop cold-start
   // window (a builder 3 days in with pricing + a margin rule deserves the
   // alert). Failure is isolated so a margin bug can't stall spike/drop.
+  if (!(await retainsProductAccess(builderId, 'before_margin_evaluation'))) return summary;
   try {
     const margin = await evaluateMarginRules({ builderId, catalog, now });
     summary.inserted += margin.anomalies_inserted;
@@ -160,6 +196,7 @@ async function detectForBuilder(
   const priorStart = new Date(periodStart.getTime() - DAY_MS);
   const baselineStart = new Date(periodStart.getTime() - BASELINE_DAYS * DAY_MS);
 
+  if (!(await retainsProductAccess(builderId, 'before_spike_drop_aggregation'))) return summary;
   const [currentAgg, priorAgg, baselineAgg, pricedCustomers] = await Promise.all([
     fetchPeriodAggregates(builderId, chTimestamp(periodStart), chTimestamp(periodEnd)),
     fetchPeriodAggregates(builderId, chTimestamp(priorStart), chTimestamp(periodStart)),
@@ -175,6 +212,7 @@ async function detectForBuilder(
       return [];
     }),
   ]);
+  if (!(await retainsProductAccess(builderId, 'before_spike_drop_evaluation'))) return summary;
   const pricedExternalIds = new Set(pricedCustomers.map((c) => c.external_id));
 
   // Builder-level + every customer that had spend in either period; a
@@ -232,19 +270,30 @@ async function detectForBuilder(
     if (recommendation.action === AnomalyRecommendationAction.DISMISS) continue;
 
     for (const hit of detectorHits) {
-      const inserted = await insertAnomalyEvent({
-        builder_id: builderId,
-        customer_id: externalCustomerId,
-        source_type: hit.source_type,
-        severity: hit.result.severity,
-        period_start: periodStart,
-        period_end: periodEnd,
-        actual_value: hit.result.actual_value,
-        baseline_value: hit.result.baseline_value,
-        delta_pct: hit.result.delta_pct,
-        diagnosis,
-        recommendation,
-      });
+      if (!(await retainsProductAccess(builderId, 'before_anomaly_persist'))) return summary;
+      let inserted: Awaited<ReturnType<typeof insertAnomalyEvent>>;
+      try {
+        inserted = await insertAnomalyEvent({
+          builder_id: builderId,
+          customer_id: externalCustomerId,
+          source_type: hit.source_type,
+          severity: hit.result.severity,
+          period_start: periodStart,
+          period_end: periodEnd,
+          actual_value: hit.result.actual_value,
+          baseline_value: hit.result.baseline_value,
+          delta_pct: hit.result.delta_pct,
+          diagnosis,
+          recommendation,
+        });
+      } catch (error) {
+        if (!isProductAccessMutationDeniedError(error)) throw error;
+        log.info(
+          { builder_id: builderId, checkpoint: 'anomaly_persist_transaction' },
+          'anomaly detection stopped by lifecycle-locked mutation',
+        );
+        return summary;
+      }
       if (inserted) {
         summary.inserted += 1;
         log.info(
@@ -284,16 +333,42 @@ async function detectForBuilder(
           continue;
         }
 
+        if (!(await retainsProductAccess(builderId, 'before_anomaly_delivery'))) return summary;
         // Fire-and-forget: dispatch failure must not stall the cron and
         // must not roll back the persisted row. `deliverBuilderAlert`
         // already swallows channel errors internally; this catch is the
         // outer safety net for unexpected throws (e.g. config lookup).
         try {
-          await deliverBuilderAlert({
+          const delivery = await deliverBuilderAlert({
             builderId,
             payload: buildAnomalyDetectedPayload(builderId, inserted),
           });
-          log.info({ builder_id: builderId, anomaly_id: inserted.id }, 'anomaly alert dispatched');
+          if (delivery.kind === 'delivered') {
+            log.info(
+              { builder_id: builderId, anomaly_id: inserted.id },
+              'anomaly alert dispatched',
+            );
+          } else if (delivery.kind === 'access_denied') {
+            log.info(
+              { builder_id: builderId, anomaly_id: inserted.id },
+              'anomaly alert stopped after workspace access changed',
+            );
+            return summary;
+          } else if (delivery.kind === 'skipped') {
+            log.info(
+              {
+                builder_id: builderId,
+                anomaly_id: inserted.id,
+                reason: delivery.reason,
+              },
+              'anomaly alert not dispatched',
+            );
+          } else {
+            log.warn(
+              { builder_id: builderId, anomaly_id: inserted.id },
+              'anomaly alert dispatch failed',
+            );
+          }
         } catch (err) {
           log.warn(
             {

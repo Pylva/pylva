@@ -5,6 +5,17 @@ vi.mock('../../src/lib/db/client.js', () => ({
   sql: { begin: vi.fn() },
 }));
 
+vi.mock('../../src/lib/config.js', () => ({
+  env: {
+    LOG_LEVEL: 'silent',
+    PYLVA_DEPLOYMENT_MODE: 'self_hosted',
+    SELF_HOSTED_MONTHLY_EVENTS_LIMIT: 10_000_000,
+    SELF_HOSTED_MAX_CUSTOMERS: 500,
+    SELF_HOSTED_TELEMETRY_RETENTION_DAYS: 365,
+    SELF_HOSTED_BILLING_RETENTION_DAYS: 365,
+  },
+}));
+
 import {
   BudgetLifecycleError,
   BudgetLifecyclePricingUnavailableError,
@@ -287,6 +298,45 @@ describe('authoritative lifecycle replay and errors', () => {
         '22222222-2222-4222-8222-222222222222',
       ),
     ).rejects.toMatchObject({ status: 500, code: 'INTERNAL_ERROR' });
+  });
+
+  it('stamps authoritative retention from validated paid and self-host entitlements', () => {
+    expect(
+      __budgetLifecycleTesting.retentionForEntitlement({
+        plan: 'pro',
+        access_state: 'active',
+        entitlement_source: 'admin',
+      }),
+    ).toEqual({ retention_days: 90, billing_retention_days: 365 });
+    expect(
+      __budgetLifecycleTesting.retentionForEntitlement({
+        plan: null,
+        access_state: 'active',
+        entitlement_source: 'self_hosted',
+      }),
+    ).toEqual({ retention_days: 365, billing_retention_days: 365 });
+  });
+
+  it.each([
+    {
+      plan: 'free',
+      access_state: null,
+      entitlement_source: null,
+    },
+    {
+      plan: null,
+      access_state: 'suspended',
+      entitlement_source: 'stripe',
+    },
+    {
+      plan: 'mystery',
+      access_state: 'active',
+      entitlement_source: 'admin',
+    },
+  ])('never derives new usage retention from invalid or inactive entitlement %#', (input) => {
+    expect(() => __budgetLifecycleTesting.retentionForEntitlement(input)).toThrow(
+      /cannot stamp authoritative usage retention/i,
+    );
   });
 
   it('returns a cloned stored response with only replay truth changed', () => {

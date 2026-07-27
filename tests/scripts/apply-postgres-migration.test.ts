@@ -100,6 +100,29 @@ describe('parseApplyPostgresMigrationArgs', () => {
 });
 
 describe('applyPostgresMigration', () => {
+  it('categorically rejects reserved remove-Free rollout migrations, including forced replays', async () => {
+    for (const filename of [
+      '056_workspace_access_state_expand.sql',
+      '057_hosted_workspace_entitlements.sql',
+      '058_remove_free_plan_contract.sql',
+      '059_hosted_remove_free_contract.sql',
+      '056_unreviewed_reserved_name.sql',
+    ]) {
+      const relativePath = await writeMigration(filename, 'SELECT 1;');
+      const fake = fakeSqlClient();
+      await expect(
+        applyPostgresMigration({
+          migrationPath: relativePath,
+          rootDir,
+          sqlClient: fake.client,
+          force: true,
+        }),
+      ).rejects.toThrow('reserved staged migration');
+      expect(fake.beginCount()).toBe(0);
+      expect(fake.topLevelUnsafe).not.toHaveBeenCalled();
+    }
+  });
+
   it('requires a database URL when no sqlClient is provided', async () => {
     const relativePath = await writeMigration('041_test.sql', 'SELECT 1;');
 
@@ -230,7 +253,7 @@ describe('applyPostgresMigration', () => {
     await expect(
       applyPostgresMigration({ migrationPath: relativePath, rootDir, sqlClient: fake.client }),
     ).rejects.toThrow(
-      'database predates migration tracking; run pnpm db:migrate --baseline --yes once before applying manual migrations',
+      'database predates migration tracking; inspect the physical schema, then run pnpm db:migrate --baseline --through <verified-historical-head-before-056> --yes',
     );
 
     const queries = topLevelUnsafe.mock.calls.map(([query]) => query);

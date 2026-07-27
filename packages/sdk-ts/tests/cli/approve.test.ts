@@ -148,6 +148,7 @@ describe('runApprove', () => {
 
     expect(capturedUrl).toMatch(/\/api\/v1\/cost-sources$/);
     expect(capturedHeaders['authorization']).toBe(`Bearer ${CLI_KEY}`);
+    expect(capturedHeaders['X-Pylva-Contract-Version']).toBe('2');
     expect(capturedBody).toMatchObject({
       display_name: 'ElevenLabs',
       slug: 'elevenlabs',

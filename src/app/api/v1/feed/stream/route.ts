@@ -11,12 +11,16 @@
 import { NextResponse, type NextRequest } from 'next/server.js';
 import { ErrorCode, type SseFeedMessage } from '@pylva/shared';
 import { readBuilderContextFromDashboard } from '../../../../../lib/auth/builder-context.js';
-import { apiError, rateLimitError } from '../../../../../lib/errors.js';
+import { apiError, forbiddenError, rateLimitError } from '../../../../../lib/errors.js';
 import { env } from '../../../../../lib/config.js';
 import { logger } from '../../../../../lib/logger.js';
 import { acquireSseConnection } from '../../../../../lib/realtime/sse-manager.js';
 import { subscribeFeed } from '../../../../../lib/realtime/feed-subscriber.js';
 import { getOverview, getTopEndUsers } from '../../../../../lib/clickhouse/dashboard-queries.js';
+import {
+  accessDeniedMessage,
+  authorizeBuilderCapability,
+} from '../../../../../lib/auth/builder-entitlement.js';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -45,6 +49,10 @@ export async function GET(request: NextRequest): Promise<Response> {
   const ctx = readBuilderContextFromDashboard(request);
   if (ctx instanceof NextResponse) return ctx;
   const { builderId } = ctx;
+  const entitlement = await authorizeBuilderCapability(builderId, 'product');
+  if (!entitlement.allowed) {
+    return forbiddenError(ErrorCode.FEATURE_NOT_AVAILABLE, accessDeniedMessage(entitlement));
+  }
 
   const lease = acquireSseConnection(builderId);
   if (!lease.ok) {
@@ -127,6 +135,16 @@ export async function GET(request: NextRequest): Promise<Response> {
         }
       };
 
+      let entitlementCheck: Promise<boolean> | null = null;
+      const stillHasProductAccess = (): Promise<boolean> => {
+        entitlementCheck ??= authorizeBuilderCapability(builderId, 'product')
+          .then((decision) => decision.allowed)
+          .finally(() => {
+            entitlementCheck = null;
+          });
+        return entitlementCheck;
+      };
+
       // Start the heartbeat first so a slow snapshot doesn't leave the
       // connection silent past the ALB idle threshold.
       heartbeatTimer = setInterval(() => {
@@ -141,7 +159,13 @@ export async function GET(request: NextRequest): Promise<Response> {
       // returns a no-op handle and the connection still streams heartbeats
       // (I-SSE-3).
       const livePromise = subscribeFeed(builderId, (message: SseFeedMessage) => {
-        safeEnqueue(sseFrame(message.type, message.data));
+        void stillHasProductAccess().then(async (allowed) => {
+          if (!allowed) {
+            await cleanup();
+            return;
+          }
+          safeEnqueue(sseFrame(message.type, message.data));
+        });
       });
 
       const now = new Date();
@@ -175,6 +199,14 @@ export async function GET(request: NextRequest): Promise<Response> {
       }
       unsubscribe = subscription.unsubscribe;
 
+      // The snapshot and Redis subscription both cross async boundaries. A
+      // suspension during either must close the stream before initial data is
+      // exposed.
+      if (!(await stillHasProductAccess())) {
+        await cleanup();
+        return;
+      }
+
       if (snapshot) {
         const [overview, topCustomers] = snapshot;
         safeEnqueue(
@@ -194,6 +226,10 @@ export async function GET(request: NextRequest): Promise<Response> {
       snapshotTimer = setInterval(() => {
         if (closed) return;
         void (async () => {
+          if (!(await stillHasProductAccess())) {
+            await cleanup();
+            return;
+          }
           const refreshNow = new Date();
           const refreshFrom = new Date(refreshNow.getTime() - SNAPSHOT_LOOKBACK_MS);
           try {

@@ -19,7 +19,8 @@
 import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import type { InvoiceGenerateResponse, InvoiceLineItem } from '@pylva/shared';
-import { withRLS } from '../db/rls.js';
+import { getBuilderEntitlementForShare } from '../db/advisory-locks.js';
+import { withRLS, type DrizzleTransaction } from '../db/rls.js';
 import { invoices, stripeConnect } from '../db/schema.js';
 import { auditLog } from '../auth/audit-log.js';
 import { AuditAction } from '../audit/actions.js';
@@ -38,6 +39,7 @@ import {
 import type { UsageAggregate } from './formulas.js';
 import { getVersionsInPeriod, rowToCustomerPricing } from './pricing-versioning.js';
 import { logger } from '../logger.js';
+import { authorizeBuilderCapability } from '../auth/builder-entitlement.js';
 
 const log = logger.child({ module: 'billing.invoice-generator' });
 const STRIPE_READABLE_LINE_LIMIT = 50;
@@ -57,7 +59,8 @@ export class BillingError extends Error {
       | 'projection_pending'
       | 'period_not_closed'
       | 'usage_unbillable'
-      | 'invalid_period',
+      | 'invalid_period'
+      | 'workspace_access_unavailable',
     message: string,
   ) {
     super(message);
@@ -190,6 +193,33 @@ interface GenerateInput {
   draftKeyBase?: string;
 }
 
+async function assertInvoiceProductAccess(builderId: string): Promise<void> {
+  const entitlement = await authorizeBuilderCapability(builderId, 'product');
+  if (!entitlement.allowed) {
+    throw new BillingError(
+      'workspace_access_unavailable',
+      'Workspace product access is unavailable',
+    );
+  }
+}
+
+async function assertLockedInvoiceProductAccess(
+  tx: DrizzleTransaction,
+  builderId: string,
+): Promise<void> {
+  const resolution = await getBuilderEntitlementForShare(tx, builderId);
+  if (
+    resolution === null ||
+    !resolution.ok ||
+    !resolution.entitlement.has_product_access
+  ) {
+    throw new BillingError(
+      'workspace_access_unavailable',
+      'Workspace product access is unavailable',
+    );
+  }
+}
+
 async function persistOneDraft(
   input: GenerateInput,
   slice: SplitSlice,
@@ -262,46 +292,53 @@ async function persistOneDraft(
   const formula = applyFormula(pricing, usage);
   const stripeLineItems = normalizeStripeInvoiceLines(formula.line_items, formula.amount_usd);
 
-  const { stripe_customer_id } = await ensureStripeCustomer({
-    builderId: input.builderId,
-    customerId: input.customerId,
-    stripeAccountId,
-    metadata: { pylva_pricing_version: String(pricing.version) },
-  });
-
   const stripe = stripeFor(stripeAccountId);
-  const stripeInvoice = await stripe.invoices.create({
-    customer: stripe_customer_id,
-    collection_method: 'send_invoice',
-    days_until_due: STRIPE_INVOICE_DAYS_UNTIL_DUE,
-    auto_advance: false,
-    metadata: {
-      pylva_builder_id: input.builderId,
-      pylva_customer_id: input.customerId,
-      pylva_pricing_version: String(pricing.version),
-      pylva_period_start: slice.slice_start.toISOString(),
-      pylva_period_end: slice.slice_end.toISOString(),
-      ...(billingCycleId ? { pylva_billing_cycle_id: billingCycleId } : {}),
-    },
-  });
-
   let cleanupAttempted = false;
+  let stripeInvoiceId: string | null = null;
   try {
-    // Push each computed line item onto the Stripe invoice. Without this the
-    // invoice we create above is an empty shell: `applyFormula`'s amount lives
-    // only in our `invoices.amount_usd` column and is never sent to Stripe, so
-    // `finalizeInvoice` (the /finalize route) would charge the end-customer $0.
-    for (const li of stripeLineItems) {
-      await stripe.invoiceItems.create({
-        customer: stripe_customer_id,
-        invoice: stripeInvoice.id,
-        amount: li.amountCents,
-        currency: 'usd',
-        description: li.description,
-      });
-    }
+    const inserted = await withRLS(input.builderId, async (lifecycleTx) => {
+      // The builder FOR SHARE lock remains held across every connected Stripe
+      // write and the durable invoice insert/audit. A suspension either
+      // commits first and prevents all external work, or waits until this
+      // already-authorized draft is fully materialized.
+      await assertLockedInvoiceProductAccess(lifecycleTx, input.builderId);
 
-    const inserted = await withRLS(input.builderId, async (tx) => {
+      const { stripe_customer_id } = await ensureStripeCustomer({
+        builderId: input.builderId,
+        customerId: input.customerId,
+        stripeAccountId,
+        metadata: { pylva_pricing_version: String(pricing.version) },
+      });
+
+      const stripeInvoice = await stripe.invoices.create({
+        customer: stripe_customer_id,
+        collection_method: 'send_invoice',
+        days_until_due: STRIPE_INVOICE_DAYS_UNTIL_DUE,
+        auto_advance: false,
+        metadata: {
+          pylva_builder_id: input.builderId,
+          pylva_customer_id: input.customerId,
+          pylva_pricing_version: String(pricing.version),
+          pylva_period_start: slice.slice_start.toISOString(),
+          pylva_period_end: slice.slice_end.toISOString(),
+          ...(billingCycleId ? { pylva_billing_cycle_id: billingCycleId } : {}),
+        },
+      });
+      stripeInvoiceId = stripeInvoice.id;
+
+      // Push each computed line item onto the Stripe invoice. Without this the
+      // invoice is an empty shell and finalization would charge $0.
+      for (const li of stripeLineItems) {
+        await stripe.invoiceItems.create({
+          customer: stripe_customer_id,
+          invoice: stripeInvoice.id,
+          amount: li.amountCents,
+          currency: 'usd',
+          description: li.description,
+        });
+      }
+
+      return withRLS(input.builderId, async (tx) => {
       // PR #74 follow-up — close the TOCTOU race the SELECT-then-INSERT
       // pattern leaves open. Two cron pods that interleave between the
       // pre-flight SELECT and this INSERT both pass the existence check;
@@ -433,11 +470,12 @@ async function persistOneDraft(
         });
       }
       return { result, raceLost: true };
+      });
     });
 
     if (inserted.raceLost) {
       cleanupAttempted = true;
-      const cleanupFailure = await deleteStripeDraftInvoice(stripe, stripeInvoice.id, {
+      const cleanupFailure = await deleteStripeDraftInvoice(stripe, stripeInvoiceId!, {
         builder_id: input.builderId,
         customer_id: input.customerId,
         draft_key: draftKey,
@@ -449,9 +487,9 @@ async function persistOneDraft(
     return inserted.result;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    if (!cleanupAttempted) {
+    if (!cleanupAttempted && stripeInvoiceId) {
       cleanupAttempted = true;
-      const cleanupFailure = await deleteStripeDraftInvoice(stripe, stripeInvoice.id, {
+      const cleanupFailure = await deleteStripeDraftInvoice(stripe, stripeInvoiceId, {
         builder_id: input.builderId,
         customer_id: input.customerId,
         draft_key: draftKey,
@@ -477,6 +515,8 @@ export async function generateInvoice(input: GenerateInput): Promise<InvoiceGene
   ) {
     throw new BillingError('invalid_period', 'Invoice period must have valid start < end');
   }
+
+  await assertInvoiceProductAccess(input.builderId);
 
   const connect = await loadStripeConnect(input.builderId);
   if (!connect)

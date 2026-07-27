@@ -9,13 +9,14 @@ from typing import Any
 
 import httpx
 
+from .._version import API_CONTRACT_VERSION
 from .config import get_config, get_config_generation
 
 # PR #70 follow-up — 60s per remaining-implementation-plan.md O25
 # (was 300s; plan tightened to keep newly-activated rules reaching SDKs
-# in <1 min). Stale-serve semantics unchanged: on fetch error past TTL
-# we keep the last successful rules list and flip _passthrough=True so
-# the engine fails open.
+# in <1 min). A failed refresh may retain the last successful list for
+# diagnostics/recovery, but _passthrough=True prevents that stale snapshot
+# from affecting routing, failover, or budget decisions.
 RULES_CACHE_TTL_SEC = 60
 
 _rules: list[Any] = []
@@ -29,7 +30,7 @@ _accepted_config_generation: int | None = None
 
 
 async def ensure_rules_cache() -> None:
-    global _in_flight
+    global _in_flight, _passthrough
     config_generation = get_config_generation()
     cfg = get_config()
     if cfg is None:
@@ -42,6 +43,10 @@ async def ensure_rules_cache() -> None:
         age = time.time() - _fetched_at
         if age < RULES_CACHE_TTL_SEC and not _passthrough:
             return
+        # Provider wrappers schedule this coroutine without awaiting it. Mark
+        # an expired snapshot unusable before the HTTP refresh can yield.
+        if age >= RULES_CACHE_TTL_SEC:
+            _passthrough = True
         task = _in_flight
         if task is not None and not task.done():
             if task.get_loop() is not loop:
@@ -85,7 +90,10 @@ async def _refresh(
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
                 f"{endpoint}/api/v1/rules",
-                headers={"X-Pylva-Key": api_key},
+                headers={
+                    "X-Pylva-Key": api_key,
+                    "X-Pylva-Contract-Version": API_CONTRACT_VERSION,
+                },
             )
         if not resp.is_success:
             current_cfg = get_config()
@@ -101,6 +109,11 @@ async def _refresh(
                     current_endpoint=None if current_cfg is None else current_cfg.endpoint,
                 ):
                     return
+                # 401/403 is definitive for this identity. In particular, a
+                # suspended workspace must not retain warmed routing/failover
+                # rules while the SDK is in passthrough mode.
+                if resp.status_code in (401, 403):
+                    _rules = []
                 if not _warned_passthrough:
                     print(
                         "[pylva] rules cache stale — backend returned non-ok; passthrough mode",
@@ -193,6 +206,21 @@ def get_cached_rules() -> list[Any]:
     return _rules
 
 
+def get_rules_for_evaluation() -> list[Any]:
+    """Return an atomic, fail-open snapshot for provider-call evaluation."""
+    with _cache_lock:
+        stale = time.time() - _fetched_at >= RULES_CACHE_TTL_SEC
+        return [] if _passthrough or stale else list(_rules)
+
+
+def mark_stale_rules_passthrough() -> None:
+    """Synchronously quarantine an expired cache before scheduling refresh."""
+    global _passthrough
+    with _cache_lock:
+        if time.time() - _fetched_at >= RULES_CACHE_TTL_SEC:
+            _passthrough = True
+
+
 def _context_is_current_locked(
     epoch: int,
     config_generation: int,
@@ -262,3 +290,11 @@ def _reset_rules_cache_for_tests() -> None:
         _passthrough = False
         _warned_passthrough = False
     _cancel_task(task)
+
+
+def _mark_rules_cache_fresh_for_tests() -> None:
+    """Mark directly injected test rules as a freshly fetched snapshot."""
+    global _fetched_at, _passthrough
+    with _cache_lock:
+        _fetched_at = time.time()
+        _passthrough = False

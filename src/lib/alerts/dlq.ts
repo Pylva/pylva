@@ -5,9 +5,12 @@
 // frozen snapshot, not the live config (I-T4a-3). This protects against
 // config edits mid-failure.
 
-import { withRLS } from '../db/rls.js';
 import { webhookDlq } from '../db/schema.js';
 import { logger } from '../logger.js';
+import {
+  isAlertDeliveryAccessDeniedError,
+  withAlertDeliveryAccessMutation,
+} from './entitlement-fence.js';
 import type { AlertDeliveryChannel } from '@pylva/shared';
 
 const log = logger.child({ module: 'alerts.dlq' });
@@ -25,7 +28,7 @@ export interface WriteDlqInput {
 
 export async function writeToDlq(input: WriteDlqInput): Promise<void> {
   try {
-    await withRLS(input.builder_id, async (tx) => {
+    await withAlertDeliveryAccessMutation(input.builder_id, async (tx) => {
       await tx.insert(webhookDlq).values({
         builder_id: input.builder_id,
         channel: input.channel,
@@ -39,6 +42,7 @@ export async function writeToDlq(input: WriteDlqInput): Promise<void> {
       });
     });
   } catch (err) {
+    if (isAlertDeliveryAccessDeniedError(err)) throw err;
     // DLQ write itself failed — we've already exhausted retries on the primary
     // channel; log loudly and move on. Sentry captures this (§4.7 SENTRY_DSN).
     const message = err instanceof Error ? err.message : String(err);

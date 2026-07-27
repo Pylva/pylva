@@ -11,6 +11,8 @@ import { readDashboardHeaders } from '@/lib/dashboard/headers';
 import { sessionFingerprint } from '@/lib/auth/session-fingerprint';
 import { PageViewBeacon } from '@/lib/analytics/page-view-beacon';
 import { PAGE_SESSION_META_NAME } from '@/lib/dashboard/request-context';
+import { loadBuilderEntitlement } from '@/lib/auth/builder-entitlement';
+import { hasProductAccess } from '@pylva/shared';
 
 const themeScript = `(function(){try{var stored=localStorage.getItem("pylva:theme"),system=matchMedia("(prefers-color-scheme: dark)").matches,dark=stored==="dark"||((!stored||stored==="system")&&system);document.documentElement.classList.toggle("dark",dark)}catch(e){}})();`;
 
@@ -30,6 +32,26 @@ export default async function DashboardLayout({
   const { slug } = await params;
   const { builderId, userId, pathname } = await readDashboardHeaders();
   const pageSession = sessionFingerprint(userId);
+  const entitlement = await loadBuilderEntitlement(builderId);
+
+  if (entitlement.kind !== 'resolved' || !entitlement.resolution.ok) {
+    throw new Error('Workspace entitlement could not be verified');
+  }
+
+  if (!hasProductAccess(entitlement.resolution)) {
+    return (
+      <>
+        <meta name={PAGE_SESSION_META_NAME} content={pageSession} />
+        <script dangerouslySetInnerHTML={{ __html: themeScript }} />
+        <PageViewBeacon surface="app" />
+        <SessionWatcher expectedFingerprint={pageSession} slug={slug} />
+        <main className="mx-auto flex min-h-screen w-full max-w-3xl items-center px-4 py-10 sm:px-6">
+          <div className="w-full">{children}</div>
+        </main>
+      </>
+    );
+  }
+
   return (
     <>
       <meta name={PAGE_SESSION_META_NAME} content={pageSession} />

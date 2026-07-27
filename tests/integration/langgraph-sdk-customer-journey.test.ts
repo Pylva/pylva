@@ -212,11 +212,13 @@ function createAgentGraph(agent: AgentDefinition) {
 async function createBuilder(): Promise<string> {
   const suffix = crypto.randomBytes(6).toString('hex');
   const [row] = await sql<{ id: string }[]>`
-    INSERT INTO builders (email, name, tier, slug)
+    INSERT INTO builders (email, name, tier, access_state, entitlement_source, slug)
     VALUES (
       ${`langgraph-sdk-e2e-${suffix}@example.com`},
       'LangGraph SDK E2E Readiness',
       'pro',
+      'active',
+      'admin',
       ${`langgraph-sdk-e2e-${suffix}`}
     )
     RETURNING id

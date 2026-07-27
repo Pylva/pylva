@@ -140,17 +140,22 @@ export function sqlText(value: unknown): string {
   return JSON.stringify(value, (_key, item) => (typeof item === 'function' ? undefined : item));
 }
 
-// Standard tx.execute mock for code paths that re-read the builder tier inside a
-// locked transaction (advisory-locks.getBuilderTierForShare). Answers the
-// `SELECT tier ... FOR SHARE` read from the provided getter; every other
-// statement (e.g. pg_advisory_xact_lock) resolves to no rows.
-export function forShareTierTxExecuteImpl(
-  getFreshTier: () => string | null,
-): (query: unknown) => Promise<Array<{ tier: string }>> {
+export interface EntitlementShareRow {
+  plan: string | null;
+  access_state: string | null;
+  entitlement_source: string | null;
+}
+
+// Standard tx.execute mock for code paths that re-read the complete builder
+// entitlement inside a locked transaction. Every non-FOR-SHARE statement
+// (for example pg_advisory_xact_lock) resolves to no rows.
+export function forShareEntitlementTxExecuteImpl(
+  getFreshEntitlement: () => EntitlementShareRow | null,
+): (query: unknown) => Promise<EntitlementShareRow[]> {
   return async (query: unknown) => {
     if (sqlText(query).includes('FOR SHARE')) {
-      const tier = getFreshTier();
-      return tier === null ? [] : [{ tier }];
+      const entitlement = getFreshEntitlement();
+      return entitlement === null ? [] : [entitlement];
     }
     return [];
   };

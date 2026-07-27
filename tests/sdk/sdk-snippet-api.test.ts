@@ -68,6 +68,12 @@ describe('SDK snippets match the real SDK API', () => {
       expect(/track_context\(/.test(code)).toBe(true);
     }
   });
+
+  it('declares contract v2 when the agent prompt verifies a key with whoami', () => {
+    const prompt = snippets.buildAgentSetupPrompt();
+    expect(prompt).toContain('/api/v1/whoami');
+    expect(prompt).toContain('X-Pylva-Contract-Version: 2');
+  });
 });
 
 const SDK_README_PATHS = [

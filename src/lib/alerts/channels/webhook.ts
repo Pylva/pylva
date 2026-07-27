@@ -18,6 +18,10 @@ import { webhookConfigs } from '../../db/schema.js';
 import { logger } from '../../logger.js';
 import { retryWithBackoff, isRetryableHttpError } from '../retry.js';
 import { writeToDlq } from '../dlq.js';
+import {
+  isAlertDeliveryAccessDeniedError,
+  withAlertDeliveryAccessMutation,
+} from '../entitlement-fence.js';
 import { externalFetch } from '../../external-egress.js';
 import type { ChannelDeliverFn } from './channel.interface.ts';
 import type {
@@ -124,27 +128,35 @@ export const deliverWebhook: ChannelDeliverFn = async (payloads, entry, ctx) => 
   const signature = signHmac(bodyText, config.secret, timestamp);
 
   const result = await retryWithBackoff(
-    async () => {
-      const res = await externalFetch({
-        target: 'custom_webhook',
-        url: config.url,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Pylva-Signature': `sha256=${signature}`,
-          'X-Pylva-Timestamp': timestamp,
-        },
-        body: bodyText,
-        timeoutMs: WEBHOOK_FETCH_TIMEOUT_MS,
-      });
-      if (res.status < 200 || res.status >= 300) {
-        throw new Error(`webhook POST failed: ${res.status} ${res.statusText}`);
-      }
+    () =>
+      withAlertDeliveryAccessMutation(ctx.builder_id, async () => {
+        // The builder FOR SHARE lock is held through exactly this one network
+        // attempt. A retry delay begins only after this transaction exits.
+        const res = await externalFetch({
+          target: 'custom_webhook',
+          url: config.url,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Pylva-Signature': `sha256=${signature}`,
+            'X-Pylva-Timestamp': timestamp,
+          },
+          body: bodyText,
+          timeoutMs: WEBHOOK_FETCH_TIMEOUT_MS,
+        });
+        if (res.status < 200 || res.status >= 300) {
+          throw new Error(`webhook POST failed: ${res.status} ${res.statusText}`);
+        }
+      }),
+    {
+      retryable: (error) => !isAlertDeliveryAccessDeniedError(error) && isRetryableHttpError(error),
     },
-    { retryable: isRetryableHttpError },
   );
 
   if (!result.ok) {
+    if (isAlertDeliveryAccessDeniedError(result.cause)) {
+      throw result.cause;
+    }
     await writeToDlq({
       builder_id: ctx.builder_id,
       channel: 'webhook',

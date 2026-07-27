@@ -54,4 +54,44 @@ describe('public community file boundary', () => {
     expect(contributing).toContain('pnpm typecheck');
     expect(contributing).toContain('pnpm test');
   });
+
+  it('never recommends bare PostgreSQL setup in active community guidance', () => {
+    const bareSetup = /pnpm db:setup(?!\s+--fresh-install|:clickhouse)/;
+
+    for (const relativePath of ['README.md', 'CONTRIBUTING.md', 'AGENTS.md', 'Dockerfile']) {
+      expect(read(relativePath), relativePath).not.toMatch(bareSetup);
+    }
+  });
+
+  it('bootstraps self-hosted migrations with a dedicated non-superuser principal', () => {
+    const readme = read('README.md');
+    const bootstrap =
+      'pnpm exec tsx scripts/ci/bootstrap-authoritative-budget-migration-role.ts';
+    const migration = 'pnpm db:setup --fresh-install';
+
+    expect(readme).toContain(
+      "CI_POSTGRES_ADMIN_URL='postgresql://pylva:pylva_dev@localhost:5432/pylva'",
+    );
+    expect(readme).toContain(
+      "MIGRATION_DATABASE_URL='postgresql://pylva_migration_ci:pylva_migration_dev@localhost:5432/pylva'",
+    );
+    expect(readme).toContain(bootstrap);
+    expect(readme).toContain(migration);
+    expect(readme.indexOf(bootstrap)).toBeLessThan(readme.indexOf(migration));
+    expect(readme).toContain(
+      'changing only the database owner is not a repair: PostgreSQL does',
+    );
+    expect(readme).toContain('Do not reset a data-bearing database');
+  });
+
+  it('keeps local database reset on the fail-closed fresh-install path', () => {
+    const packageJson = JSON.parse(read('package.json')) as {
+      scripts?: Record<string, string>;
+    };
+
+    expect(packageJson.scripts?.['db:reset']).toBe(
+      'pnpm db:setup --fresh-install && pnpm db:seed',
+    );
+    expect(packageJson.scripts?.['db:reset']).not.toContain('tsx db/setup.ts');
+  });
 });

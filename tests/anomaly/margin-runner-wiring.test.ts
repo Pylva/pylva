@@ -38,6 +38,10 @@ vi.mock('../../src/lib/rules/margin-evaluator.js', () => ({
   evaluateMarginRules: evaluateMarginRulesMock,
 }));
 
+vi.mock('../../src/lib/auth/builder-entitlement.js', () => ({
+  authorizeBuilderCapability: vi.fn(async () => ({ allowed: true })),
+}));
+
 vi.mock('../../src/lib/logger.js', () => ({
   logger: { child: () => ({ warn: vi.fn(), info: vi.fn(), error: vi.fn() }) },
 }));

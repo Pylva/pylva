@@ -171,6 +171,7 @@ def test_wrapper_skips_failure_telemetry_on_intentional_refusal() -> None:
             },
         }
     )
+    rules_cache._mark_rules_cache_fresh_for_tests()  # type: ignore[attr-defined]
     ba.mark_exceeded_from_backend(
         rule_id="r1",
         customer_id="cust_42",

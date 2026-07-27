@@ -171,8 +171,13 @@ describe('OAuth callback legacy builder adoption integration', () => {
 
       try {
         const [builder] = await sql<{ id: string }[]>`
-          INSERT INTO builders (email, name, tier, slug)
-          VALUES (${builderEmail}, 'OAuth Route Legacy', 'scale', ${slug})
+          INSERT INTO builders (
+            email, name, tier, access_state, entitlement_source, slug
+          )
+          VALUES (
+            ${builderEmail}, 'OAuth Route Legacy', 'scale',
+            'active', 'admin', ${slug}
+          )
           RETURNING id
         `;
         await sql`

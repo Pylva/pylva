@@ -44,6 +44,9 @@ import {
   PortalLinkType,
   RuleEventSeverity,
   VisibilityLevel,
+  type BuilderAccessState,
+  type BuilderPlan,
+  type EntitlementSource,
 } from '@pylva/shared';
 
 // citext is not a built-in Drizzle type; declare a custom type that maps
@@ -54,19 +57,54 @@ const citext = customType<{ data: string; driverData: string }>({
 });
 
 // --- builders ---
-export const builders = pgTable('builders', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  email: varchar('email', { length: 255 }).notNull().unique(),
-  name: varchar('name', { length: 255 }),
-  tier: varchar('tier', { length: 20 }).notNull().default('free'),
-  // B2a migration 011: slugged URLs (/o/{slug}/...)
-  slug: text('slug').notNull().unique(),
-  // B2a migration 015: OAuth-sourced display metadata
-  display_name: text('display_name'),
-  avatar_url: text('avatar_url'),
-  created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updated_at: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const builders = pgTable(
+  'builders',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    email: varchar('email', { length: 255 }).notNull().unique(),
+    name: varchar('name', { length: 255 }),
+    // The physical column remains `tier` during the compatibility window, but
+    // it now stores a nullable paid plan only.
+    tier: varchar('tier', { length: 20 }).$type<BuilderPlan>(),
+    access_state: varchar('access_state', { length: 32 }).$type<BuilderAccessState>().notNull(),
+    entitlement_source: varchar('entitlement_source', { length: 32 }).$type<EntitlementSource>(),
+    // B2a migration 011: slugged URLs (/o/{slug}/...)
+    slug: text('slug').notNull().unique(),
+    // B2a migration 015: OAuth-sourced display metadata
+    display_name: text('display_name'),
+    avatar_url: text('avatar_url'),
+    created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updated_at: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    check(
+      'builders_plan_check',
+      drizzleSql`(${table.tier} IS NULL OR ${table.tier} IN ('pro', 'scale', 'enterprise'))`,
+    ),
+    check(
+      'builders_access_state_value_check',
+      drizzleSql`${table.access_state} IN ('checkout_required', 'active', 'suspended')`,
+    ),
+    check(
+      'builders_entitlement_source_value_check',
+      drizzleSql`(${table.entitlement_source} IS NULL OR ${table.entitlement_source} IN ('stripe', 'enterprise_contract', 'self_hosted', 'admin'))`,
+    ),
+    check(
+      'builders_entitlement_combination_check',
+      drizzleSql`((
+        (${table.access_state} = 'checkout_required' AND ${table.tier} IS NULL AND ${table.entitlement_source} IS NULL)
+        OR
+        (${table.access_state} = 'suspended' AND ${table.tier} IS NULL AND (${table.entitlement_source} IS NULL OR ${table.entitlement_source} IN ('stripe', 'admin')))
+        OR
+        (${table.access_state} = 'active' AND ${table.tier} IN ('pro', 'scale') AND ${table.entitlement_source} IN ('stripe', 'admin'))
+        OR
+        (${table.access_state} = 'active' AND ${table.tier} = 'enterprise' AND ${table.entitlement_source} IN ('enterprise_contract', 'admin'))
+        OR
+        (${table.access_state} = 'active' AND ${table.tier} IS NULL AND ${table.entitlement_source} = 'self_hosted')
+      ) IS TRUE)`,
+    ),
+  ],
+);
 
 // --- customers ---
 export const customers = pgTable('customers', {

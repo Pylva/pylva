@@ -11,13 +11,32 @@
 import { describe, it, expect, vi } from 'vitest';
 
 vi.mock('../../src/lib/auth/middleware.js', () => ({
-  withApiKeyAuth: vi.fn(async () => ({ builderId: 'b-1', scope: 'agent_sdk', keyId: 'k-1' })),
+  withApiKeyAuth: vi.fn(async () => ({
+    builderId: 'b-1',
+    scope: 'agent_sdk',
+    keyId: 'k-1',
+    productAccessVerified: true,
+  })),
   withJwtAuth: vi.fn(async () => ({
-    context: { builderId: 'b-1', userId: 'u-1', role: 'owner', tier: 'free', jti: 'j-1' },
+    context: {
+      builderId: 'b-1',
+      userId: 'u-1',
+      role: 'owner',
+      plan: 'pro',
+      accessState: 'active',
+      tier: 'pro',
+      jti: 'j-1',
+    },
     refreshToken: null,
   })),
   withRateLimit: vi.fn(async () => null),
-  withMembership: vi.fn(async () => ({ builderId: 'b-1', role: 'owner', tier: 'free' })),
+  withMembership: vi.fn(async () => ({
+    builderId: 'b-1',
+    role: 'owner',
+    plan: 'pro',
+    accessState: 'active',
+    entitlementSource: 'admin',
+  })),
   setRefreshCookie: vi.fn(),
   RATE_LIMIT_PRESETS: {
     telemetry: { maxRequests: 1000, windowMs: 60_000 },

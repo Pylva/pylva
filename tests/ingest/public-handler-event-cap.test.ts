@@ -1,22 +1,25 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ErrorCode } from '@pylva/shared';
-import { forShareTierTxExecuteImpl, sqlText } from '../_helpers/drizzle-mock.js';
+import { forShareEntitlementTxExecuteImpl, sqlText } from '../_helpers/drizzle-mock.js';
 
 const mocks = vi.hoisted(() => ({
   aggregateSpendForRule: vi.fn(),
   calculateCostUsd: vi.fn(),
   checkEventCap: vi.fn(),
+  authorizeBuilderCapability: vi.fn(),
   evaluatePostCall: vi.fn(),
   filterDuplicates: vi.fn(),
   formatTierUsage: vi.fn(),
-  getCapContext: vi.fn(),
   insertCostEventsWithRetry: vi.fn(),
   lookupPricing: vi.fn(),
   listActiveRulesForCustomer: vi.fn(),
   publishFeedMessage: vi.fn(),
   recordAcceptedEvents: vi.fn(),
   recordSourceSighting: vi.fn(),
-  freshTier: 'free' as string | null,
+  freshSelfHosted: false,
+  freshTier: 'pro' as string | null,
+  freshAccessState: 'active' as string | null,
+  freshEntitlementSource: 'admin' as string | null,
   txExecute: vi.fn(),
   txInsert: vi.fn(),
   txInsertValues: vi.fn(),
@@ -28,12 +31,34 @@ const mocks = vi.hoisted(() => ({
   logWarn: vi.fn(),
 }));
 
+interface Deferred {
+  promise: Promise<void>;
+  resolve: () => void;
+}
+
+function deferred(): Deferred {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 vi.mock('../../src/lib/budget/aggregate.js', () => ({
   aggregateSpendForRule: mocks.aggregateSpendForRule,
 }));
 
+vi.mock('../../src/lib/auth/builder-entitlement.js', () => ({
+  authorizeBuilderCapability: mocks.authorizeBuilderCapability,
+  accessDeniedMessage: () => 'Workspace access is suspended; reactivate billing to continue',
+}));
+
 vi.mock('../../src/lib/config.js', () => ({
-  env: { PUBLIC_SITE_URL: 'https://pylva.test' },
+  env: {
+    PUBLIC_SITE_URL: 'https://pylva.test',
+    PYLVA_DEPLOYMENT_MODE: 'self_hosted',
+    SELF_HOSTED_MAX_CUSTOMERS: 3,
+  },
 }));
 
 vi.mock('../../src/lib/cost-calculator.js', () => ({
@@ -56,7 +81,6 @@ vi.mock('../../src/lib/ingest/dedup.js', () => ({
 vi.mock('../../src/lib/ingest/event-cap.js', () => ({
   checkEventCap: mocks.checkEventCap,
   formatTierUsage: mocks.formatTierUsage,
-  getCapContext: mocks.getCapContext,
   recordAcceptedEvents: mocks.recordAcceptedEvents,
 }));
 
@@ -105,7 +129,7 @@ function capDecision(overrides: Record<string, unknown> = {}) {
   return {
     enabled: true,
     blocked: false,
-    tier: 'free',
+    tier: 'pro',
     cap: 100,
     used: 10,
     window: {
@@ -166,6 +190,7 @@ async function ingest(rawBody: string) {
   return handleTelemetryIngest({
     builderId: 'builder-a',
     keyId: 'key-a',
+    productAccessVerified: true,
     rawBody,
   });
 }
@@ -173,6 +198,22 @@ async function ingest(rawBody: string) {
 describe('handleTelemetryIngest event cap gate', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.authorizeBuilderCapability.mockResolvedValue({
+      allowed: true,
+      lookup: {
+        kind: 'resolved',
+        resolution: {
+          ok: true,
+          entitlement: {
+            plan: 'pro',
+            access_state: 'active',
+            entitlement_source: 'stripe',
+            has_product_access: true,
+            legacy_free: false,
+          },
+        },
+      },
+    });
     mocks.aggregateSpendForRule.mockResolvedValue(0);
     mocks.calculateCostUsd.mockReturnValue({ cost_usd: 1, pricing_status: 'priced' });
     mocks.checkEventCap.mockResolvedValue(capDecision());
@@ -182,7 +223,6 @@ describe('handleTelemetryIngest event cap gate', () => {
         new Set(items.map((item) => item.span_id)),
     );
     mocks.formatTierUsage.mockImplementation((used: number, cap: number) => `${used}/${cap}`);
-    mocks.getCapContext.mockResolvedValue({ tier: 'free' });
     mocks.insertCostEventsWithRetry.mockResolvedValue(undefined);
     mocks.lookupPricing.mockResolvedValue({ llm: new Map(), metric: new Map() });
     mocks.listActiveRulesForCustomer.mockResolvedValue([]);
@@ -192,8 +232,27 @@ describe('handleTelemetryIngest event cap gate', () => {
         decision.used === null ? null : decision.used + count,
     );
     mocks.recordSourceSighting.mockResolvedValue(undefined);
-    mocks.freshTier = 'free';
-    mocks.txExecute.mockImplementation(forShareTierTxExecuteImpl(() => mocks.freshTier));
+    mocks.freshSelfHosted = false;
+    mocks.freshTier = 'pro';
+    mocks.freshAccessState = 'active';
+    mocks.freshEntitlementSource = 'admin';
+    mocks.txExecute.mockImplementation(
+      forShareEntitlementTxExecuteImpl(() =>
+        mocks.freshAccessState === null
+          ? null
+          : mocks.freshSelfHosted
+          ? {
+              plan: null,
+              access_state: mocks.freshAccessState,
+              entitlement_source: 'self_hosted',
+            }
+          : {
+              plan: mocks.freshTier,
+              access_state: mocks.freshAccessState,
+              entitlement_source: mocks.freshEntitlementSource,
+            },
+      ),
+    );
     mocks.txOnConflictDoNothing.mockResolvedValue(undefined);
     mocks.txInsertValues.mockReturnValue({ onConflictDoNothing: mocks.txOnConflictDoNothing });
     mocks.txInsert.mockReturnValue({ values: mocks.txInsertValues });
@@ -217,6 +276,81 @@ describe('handleTelemetryIngest event cap gate', () => {
     );
   });
 
+  it('fails closed before cap or persistence for a direct suspended-workspace call', async () => {
+    mocks.authorizeBuilderCapability.mockResolvedValueOnce({
+      allowed: false,
+      lookup: {
+        kind: 'resolved',
+        resolution: {
+          ok: true,
+          entitlement: {
+            plan: null,
+            access_state: 'suspended',
+            entitlement_source: 'stripe',
+            has_product_access: false,
+            legacy_free: false,
+          },
+        },
+      },
+    });
+
+    const response = await handleTelemetryIngest({
+      builderId: 'builder-a',
+      keyId: 'key-a',
+      rawBody: body([ingestEvent(1)]),
+    });
+
+    expect(response.status).toBe(403);
+    expect(JSON.parse(response.body)).toMatchObject({
+      error: { code: ErrorCode.FEATURE_NOT_AVAILABLE },
+    });
+    expect(mocks.checkEventCap).not.toHaveBeenCalled();
+    expect(mocks.insertCostEventsWithRetry).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['middleware-verified', true],
+    ['Lambda/direct', false],
+  ] as const)(
+    'rechecks under the persistence lock after a %s request pauses and is suspended',
+    async (_label, middlewareVerified) => {
+      const pricingStarted = deferred();
+      const continuePricing = deferred();
+      mocks.lookupPricing.mockImplementationOnce(async () => {
+        pricingStarted.resolve();
+        await continuePricing.promise;
+        return { llm: new Map(), metric: new Map() };
+      });
+
+      const pending = handleTelemetryIngest({
+        builderId: 'builder-a',
+        keyId: 'key-a',
+        ...(middlewareVerified ? { productAccessVerified: true } : {}),
+        rawBody: body([ingestEvent(1)]),
+      });
+      await pricingStarted.promise;
+
+      mocks.freshTier = null;
+      mocks.freshAccessState = 'suspended';
+      mocks.freshEntitlementSource = 'stripe';
+      continuePricing.resolve();
+
+      const response = await pending;
+
+      expect(response.status).toBe(403);
+      expect(JSON.parse(response.body)).toMatchObject({
+        error: { code: ErrorCode.FEATURE_NOT_AVAILABLE },
+      });
+      expect(mocks.insertCostEventsWithRetry).not.toHaveBeenCalled();
+      expect(mocks.recordAcceptedEvents).not.toHaveBeenCalled();
+      expect(mocks.undoFilterDuplicates).toHaveBeenCalledTimes(1);
+      expect(sqlText(mocks.txExecute.mock.calls[0]?.[0])).toContain('FOR SHARE');
+      expect(mocks.authorizeBuilderCapability).toHaveBeenCalledTimes(
+        middlewareVerified ? 0 : 1,
+      );
+    },
+  );
+
   it('returns 403 before parsing or ingest work when the cap is already reached', async () => {
     mocks.checkEventCap.mockResolvedValueOnce(
       capDecision({
@@ -237,14 +371,40 @@ describe('handleTelemetryIngest event cap gate', () => {
 
     expect(response.status).toBe(403);
     expect(parsed.error.code).toBe(ErrorCode.TIER_LIMIT_REACHED);
-    expect(parsed.error.message).toContain('free tier is configured for 100 events per period');
-    expect(parsed.error.message).toContain('Ask the self-host operator');
+    expect(parsed.error.message).toContain('pro plan is configured for 100 events per period');
+    expect(parsed.error.message).toContain('Ask the operator');
     expect(parsed.error.message).toContain('Ingestion is paused until 2026-07-01T00:00:00.000Z');
     expect(response.headers?.['X-Pylva-Tier-Usage']).toBe('100/100');
     expect(parseSpy).not.toHaveBeenCalled();
     expect(mocks.validateSemantic).not.toHaveBeenCalled();
     expect(mocks.lookupPricing).not.toHaveBeenCalled();
     expect(mocks.filterDuplicates).not.toHaveBeenCalled();
+    expect(mocks.insertCostEventsWithRetry).not.toHaveBeenCalled();
+  });
+
+  it('returns an internal fail-closed response for a missing limit mapping', async () => {
+    mocks.checkEventCap.mockResolvedValueOnce(
+      capDecision({
+        blocked: true,
+        configuration_error: true,
+        tier: null,
+        cap: 0,
+        used: 0,
+        window: null,
+      }),
+    );
+
+    const response = await ingest(body([ingestEvent(1)]));
+
+    expect(response.status).toBe(500);
+    expect(JSON.parse(response.body)).toMatchObject({
+      error: {
+        code: ErrorCode.INTERNAL_ERROR,
+        message: 'workspace limit configuration could not be verified',
+      },
+    });
+    expect(mocks.validateSemantic).not.toHaveBeenCalled();
+    expect(mocks.lookupPricing).not.toHaveBeenCalled();
     expect(mocks.insertCostEventsWithRetry).not.toHaveBeenCalled();
   });
 
@@ -328,36 +488,38 @@ describe('handleTelemetryIngest event cap gate', () => {
     expect(response.headers?.['X-Pylva-Tier-Usage']).toBeUndefined();
   });
 
-  it('uses the in-transaction tier for auto-discovery when retention tier lookup throws', async () => {
+  it('fails closed before persistence when the locked entitlement lookup throws', async () => {
     mocks.checkEventCap.mockResolvedValueOnce(
       capDecision({ enabled: false, tier: null, cap: Infinity, used: null, window: null }),
     );
-    mocks.getCapContext.mockRejectedValueOnce(new Error('pg unavailable'));
+    mocks.txExecute.mockImplementationOnce(async () => {
+      throw new Error('authoritative PostgreSQL unavailable');
+    });
 
     const response = await ingest(body([ingestEvent(1)]));
-    const parsed = JSON.parse(response.body) as {
-      accepted: number;
-      warnings?: Array<{ code: string }>;
-    };
 
-    expect(response.status).toBe(200);
-    expect(parsed.accepted).toBe(1);
-    expect(parsed.warnings).toBeUndefined();
-    expect(mocks.txInsertValues).toHaveBeenCalledWith([
-      { builder_id: 'builder-a', external_id: 'customer_1' },
-    ]);
-    expect(mocks.logWarn).not.toHaveBeenCalledWith(
-      expect.objectContaining({ event: 'customer_discovery_deferred_unknown_tier' }),
-      expect.any(String),
-    );
+    expect(response.status).toBe(500);
+    expect(mocks.insertCostEventsWithRetry).not.toHaveBeenCalled();
+    expect(mocks.txInsertValues).not.toHaveBeenCalled();
   });
 
-  it('defers customer auto-discovery when the in-transaction tier read resolves unknown', async () => {
+  it('defers customer auto-discovery when its second locked entitlement read resolves unknown', async () => {
     mocks.checkEventCap.mockResolvedValueOnce(
       capDecision({ enabled: false, tier: null, cap: Infinity, used: null, window: null }),
     );
-    mocks.getCapContext.mockResolvedValueOnce({ tier: null, period: null });
-    mocks.freshTier = null;
+    let entitlementReads = 0;
+    mocks.txExecute.mockImplementation(
+      forShareEntitlementTxExecuteImpl(() => {
+        entitlementReads += 1;
+        return entitlementReads === 1
+          ? {
+              plan: 'pro',
+              access_state: 'active',
+              entitlement_source: 'admin',
+            }
+          : null;
+      }),
+    );
 
     const response = await ingest(body([ingestEvent(1)]));
     const parsed = JSON.parse(response.body) as {
@@ -369,15 +531,15 @@ describe('handleTelemetryIngest event cap gate', () => {
     expect(parsed.accepted).toBe(1);
     expect(parsed.warnings).toBeUndefined();
     expect(mocks.txInsert).not.toHaveBeenCalled();
-    expect(sqlText(mocks.txExecute.mock.calls[0]?.[0])).toContain('pg_advisory_xact_lock');
-    expect(sqlText(mocks.txExecute.mock.calls[1]?.[0])).toContain('FOR SHARE');
+    expect(sqlText(mocks.txExecute.mock.calls[1]?.[0])).toContain('pg_advisory_xact_lock');
+    expect(sqlText(mocks.txExecute.mock.calls[2]?.[0])).toContain('FOR SHARE');
     expect(mocks.logWarn).toHaveBeenCalledWith(
       expect.objectContaining({
         event: 'customer_discovery_deferred_unknown_tier',
         builder_id: 'builder-a',
         deferred_count: 1,
       }),
-      'customer auto-registration deferred because builder tier is unknown',
+      'customer auto-registration deferred because workspace entitlement is unavailable',
     );
   });
 
@@ -396,8 +558,9 @@ describe('handleTelemetryIngest event cap gate', () => {
     expect(response.status).toBe(200);
     expect(parsed.accepted).toBe(2);
     expect(parsed.warnings).toBeUndefined();
-    expect(sqlText(mocks.txExecute.mock.calls[0]?.[0])).toContain('pg_advisory_xact_lock');
-    expect(sqlText(mocks.txExecute.mock.calls[1]?.[0])).toContain('FOR SHARE');
+    expect(sqlText(mocks.txExecute.mock.calls[0]?.[0])).toContain('FOR SHARE');
+    expect(sqlText(mocks.txExecute.mock.calls[1]?.[0])).toContain('pg_advisory_xact_lock');
+    expect(sqlText(mocks.txExecute.mock.calls[2]?.[0])).toContain('FOR SHARE');
     expect(mocks.txSelect).not.toHaveBeenCalled();
     expect(mocks.txInsert).toHaveBeenCalledTimes(1);
     expect(mocks.txInsertValues).toHaveBeenCalledWith([
@@ -408,12 +571,12 @@ describe('handleTelemetryIngest event cap gate', () => {
 
   it('skips customer auto-discovery at customer cap but accepts telemetry with a warning', async () => {
     mocks.checkEventCap.mockResolvedValueOnce(capDecision({ tier: 'scale' }));
-    mocks.freshTier = 'free';
+    mocks.freshTier = 'pro';
     mocks.txSelect.mockImplementationOnce((selection: Record<string, unknown>) => ({
       from: () => ({
         where: () =>
           Promise.resolve(
-            Object.prototype.hasOwnProperty.call(selection, 'count') ? [{ count: 10 }] : [],
+            Object.prototype.hasOwnProperty.call(selection, 'count') ? [{ count: 50 }] : [],
           ),
       }),
     }));
@@ -429,12 +592,13 @@ describe('handleTelemetryIngest event cap gate', () => {
     expect(parsed.warnings?.[0]).toMatchObject({
       code: 'customer_limit_reached',
     });
-    expect(parsed.warnings?.[0]?.message).toContain('free tier allows 10 customers');
+    expect(parsed.warnings?.[0]?.message).toContain('pro plan allows 50 customers');
     expect(mocks.txInsert).not.toHaveBeenCalled();
-    expect(sqlText(mocks.txExecute.mock.calls[0]?.[0])).toContain('pg_advisory_xact_lock');
-    expect(sqlText(mocks.txExecute.mock.calls[1]?.[0])).toContain('FOR SHARE');
-    const lockCallOrder = mocks.txExecute.mock.invocationCallOrder[0];
-    const tierCallOrder = mocks.txExecute.mock.invocationCallOrder[1];
+    expect(sqlText(mocks.txExecute.mock.calls[0]?.[0])).toContain('FOR SHARE');
+    expect(sqlText(mocks.txExecute.mock.calls[1]?.[0])).toContain('pg_advisory_xact_lock');
+    expect(sqlText(mocks.txExecute.mock.calls[2]?.[0])).toContain('FOR SHARE');
+    const lockCallOrder = mocks.txExecute.mock.invocationCallOrder[1];
+    const tierCallOrder = mocks.txExecute.mock.invocationCallOrder[2];
     const selectCallOrder = mocks.txSelect.mock.invocationCallOrder[0];
     expect(lockCallOrder).toBeDefined();
     expect(tierCallOrder).toBeDefined();
@@ -442,7 +606,48 @@ describe('handleTelemetryIngest event cap gate', () => {
     expect(lockCallOrder!).toBeLessThan(tierCallOrder!);
     expect(tierCallOrder!).toBeLessThan(selectCallOrder!);
     expect(mocks.logWarn).toHaveBeenCalledWith(
-      expect.objectContaining({ event: 'customer_limit_reached', tier: 'free', skipped_count: 1 }),
+      expect.objectContaining({ event: 'customer_limit_reached', plan: 'pro', skipped_count: 1 }),
+      'customer auto-registration skipped at tier customer limit',
+    );
+  });
+
+  it('enforces the configured self-host customer cap during auto-discovery', async () => {
+    mocks.checkEventCap.mockResolvedValueOnce(
+      capDecision({ enabled: false, tier: null, cap: Infinity, used: null, window: null }),
+    );
+    mocks.freshSelfHosted = true;
+    mocks.txSelect.mockImplementationOnce((selection: Record<string, unknown>) => ({
+      from: () => ({
+        where: () =>
+          Promise.resolve(
+            Object.prototype.hasOwnProperty.call(selection, 'count') ? [{ count: 3 }] : [],
+          ),
+      }),
+    }));
+
+    const response = await ingest(body([ingestEvent(1)]));
+    const parsed = JSON.parse(response.body) as {
+      accepted: number;
+      warnings?: Array<{ code: string; message?: string }>;
+    };
+
+    expect(response.status).toBe(200);
+    expect(parsed.accepted).toBe(1);
+    expect(parsed.warnings?.[0]).toMatchObject({
+      code: 'customer_limit_reached',
+    });
+    expect(parsed.warnings?.[0]?.message).toContain(
+      'This self-hosted deployment allows 3 customers',
+    );
+    expect(parsed.warnings?.[0]?.message).toContain('Raise SELF_HOSTED_MAX_CUSTOMERS');
+    expect(mocks.txInsert).not.toHaveBeenCalled();
+    expect(mocks.logWarn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'customer_limit_reached',
+        plan: null,
+        limit: 3,
+        skipped_count: 1,
+      }),
       'customer auto-registration skipped at tier customer limit',
     );
   });
