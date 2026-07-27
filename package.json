@@ -68,7 +68,7 @@
     "redis": "^5.0.1",
     "resend": "^4.8.0",
     "stripe": "^17.7.0",
-    "undici": "7.28.0",
+    "undici": "8.9.0",
     "valibot": "^1.4.2"
   },
   "devDependencies": {
