@@ -1,7 +1,7 @@
 // POST /api/cron/pricing-sync — daily LiteLLM sync (B1 — D29).
-// Guarded by CRON_SECRET bearer token. On 3 consecutive failures the caller
-// should invoke syncFromSnapshot() — this route exposes ?fallback=snapshot for
-// manual use, but day-to-day the scheduled cron hits it without query params.
+// Guarded by CRON_SECRET bearer token. On the third consecutive LiteLLM
+// failure, the route automatically invokes syncFromSnapshot() once. It also
+// exposes ?fallback=snapshot for manual recovery.
 
 import { NextResponse, type NextRequest } from 'next/server.js';
 import { authError, internalError } from '../../../../lib/errors.js';
@@ -22,7 +22,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const fallback = url.searchParams.get('fallback');
 
   try {
-    const result = fallback === 'snapshot' ? await syncFromSnapshot() : await runLitellmSync();
+    const manualSnapshotFallback = fallback === 'snapshot';
+    let result = manualSnapshotFallback ? await syncFromSnapshot() : await runLitellmSync();
+
+    // The committed snapshot is the automatic DR path after three consecutive
+    // LiteLLM failures. Trigger only at attempt 3: if the snapshot itself is
+    // invalid, its aborted log row advances the streak and later cron runs must
+    // not loop on the same broken fallback.
+    if (!manualSnapshotFallback && result.status === 'aborted' && result.attempt_number === 3) {
+      result = await syncFromSnapshot();
+    }
     // D31: after the pricing table refreshes, sweep active failover
     // rules for backup-model price drift. Runs unconditionally (also on
     // snapshot fallback) — even a stale-snapshot sync can trigger a
