@@ -197,6 +197,7 @@ async function persistOneDraft(
   stripeAccountId: string,
   billingCycleId: string | null,
   sliceIdx: number,
+  periodFraction: number,
 ): Promise<InvoiceGenerateResponse> {
   const pricing = rowToCustomerPricing(slice.version);
 
@@ -259,7 +260,7 @@ async function persistOneDraft(
     }
   }
 
-  const formula = applyFormula(pricing, usage);
+  const formula = applyFormula(pricing, usage, { periodFraction });
   const stripeLineItems = normalizeStripeInvoiceLines(formula.line_items, formula.amount_usd);
 
   const { stripe_customer_id } = await ensureStripeCustomer({
@@ -559,8 +560,10 @@ export async function generateInvoice(input: GenerateInput): Promise<InvoiceGene
       : randomUUID();
   }
   const results: InvoiceGenerateResponse[] = [];
+  const fullPeriodMs = input.period.end.getTime() - input.period.start.getTime();
   for (let i = 0; i < plan.slices.length; i++) {
     const slice = plan.slices[i]!;
+    const sliceMs = slice.slice_end.getTime() - slice.slice_start.getTime();
     try {
       const result = await persistOneDraft(
         input,
@@ -569,6 +572,7 @@ export async function generateInvoice(input: GenerateInput): Promise<InvoiceGene
         connect.stripe_account_id,
         billingCycleId,
         i,
+        sliceMs / fullPeriodMs,
       );
       results.push(result);
     } catch (err) {
