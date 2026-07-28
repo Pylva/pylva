@@ -477,29 +477,47 @@ describe('Connect webhook route event-id dedupe', () => {
     expect(mockState.dispatchSpy).toHaveBeenCalledTimes(1);
   });
 
-  it.each(['checkout_required', 'suspended'] as const)(
-    'terminally no-ops a %s workspace under the builder lock',
-    async (accessState) => {
-      mockState.setLockedEntitlementResolution({
-        ok: true,
-        entitlement: {
-          plan: null,
-          access_state: accessState,
-          entitlement_source: accessState === 'suspended' ? 'stripe' : null,
-          has_product_access: false,
-          legacy_free: false,
-        },
-      });
+  it('terminally no-ops a checkout-required workspace under the builder lock', async () => {
+    mockState.setLockedEntitlementResolution({
+      ok: true,
+      entitlement: {
+        plan: null,
+        access_state: 'checkout_required',
+        entitlement_source: null,
+        has_product_access: false,
+        legacy_free: false,
+      },
+    });
 
-      const res = await postWebhook();
+    const res = await postWebhook();
 
-      expect(res.status).toBe(200);
-      expect(mockState.dispatchSpy).not.toHaveBeenCalled();
-      expect(mockState.getEventRow('evt_default')?.handled_at).toBeInstanceOf(
-        Date,
-      );
-    },
-  );
+    expect(res.status).toBe(200);
+    expect(mockState.dispatchSpy).not.toHaveBeenCalled();
+    expect(mockState.getEventRow('evt_default')?.handled_at).toBeInstanceOf(
+      Date,
+    );
+  });
+
+  it('dispatches financial bookkeeping for a suspended workspace', async () => {
+    mockState.setLockedEntitlementResolution({
+      ok: true,
+      entitlement: {
+        plan: null,
+        access_state: 'suspended',
+        entitlement_source: 'stripe',
+        has_product_access: false,
+        legacy_free: false,
+      },
+    });
+
+    const res = await postWebhook();
+
+    expect(res.status).toBe(200);
+    expect(mockState.dispatchSpy).toHaveBeenCalledTimes(1);
+    expect(mockState.getEventRow('evt_default')?.handled_at).toBeInstanceOf(
+      Date,
+    );
+  });
 
   it.each([null, { ok: false, reason: 'invalid_combination' }])(
     'returns retryable 503 for a missing or invalid locked entitlement',
