@@ -275,6 +275,18 @@ async def test_flush_5xx_retries_and_reinserts(patched_httpx: dict[str, _FakeCli
     assert telemetry._state.buffer[0]["span_id"] == "span-99"  # type: ignore[attr-defined]
 
 
+async def test_flush_429_retries_and_reinserts(patched_httpx: dict[str, _FakeClient]) -> None:
+    patched_httpx["client"] = _FakeClient([_FakeResponse(429)])
+    telemetry.enqueue(_ev(100))
+    await telemetry.flush()
+
+    client = patched_httpx["client"]
+    assert client.posts == 1 + len(telemetry.RETRY_DELAYS_SEC)
+    assert telemetry.is_degraded() is False
+    assert telemetry.buffer_size() == 1
+    assert telemetry._state.buffer[0]["span_id"] == "span-100"  # type: ignore[attr-defined]
+
+
 async def test_span_id_lru_dedup(patched_httpx: dict[str, _FakeClient]) -> None:
     patched_httpx["client"] = _FakeClient(
         [_FakeResponse(200, {"accepted": 1, "rejected": 0, "errors": [], "warnings": []})],
