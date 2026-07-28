@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Elastic-2.0
 import type Stripe from 'stripe';
-import { BuilderAccessState } from '@pylva/shared';
 import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { withRLS, type DrizzleTransaction } from '../db/rls.js';
 import { getBuilderEntitlementForShare } from '../db/advisory-locks.js';
+import { entitlementAllowsCapability } from '../auth/builder-entitlement.js';
 import { stripeConnect, stripeConnectEventLog } from '../db/schema.js';
 import { env } from '../config.js';
 import { logger } from '../logger.js';
@@ -258,11 +258,11 @@ export async function handleConnectStripeWebhook(params: {
         if (resolution === null || !resolution.ok) {
           throw new ConnectWebhookEntitlementUnavailableError();
         }
-        const entitlement = resolution.entitlement;
-        if (
-          entitlement.access_state === BuilderAccessState.CHECKOUT_REQUIRED ||
-          entitlement.access_state === BuilderAccessState.SUSPENDED
-        ) {
+        // Suspended workspaces retain invoice access, so signed Connect events
+        // must keep local financial state synchronized while product access is
+        // paused. Checkout-required workspaces have no invoice capability and
+        // can still be acknowledged without dispatch.
+        if (!entitlementAllowsCapability(resolution, 'invoices')) {
           await markConnectEventHandled({
             stripeAccountId: event.account!,
             stripeEventId: event.id,
@@ -270,9 +270,6 @@ export async function handleConnectStripeWebhook(params: {
             transaction,
           });
           return { response: null, alertEffect: null };
-        }
-        if (!entitlement.has_product_access) {
-          throw new ConnectWebhookEntitlementUnavailableError();
         }
 
         const effect = await dispatch(
