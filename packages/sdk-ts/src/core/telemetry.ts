@@ -31,6 +31,10 @@ const BUFFER_CAP = 10_000;
 const LRU_CAP = 10_000;
 const RETRY_DELAYS_MS = [1000, 2000, 4000];
 
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
 let buffer: TelemetryEvent[] = [];
 let sentSpanIds: Set<string> = new Set();
 let sentSpanIdsQueue: string[] = []; // FIFO order for LRU eviction
@@ -219,7 +223,7 @@ async function flushBatch(
         enterDegraded(owner, cfg);
         return;
       }
-      if (response.status >= 500) {
+      if (isRetryableStatus(response.status)) {
         // retry
         lastError = new Error(`HTTP ${response.status}`);
         if (attempt < RETRY_DELAYS_MS.length) {
@@ -243,7 +247,7 @@ async function flushBatch(
   }
 
   if (owner !== telemetryEpoch) return;
-  if (!response || response.status >= 500) {
+  if (!response || isRetryableStatus(response.status)) {
     // Retries exhausted. Re-queue the batch at the head so the next flush retries.
     requeueBatch(newBatch);
 

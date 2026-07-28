@@ -190,6 +190,37 @@ describe('telemetry HTTP exporter', () => {
     expect(bufferSize()).toBe(0);
   });
 
+  it('retries HTTP 429 and retains the batch after retry exhaustion', async () => {
+    vi.useFakeTimers();
+    try {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      let telemetryRequests = 0;
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+        const path = new URL(input instanceof Request ? input.url : String(input)).pathname;
+        if (!path.endsWith('/api/v1/events')) {
+          return new Response(
+            JSON.stringify(path.endsWith('/rules') ? { rules: [] } : { models: [] }),
+            { status: 200 },
+          );
+        }
+        telemetryRequests += 1;
+        return new Response('', { status: 429 });
+      });
+      init({ apiKey: VALID_KEY, endpoint: 'http://mock', batchSize: 100, flushInterval: 60_000 });
+      enqueue(makeEvent(makeSpanId(48)));
+
+      const pending = flush();
+      await vi.advanceTimersByTimeAsync(7_000);
+      await expect(pending).resolves.toBeUndefined();
+
+      expect(telemetryRequests).toBe(4);
+      expect(bufferSize()).toBe(1);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('HTTP 429'));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('applies backend budget_exceeded flags to the local accumulator', async () => {
     const periodStart = '2026-04-01T00:00:00.000Z';
     vi.spyOn(globalThis, 'fetch').mockImplementation(

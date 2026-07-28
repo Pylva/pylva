@@ -41,6 +41,10 @@ RETRY_DELAYS_SEC = (1.0, 2.0, 4.0)
 SCHEMA_VERSION = "1.6"
 
 
+def _is_retryable_status(status_code: int) -> bool:
+    return status_code == 429 or status_code >= 500
+
+
 class _State:
     def __init__(self, generation: int) -> None:
         self.generation = generation
@@ -284,7 +288,7 @@ async def _flush_once(state: _State | None = None) -> None:
                 if response.status_code == 401:
                     _enter_degraded(current, cfg)
                     return
-                if response.status_code >= 500:
+                if _is_retryable_status(response.status_code):
                     last_error = f"HTTP {response.status_code}"
                     if attempt < len(RETRY_DELAYS_SEC):
                         await asyncio.sleep(RETRY_DELAYS_SEC[attempt])
@@ -302,7 +306,7 @@ async def _flush_once(state: _State | None = None) -> None:
     if current.retired:
         return
 
-    if response is None or response.status_code >= 500:
+    if response is None or _is_retryable_status(response.status_code):
         _requeue_batch(current, new_batch)
         print(f"[pylva] flush failed after retries: {last_error or 'unknown'}", flush=True)
         return
