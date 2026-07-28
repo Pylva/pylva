@@ -286,6 +286,12 @@ describe('db-migrate core and CLI', () => {
     );
     expect(blockedContractResult.exitCode).toBe(0);
     expect(pendingContentCalls(blockedContract.calls)).toEqual(["SELECT '056';"]);
+    expect(
+      blockedContract.calls
+        .filter((call) => call.kind === 'tx.unsafe')
+        .map((call) => call.query)
+        .filter((query) => query?.startsWith('SET LOCAL lock_timeout')),
+    ).toEqual(["SET LOCAL lock_timeout = '1s'"]);
 
     const contractMissingApproval = createRecordingSqlClient({
       ledgerRows: [
@@ -323,6 +329,12 @@ describe('db-migrate core and CLI', () => {
     );
     expect(approvedContractResult.exitCode).toBe(0);
     expect(pendingContentCalls(approvedContract.calls)).toEqual(["SELECT '058';"]);
+    expect(
+      approvedContract.calls
+        .filter((call) => call.kind === 'tx.unsafe')
+        .map((call) => call.query)
+        .filter((query) => query?.startsWith('SET LOCAL lock_timeout')),
+    ).toEqual(["SET LOCAL lock_timeout = '1s'"]);
 
     const unphased = createRecordingSqlClient({ ledgerRows: [] });
     const unphasedResult = await runWithRecording(
@@ -340,6 +352,12 @@ describe('db-migrate core and CLI', () => {
     );
     expect(freshResult.exitCode).toBe(0);
     expect(pendingContentCalls(fresh.calls)).toEqual(["SELECT '056';", "SELECT '058';"]);
+    expect(
+      fresh.calls
+        .filter((call) => call.kind === 'tx.unsafe')
+        .map((call) => call.query)
+        .filter((query) => query?.startsWith('SET LOCAL lock_timeout')),
+    ).toEqual(["SET LOCAL lock_timeout = '1s'", "SET LOCAL lock_timeout = '1s'"]);
   });
 
   it('binds remove-Free approvals to the exact pending migration filenames', () => {
