@@ -73,15 +73,17 @@ export class MigrationApplyError extends Error {
 const MIGRATION_ADVISORY_LOCK_ARGS = [1887001718, 1835624306];
 const UNIVERSAL_API_KEY_SCOPE_MIGRATION = '048_universal_api_key_scope.sql';
 const GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION = '054_general_app_runtime_owner_boundary.sql';
+const WORKSPACE_ACCESS_STATE_EXPAND_MIGRATION = '056_workspace_access_state_expand.sql';
+const REMOVE_FREE_PLAN_CONTRACT_MIGRATION = '058_remove_free_plan_contract.sql';
 const UNIVERSAL_API_KEY_BACKFILL_BATCH_SIZE = 1_000;
 const ONLINE_DDL_LOCK_TIMEOUT = '1s';
 export const REMOVE_FREE_FRESH_INSTALL_GUC = 'pylva.remove_free_fresh_install';
 const REMOVE_FREE_EXPAND_MIGRATIONS = new Set([
-  '056_workspace_access_state_expand.sql',
+  WORKSPACE_ACCESS_STATE_EXPAND_MIGRATION,
   '057_hosted_workspace_entitlements.sql',
 ]);
 const REMOVE_FREE_CONTRACT_MIGRATIONS = new Set([
-  '058_remove_free_plan_contract.sql',
+  REMOVE_FREE_PLAN_CONTRACT_MIGRATION,
   '059_hosted_remove_free_contract.sql',
 ]);
 const REMOVE_FREE_RESERVED_PREFIX = /^(056|057|058|059)_/;
@@ -715,10 +717,13 @@ function backfillCount(row: Record<string, unknown> | undefined): number {
 
 export function onlineMigrationLockTimeout(filename: string): string | undefined {
   // Migration 054 transfers ownership of every legacy application relation.
-  // Each ALTER OWNER needs ACCESS EXCLUSIVE, so fail fast instead of letting a
-  // queued lock request stall new application reads for the default 30 seconds.
+  // Migrations 056 and 058 alter builders while authentication and lifecycle
+  // reads remain live. Their ACCESS EXCLUSIVE requests must fail fast instead
+  // of letting a queued request stall later reads for the default 30 seconds.
   return filename === UNIVERSAL_API_KEY_SCOPE_MIGRATION ||
-    filename === GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION
+    filename === GENERAL_APP_RUNTIME_OWNER_BOUNDARY_MIGRATION ||
+    filename === WORKSPACE_ACCESS_STATE_EXPAND_MIGRATION ||
+    filename === REMOVE_FREE_PLAN_CONTRACT_MIGRATION
     ? ONLINE_DDL_LOCK_TIMEOUT
     : undefined;
 }
