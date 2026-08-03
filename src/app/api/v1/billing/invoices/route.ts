@@ -162,15 +162,22 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ invoices: results }, { status: 201 });
   } catch (err) {
     if (err instanceof BillingError || isStripeConfigurationError(err)) {
-      try {
-        await releaseClaim({ builderId: ctx.builderId, key: idempotencyKey, bodyHash });
-      } catch (releaseErr) {
-        const releaseMessage =
-          releaseErr instanceof Error ? releaseErr.message : String(releaseErr);
-        log.warn(
-          { builder_id: ctx.builderId, error: releaseMessage },
-          'failed to release invoice idempotency claim after billing preflight error',
-        );
+      // Workspace access is re-checked before every external Stripe write, so
+      // this error can occur after an earlier auto-split slice was persisted.
+      // Keep the claim in that case: a same-key retry will reuse the original
+      // draft namespace, return existing slices, and create only missing ones.
+      // Releasing it would mint a new namespace and duplicate completed slices.
+      if (!(err instanceof BillingError && err.code === 'workspace_access_unavailable')) {
+        try {
+          await releaseClaim({ builderId: ctx.builderId, key: idempotencyKey, bodyHash });
+        } catch (releaseErr) {
+          const releaseMessage =
+            releaseErr instanceof Error ? releaseErr.message : String(releaseErr);
+          log.warn(
+            { builder_id: ctx.builderId, error: releaseMessage },
+            'failed to release invoice idempotency claim after billing preflight error',
+          );
+        }
       }
       if (isStripeConfigurationError(err)) {
         return apiError(503, 'api_error', ErrorCode.INTERNAL_ERROR, err.message, 'stripe');

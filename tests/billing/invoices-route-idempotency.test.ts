@@ -50,7 +50,8 @@ vi.mock('@/lib/billing/invoice-generator', () => {
         | 'projection_pending'
         | 'period_not_closed'
         | 'usage_unbillable'
-        | 'invalid_period',
+        | 'invalid_period'
+        | 'workspace_access_unavailable',
       message: string,
     ) {
       super(message);
@@ -299,6 +300,59 @@ describe('POST /api/v1/billing/invoices idempotency', () => {
       invoiceId: '33333333-3333-4333-8333-333333333333',
     });
     expect(mocks.releaseClaim).not.toHaveBeenCalled();
+  });
+
+  it('keeps the claim when access is revoked after an auto-split slice', async () => {
+    mocks.checkOrClaim
+      .mockResolvedValueOnce({ status: 'new', claimCreatedAt: FIRST_CLAIM_CREATED_AT })
+      .mockResolvedValueOnce({
+        status: 'replay',
+        invoiceId: null,
+        claimCreatedAt: FIRST_CLAIM_CREATED_AT,
+      });
+    mocks.generateInvoice
+      .mockRejectedValueOnce(
+        new BillingError(
+          'workspace_access_unavailable',
+          'Workspace access was revoked after slice 1 persisted',
+        ),
+      )
+      .mockResolvedValueOnce([
+        {
+          invoice_id: '33333333-3333-4333-8333-333333333333',
+          stripe_invoice_id: 'in_slice_1',
+          amount_usd: 10,
+          has_unpriced_events: false,
+          billing_cycle_id: '55555555-5555-4555-8555-555555555555',
+        },
+        {
+          invoice_id: '44444444-4444-4444-8444-444444444444',
+          stripe_invoice_id: 'in_slice_2',
+          amount_usd: 20,
+          has_unpriced_events: false,
+          billing_cycle_id: '55555555-5555-4555-8555-555555555555',
+        },
+      ]);
+
+    const interrupted = await POST(makeRequest('suspended-split-key'));
+    const response = await POST(makeRequest('suspended-split-key'));
+
+    expect(interrupted.status).toBe(400);
+    expect(response.status).toBe(201);
+    expect(mocks.releaseClaim).not.toHaveBeenCalled();
+    expect(mocks.generateInvoice).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ draftKeyBase: 'oneoff:stable-draft-key-hash' }),
+    );
+    expect(mocks.generateInvoice).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ draftKeyBase: 'oneoff:stable-draft-key-hash' }),
+    );
+    expect(mocks.commitClaim).toHaveBeenCalledWith({
+      builderId: mocks.builderId,
+      key: 'suspended-split-key',
+      invoiceId: '33333333-3333-4333-8333-333333333333',
+    });
   });
 
   it('uses a fresh draft namespace when the same key is reused after claim expiry', async () => {
