@@ -175,7 +175,13 @@ export function attachPylvaMetadata<T extends object>(
   response: T,
   metadata: PylvaResponseMetadata,
 ): T & { _pylva: PylvaResponseMetadata } {
-  return Object.assign(response, { _pylva: metadata });
+  try {
+    return Object.assign(response, { _pylva: metadata });
+  } catch {
+    // Frozen, sealed, and guarded provider responses must still reach the host
+    // unchanged. Metadata decoration is instrumentation and therefore R1-safe.
+    return response as T & { _pylva: PylvaResponseMetadata };
+  }
 }
 
 /**

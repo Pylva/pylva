@@ -130,6 +130,26 @@ describe('openai v5 instance-field shape', () => {
     expect(event.tokens_out).toBe(3);
   });
 
+  it('returns a frozen provider response when metadata cannot be attached', async () => {
+    const response = Object.freeze({
+      model: 'gpt-4o-mini',
+      usage: { prompt_tokens: 7, completion_tokens: 3 },
+    });
+    const { OpenAI, Completions } = buildV5Peer(vi.fn(async () => response));
+    vi.mocked(loadPeer).mockImplementation((spec: string) => {
+      if (spec === 'openai') return { default: OpenAI };
+      if (spec === 'openai/resources/chat/completions') return { Completions };
+      return undefined;
+    });
+
+    applyOpenAiPatch();
+
+    await expect(new OpenAI().chat.completions.create({ model: 'gpt-4o-mini' })).resolves.toBe(
+      response,
+    );
+    expect(vi.mocked(enqueue)).toHaveBeenCalledTimes(1);
+  });
+
   it('preserves native APIPromise asResponse/withResponse on the legacy auto patch', async () => {
     const data = {
       model: 'gpt-4o-mini',
@@ -297,6 +317,26 @@ describe('anthropic instance-field shape', () => {
     expect(event.provider).toBe('anthropic');
     expect(event.tokens_in).toBe(11);
     expect(event.tokens_out).toBe(5);
+  });
+
+  it('returns a frozen provider response when metadata cannot be attached', async () => {
+    const response = Object.freeze({
+      model: 'claude-3-5-sonnet-20241022',
+      usage: { input_tokens: 11, output_tokens: 5 },
+    });
+    const { Anthropic, Messages } = buildV5Peer(vi.fn(async () => response));
+    vi.mocked(loadPeer).mockImplementation((spec: string) => {
+      if (spec === '@anthropic-ai/sdk') return { default: Anthropic };
+      if (spec === '@anthropic-ai/sdk/resources/messages') return { Messages };
+      return undefined;
+    });
+
+    applyAnthropicPatch();
+
+    await expect(
+      new Anthropic().messages.create({ model: 'claude-3-5-sonnet-20241022' }),
+    ).resolves.toBe(response);
+    expect(vi.mocked(enqueue)).toHaveBeenCalledTimes(1);
   });
 
   it('preserves APIPromise helpers used by native messages.stream()', async () => {
